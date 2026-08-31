@@ -11,11 +11,119 @@ use super::helpers::{
 
 const RESULTS_PER_PAGE: usize = 48;
 
+/// A category the search can be narrowed to: one of iHerb's numeric category
+/// ids, which is the only thing its `cids` parameter accepts.
+///
+/// A newtype rather than a `String` so a slug cannot reach the URL builder.
+/// That is exactly what #4 was: `--category supplements` produced
+/// `cids=supplements`, which iHerb ignores, so the search silently returned
+/// everything while the caller believed it had filtered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CategoryId(String);
+
+impl CategoryId {
+    /// Resolve a `--category` argument to a category id.
+    ///
+    /// A numeric id is taken as given — the site's own facet links carry those,
+    /// and any id we do not know a name for still works. A name is looked up in
+    /// [`CATEGORY_ALIASES`]. Anything else is an error: the one thing this must
+    /// not do is pass the argument through and let the search quietly ignore it.
+    pub fn resolve(input: &str) -> anyhow::Result<Self> {
+        let trimmed = input.trim();
+        if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+            return Ok(Self(trimmed.to_string()));
+        }
+
+        let wanted = trimmed.to_ascii_lowercase();
+        if let Some((_, id)) = CATEGORY_ALIASES.iter().find(|(slug, _)| *slug == wanted) {
+            return Ok(Self((*id).to_string()));
+        }
+
+        anyhow::bail!(
+            "Unknown --category {:?}. Use a numeric iHerb category id, or one of: {}",
+            input,
+            CATEGORY_ALIASES
+                .iter()
+                .map(|(slug, _)| *slug)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CategoryId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Names for the categories iHerb's own pages name, `(slug, cids)`.
+///
+/// **Every id here was read off a captured page**, not looked up or guessed:
+/// the departments come from the category facet on `search-vitamin-c`, the
+/// supplement categories from the same facet on `category-supplements`, and
+/// `tests/parsers/search.rs` checks each row against those pages. The slugs are
+/// ours — iHerb publishes a title, not a slug, for these — and are derived from
+/// the title mechanically: any parenthesised gloss dropped, apostrophes dropped
+/// outright, everything else that is not a letter or a digit hyphenated,
+/// lowercased. `slugify` in `tests/parsers/search.rs` is that rule written out,
+/// and it is checked against every row. The naming is the one invented thing in this
+/// table, and it is a name for the CLI rather than a claim about the site.
+///
+/// It is an alias table, not a catalogue: a category with no row here is still
+/// reachable by its numeric id. #21's `catalog` command is what replaces
+/// looking ids up by hand.
+///
+/// One name is deliberately missing. The nav on both captures links
+/// `/c/mushrooms?cids=101022`, while the category facet calls 100945
+/// "Mushrooms" — two ids, one name, and no capture says which one `--category
+/// mushrooms` should mean. Guessing would be the same class of mistake as #4
+/// itself, so `mushrooms` resolves to neither and both ids still work.
+pub const CATEGORY_ALIASES: &[(&str, &str)] = &[
+    // Departments: the top level of the category facet, parent id 1475.
+    ("supplements", "1855"),
+    ("sports", "101046"),
+    ("baby-kids", "2089"),
+    ("beauty", "100483"),
+    ("bath-personal-care", "100477"),
+    ("grocery", "2992"),
+    ("home", "2203"),
+    ("pets", "2236"),
+    ("gifts", "100529"),
+    // Under Supplements (1855).
+    ("herbs", "2282"),
+    ("vitamins", "101072"),
+    ("gut-health", "8736"),
+    ("brain-cognitive", "105803"),
+    ("minerals", "1800"),
+    ("antioxidants", "1476"),
+    ("bone-joint-cartilage", "100727"),
+    ("amino-acids", "1694"),
+    ("childrens-health", "100349"),
+    ("sleep", "8738"),
+    ("greens-superfoods", "100858"),
+    ("womens-health", "8741"),
+    ("protein", "101005"),
+    ("weight-management", "100804"),
+    ("omegas-fish-oils", "1542"),
+    ("hair-skin-nails", "100861"),
+    ("mens-health", "3282"),
+    ("detox-cleanse-formulas", "100800"),
+    ("eye-ear-nose", "100821"),
+    ("bee-products", "1930"),
+    ("phospholipids", "102094"),
+    ("organ-meats", "107073"),
+];
+
 pub fn build_search_url(
     base_url: &str,
     query: &str,
     sort: SortOrder,
-    category: Option<&str>,
+    category: Option<&CategoryId>,
     page_num: usize,
 ) -> String {
     let sort_param = sort.as_url_param();

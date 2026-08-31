@@ -52,7 +52,7 @@ iherb-cli search "protein" --category supplements --sort best-selling
 |---|---|---|
 | `--limit <n>` | Max results to return (paginates automatically) | 20 |
 | `--sort <method>` | `relevance`, `featured`, `best-selling`, `rating`, `most-rated`, `price-asc`, `price-desc`, `newest`, `highest-discount` | `relevance` |
-| `--category <slug>` | Filter by category (e.g., `supplements`, `vitamins`) | — |
+| `--category <slug\|id>` | Filter by category name (`supplements`, `vitamins`, `protein`, …) or numeric iHerb category id (`1855`). An unknown name is an error, not a silent no-op; the message lists the names that work. | — |
 
 **Example output:**
 

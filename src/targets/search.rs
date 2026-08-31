@@ -10,12 +10,13 @@ use crate::config::AppConfig;
 use crate::fetch::{FetchTarget, Paging};
 use crate::model::{ProductSummary, SearchResult};
 use crate::scraper;
+use crate::scraper::search::CategoryId;
 
 pub struct SearchTarget {
     query: String,
     limit: usize,
     sort: SortOrder,
-    category: Option<String>,
+    category: Option<CategoryId>,
     base_url: String,
     currency: String,
 }
@@ -43,11 +44,17 @@ impl SearchTarget {
             anyhow::bail!("Limit must be at least 1");
         }
 
+        // Resolved here rather than at the URL builder so an unusable
+        // `--category` fails before anything launches a browser, and so the
+        // cache key names the id the request will actually carry: `supplements`
+        // and `1855` are the same fetch and share an entry (#4).
+        let category = category.map(CategoryId::resolve).transpose()?;
+
         Ok(Self {
             query: query.to_string(),
             limit,
             sort,
-            category: category.map(str::to_string),
+            category,
             base_url: config.base_url(),
             currency: config.currency.clone(),
         })
@@ -70,7 +77,7 @@ impl FetchTarget for SearchTarget {
         CacheKey::Search {
             query: self.query.clone(),
             sort: self.sort,
-            category: self.category.clone(),
+            category: self.category.as_ref().map(|c| c.as_str().to_string()),
         }
     }
 
@@ -79,7 +86,7 @@ impl FetchTarget for SearchTarget {
             &self.base_url,
             &self.query,
             self.sort,
-            self.category.as_deref(),
+            self.category.as_ref(),
             page_num,
         )
     }

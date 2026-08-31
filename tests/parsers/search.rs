@@ -8,10 +8,14 @@
 use std::collections::BTreeMap;
 
 use iherb_cli::cli::SortOrder;
-use iherb_cli::scraper::search::{build_search_url, pages_needed, parse_search_from_html};
+use iherb_cli::fetch::FetchTarget;
+use iherb_cli::scraper::search::{
+    build_search_url, pages_needed, parse_search_from_html, CategoryId, CATEGORY_ALIASES,
+};
+use iherb_cli::targets::SearchTarget;
 use scraper::Selector;
 
-use crate::fixture::{BASE_URL, SEARCH_VITAMIN_C};
+use crate::fixture::{BASE_URL, CATEGORY_SUPPLEMENTS, SEARCH_VITAMIN_C};
 
 // ---------------------------------------------------------------------------
 // parse_search_from_html
@@ -291,26 +295,41 @@ fn every_sort_has_a_distinct_cache_key() {
     assert_eq!(SortOrder::Featured.as_cache_key(), "featured");
 }
 
-/// CHARACTERIZATION, NOT DESIRED: pins the #4 bug against the page that proves
-/// it. `cids` is a numeric category-id list — every facet link on the captured
-/// search page uses one — but `--category` puts its argument in verbatim, so
-/// the documented `--category supplements` emits `cids=supplements`.
+/// #4, landed. `cids` is a numeric category-id list — every facet link on the
+/// captured search page uses one — and `--category` used to put its argument in
+/// verbatim, so the documented `--category supplements` emitted
+/// `cids=supplements`, which iHerb ignores. The search returned everything and
+/// the caller believed it had filtered.
 ///
-/// #4 flips this: a slug either resolves to an id or the command errors. Do not
-/// "fix" `build_search_url` to satisfy this test; fix the test when #4 lands.
+/// A slug now resolves to an id or the command fails; nothing else reaches the
+/// URL, because [`CategoryId`] is the only thing `build_search_url` accepts.
 #[test]
-fn category_slugs_go_into_cids_unresolved() {
+fn a_category_slug_resolves_to_the_id_cids_expects() {
+    let supplements = CategoryId::resolve("supplements").expect("a documented slug must resolve");
     let url = build_search_url(
         BASE_URL,
         "vitamin c",
         SortOrder::Rating,
-        Some("supplements"),
+        Some(&supplements),
         1,
     );
     assert_eq!(
         url,
-        "https://www.iherb.com/search?kw=vitamin+c&sr=1&cids=supplements"
+        "https://www.iherb.com/search?kw=vitamin+c&sr=1&cids=1855"
     );
+
+    // A numeric id is a category too: the site's own facet links carry those,
+    // and an id with no name in the table still has to work.
+    let professional_brands = CategoryId::resolve("107703").unwrap();
+    assert_eq!(professional_brands.as_str(), "107703");
+    assert!(build_search_url(
+        BASE_URL,
+        "vitamin c",
+        SortOrder::Rating,
+        Some(&professional_brands),
+        1
+    )
+    .ends_with("&cids=107703"));
 
     let facets = category_ids_on_the_page();
     assert!(
@@ -325,6 +344,190 @@ fn category_slugs_go_into_cids_unresolved() {
         facets
     );
     assert!(!facets.contains(&"supplements".to_string()));
+}
+
+/// An unresolvable `--category` is an error, not a silent no-op. That is the
+/// half of #4 that matters most: a filter that cannot be honoured must say so,
+/// because a caller cannot tell a search that ignored its filter from one that
+/// honoured it and found everything anyway.
+#[test]
+fn an_unresolvable_category_is_refused() {
+    for input in ["not-a-category", "", "   ", "1855abc", "supplements!"] {
+        let err = CategoryId::resolve(input)
+            .expect_err(&format!("{:?} must not resolve", input))
+            .to_string();
+        assert!(err.contains("Unknown --category"), "{}", err);
+        // The message has to be usable: it names what does work.
+        assert!(err.contains("supplements"), "{}", err);
+    }
+
+    // And it fails at the target, before anything launches a browser.
+    let config = search_config();
+    assert!(SearchTarget::new(
+        &config,
+        "vitamin c",
+        20,
+        SortOrder::Relevance,
+        Some("not-a-category")
+    )
+    .is_err());
+}
+
+/// Both spellings of the same category are the same request, so they are the
+/// same cache entry rather than two copies of one fetch.
+#[test]
+fn a_slug_and_its_id_are_the_same_request() {
+    let config = search_config();
+    let by_slug = SearchTarget::new(
+        &config,
+        "vitamin c",
+        20,
+        SortOrder::Rating,
+        Some("supplements"),
+    )
+    .unwrap();
+    let by_id =
+        SearchTarget::new(&config, "vitamin c", 20, SortOrder::Rating, Some("1855")).unwrap();
+
+    assert_eq!(by_slug.url(1), by_id.url(1));
+    assert!(by_slug.url(1).contains("&cids=1855"));
+    assert_eq!(
+        by_slug.cache_key().file_name(),
+        by_id.cache_key().file_name()
+    );
+
+    // A different category is a different entry.
+    let other =
+        SearchTarget::new(&config, "vitamin c", 20, SortOrder::Rating, Some("herbs")).unwrap();
+    assert_ne!(
+        by_slug.cache_key().file_name(),
+        other.cache_key().file_name()
+    );
+}
+
+/// Every id in the alias table was read off a captured page.
+///
+/// This is what stops the table becoming a list of plausible numbers. Each row
+/// has to appear in one of the two captures' category facets, under a title the
+/// slug is derived from — so a row nobody can point at a page for fails here,
+/// and a slug quietly repointed at a different id fails too.
+#[test]
+fn every_category_alias_is_a_category_the_captured_pages_name() {
+    let named = categories_named_by_the_captured_pages();
+
+    for (slug, id) in CATEGORY_ALIASES {
+        let title = named
+            .get(*id)
+            .unwrap_or_else(|| panic!("no captured page names category {} ({})", id, slug));
+        assert_eq!(
+            &slugify(title),
+            slug,
+            "category {} is titled {:?} on the page",
+            id,
+            title
+        );
+    }
+
+    // No two names for one id, and no id under two names.
+    let slugs: std::collections::BTreeSet<_> = CATEGORY_ALIASES.iter().map(|(s, _)| *s).collect();
+    let ids: std::collections::BTreeSet<_> = CATEGORY_ALIASES.iter().map(|(_, i)| *i).collect();
+    assert_eq!(slugs.len(), CATEGORY_ALIASES.len());
+    assert_eq!(ids.len(), CATEGORY_ALIASES.len());
+}
+
+/// `mushrooms` is the one name the captures disagree about: the nav links
+/// `/c/mushrooms?cids=101022`, the category facet titles 100945 "Mushrooms".
+/// Nothing says which one `--category mushrooms` should mean, so it resolves to
+/// neither — and both ids still work as ids.
+#[test]
+fn the_ambiguous_name_is_left_unresolved() {
+    assert!(CategoryId::resolve("mushrooms").is_err());
+    assert_eq!(CategoryId::resolve("101022").unwrap().as_str(), "101022");
+    assert_eq!(CategoryId::resolve("100945").unwrap().as_str(), "100945");
+
+    assert!(SEARCH_VITAMIN_C.html().contains("/c/mushrooms?cids=101022"));
+    assert_eq!(
+        categories_named_by_the_captured_pages()
+            .get("100945")
+            .map(String::as_str),
+        Some("Mushrooms")
+    );
+}
+
+/// A config for the target-level assertions above. `SearchTarget` needs one and
+/// nothing here touches the cache directory it names.
+fn search_config() -> iherb_cli::config::AppConfig {
+    iherb_cli::config::AppConfig {
+        country: "us".to_string(),
+        currency: "USD".to_string(),
+        no_cache: false,
+        delay_ms: 0,
+        debug: false,
+        browser_path: None,
+        cache_dir: std::path::PathBuf::from("/nonexistent"),
+        data_dir: std::path::PathBuf::from("/nonexistent"),
+    }
+}
+
+/// Category id to title, from the category facet on every captured page that
+/// has one. This is where the alias table's ids come from.
+fn categories_named_by_the_captured_pages() -> BTreeMap<String, String> {
+    let sel = Selector::parse("[data-category-id][title]").unwrap();
+    let mut out = BTreeMap::new();
+    for fixture in [SEARCH_VITAMIN_C, CATEGORY_SUPPLEMENTS] {
+        let doc = fixture.doc();
+        for el in doc.select(&sel) {
+            let (Some(id), Some(title)) = (
+                el.value().attr("data-category-id"),
+                el.value().attr("title"),
+            ) else {
+                continue;
+            };
+            out.insert(id.to_string(), title.to_string());
+        }
+    }
+    out
+}
+
+/// The slug rule the alias table follows: drop any parenthesised gloss, drop
+/// apostrophes without leaving a gap, lowercase, and hyphenate everything else
+/// that is not a letter or a digit.
+///
+/// The two exceptions earn their place. An apostrophe that leaves a gap turns
+/// "Children's Health" into `children-s-health`, and the gloss in "Omegas &
+/// Fish Oils (EPA DHA)" is an explanation rather than part of the name.
+fn slugify(title: &str) -> String {
+    let without_gloss: String = {
+        let mut out = String::new();
+        let mut depth = 0usize;
+        for ch in title.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                _ if depth == 0 => out.push(ch),
+                _ => {}
+            }
+        }
+        out
+    };
+
+    let mut out = String::new();
+    let mut pending_gap = false;
+    for ch in without_gloss.chars() {
+        match ch {
+            // Dropped outright, so a possessive does not become its own word.
+            '\'' | '\u{2019}' => {}
+            c if c.is_ascii_alphanumeric() => {
+                if pending_gap && !out.is_empty() {
+                    out.push('-');
+                }
+                pending_gap = false;
+                out.push(c.to_ascii_lowercase());
+            }
+            _ => pending_gap = true,
+        }
+    }
+    out
 }
 
 /// The `cids` values the captured search page links to.

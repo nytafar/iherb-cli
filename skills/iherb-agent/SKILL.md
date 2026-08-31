@@ -22,7 +22,10 @@ iherb-cli search "<query>" [--limit <n>] [--sort <method>] [--category <slug>]
   site shows when no sort is asked for. `most-rated` orders by number of reviews,
   which is usually what "well established" means — `rating` surfaces 5.0/5
   products with three reviews.
-- `--category`: filter by category slug (e.g., `supplements`, `vitamins`, `protein`)
+- `--category`: filter by category name (e.g. `supplements`, `vitamins`, `protein`,
+  `herbs`, `minerals`, `sports`) or by a numeric iHerb category id (e.g. `1855`).
+  A name the CLI does not know is an error and the message lists the ones it does,
+  so a filter is never silently dropped.
 
 Output: Markdown list with name, brand, price, rating, review count, product ID, URL.
 
