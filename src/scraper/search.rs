@@ -45,9 +45,14 @@ fn urlencoded(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
-/// Extract search results from a page, trying data attributes first, then __NEXT_DATA__, then DOM text.
+/// Extract search results from a page.
+///
+/// There is exactly one strategy: read the product cards out of the DOM.
+/// `_page` is unused today and kept so a future strategy that has to evaluate
+/// JS on the live page (a `__NEXT_DATA__`-style blob, an XHR payload) can be
+/// added without changing every caller.
 pub async fn extract_search(
-    page: &Page,
+    _page: &Page,
     html: &str,
     query: &str,
     base_url: &str,
@@ -55,137 +60,8 @@ pub async fn extract_search(
 ) -> Result<SearchResult, IherbError> {
     debug_dump_html(html, &format!("search_{}", query.replace(' ', "_")));
 
-    // Try __NEXT_DATA__ first (may exist on some page versions)
-    if let Ok(Some(next_data)) = super::extract::extract_next_data(page).await {
-        tracing::debug!("Attempting __NEXT_DATA__ extraction for search");
-        if let Some(result) = parse_search_from_next_data(&next_data, query, base_url) {
-            tracing::info!("Successfully extracted search results from __NEXT_DATA__");
-            return Ok(result);
-        }
-        tracing::warn!("__NEXT_DATA__ search extraction failed, falling back to DOM");
-    }
-
     tracing::info!("Extracting search results from DOM");
     parse_search_from_html(html, query, base_url, currency)
-}
-
-/// Parse search results from __NEXT_DATA__ JSON.
-pub fn parse_search_from_next_data(
-    data: &serde_json::Value,
-    query: &str,
-    base_url: &str,
-) -> Option<SearchResult> {
-    let props = data.get("props")?.get("pageProps")?;
-
-    let products_arr = props
-        .get("products")
-        .or_else(|| props.get("searchResults"))
-        .or_else(|| props.get("items"))
-        .and_then(|v| v.as_array())?;
-
-    let total = props
-        .get("totalResults")
-        .or_else(|| props.get("totalCount"))
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
-
-    let products: Vec<ProductSummary> = products_arr
-        .iter()
-        .filter_map(|item| parse_product_summary_json(item, base_url))
-        .collect();
-
-    if products.is_empty() {
-        return None;
-    }
-
-    Some(SearchResult {
-        query: query.to_string(),
-        total_results: total,
-        products,
-    })
-}
-
-fn parse_product_summary_json(item: &serde_json::Value, base_url: &str) -> Option<ProductSummary> {
-    let name = item
-        .get("title")
-        .or_else(|| item.get("name"))
-        .and_then(|v| v.as_str())?
-        .to_string();
-
-    let brand = item
-        .get("brandName")
-        .or_else(|| {
-            item.get("brand")
-                .and_then(|b| b.get("name"))
-                .or_else(|| item.get("brand"))
-        })
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let product_id = item
-        .get("id")
-        .or_else(|| item.get("productId"))
-        .and_then(|v| {
-            v.as_str()
-                .map(|s| s.to_string())
-                .or_else(|| v.as_u64().map(|n| n.to_string()))
-        })?;
-
-    let price = item
-        .get("price")
-        .or_else(|| item.get("discountPrice"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-
-    let original_price = item
-        .get("listPrice")
-        .or_else(|| item.get("retailPrice"))
-        .and_then(|v| v.as_f64())
-        .filter(|&p| p > price);
-
-    let currency = item
-        .get("currency")
-        .and_then(|v| v.as_str())
-        .unwrap_or("USD")
-        .to_string();
-
-    let rating = item.get("rating").and_then(|v| v.as_f64());
-    let review_count = item
-        .get("reviewCount")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
-
-    let in_stock = item
-        .get("inStock")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-
-    let product_url = item
-        .get("url")
-        .or_else(|| item.get("productUrl"))
-        .and_then(|v| v.as_str())
-        .map(|u| {
-            if u.starts_with("http") {
-                u.to_string()
-            } else {
-                format!("{}{}", base_url, u)
-            }
-        })
-        .unwrap_or_else(|| format!("{}/pr/p/{}", base_url, product_id));
-
-    Some(ProductSummary {
-        name,
-        brand,
-        price,
-        original_price,
-        currency,
-        rating,
-        review_count,
-        product_url,
-        product_id,
-        in_stock,
-    })
 }
 
 /// Parse search results from HTML using data attributes and CSS selectors.

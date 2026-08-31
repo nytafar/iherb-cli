@@ -69,19 +69,19 @@ git cat-file blob <blob id> | gzip -9 -n > <slug>.html.gz
 | `search-vitamin-c` | 48 cards, 11,952 results, and the sort dropdown and category facets that #3 and #4 are about |
 | `category-supplements` | nothing parses it yet; kept for the catalog command in #21 |
 
-## The JSON side-fixtures
+## The JSON side-fixture
 
-Two parsers are never fed page HTML, and neither can be filled from these
-captures:
+One parser is never fed page HTML and cannot be filled from these captures:
 
 - `js-globals-12949.json` — `extract_js_globals` evaluates JS in the browser, so
   the loader cannot lift its result out of static HTML. Transcribed verbatim
   from the `window.PRODUCT_DETAILS` / `window.IHR_DL` block in the Nordic page.
-- `next-data-*-synthetic.json` — **synthetic.** None of the seven pages contains
-  a `__NEXT_DATA__` block; iHerb does not serve one, which is what #34 proposes
-  deleting those parsers over. These are written to the parsers' own documented
-  expectations so they have an input at all.
-  `product_json::next_data_is_absent_from_every_captured_page` pins the absence.
+
+There used to be two more, `next-data-*-synthetic.json`, written by hand to the
+`__NEXT_DATA__` parsers' own documented expectations because no captured page
+carried the blob. #34 deleted those parsers and their fixtures;
+`product_json::next_data_is_absent_from_every_captured_page` remains as the
+guard that says the absence still holds.
 
 ## `golden/`
 

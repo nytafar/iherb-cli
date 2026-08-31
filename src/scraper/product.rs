@@ -8,7 +8,13 @@ use super::helpers::{
     parse_review_count,
 };
 
-/// Extract product detail from a page, trying JSON-LD first, then JS globals, then DOM.
+/// Extract product detail from a page.
+///
+/// Three strategies, in order: JSON-LD, then JS globals, then DOM selectors.
+/// JSON-LD is the one that fires on every captured and freshly-fetched page;
+/// the other two are real fallbacks for when it is missing or unparseable.
+/// Whichever wins, the result is enriched from the DOM, so field coverage does
+/// not depend on which strategy got there first.
 pub async fn extract_product(
     page: &Page,
     html: &str,
@@ -41,20 +47,7 @@ pub async fn extract_product(
             tracing::info!("Successfully extracted product from JS globals + DOM enrichment");
             return Ok(product);
         }
-        tracing::warn!("JS globals extraction failed, trying __NEXT_DATA__");
-    }
-
-    // Try __NEXT_DATA__
-    if let Ok(Some(next_data)) = super::extract::extract_next_data(page).await {
-        tracing::debug!(
-            "Attempting __NEXT_DATA__ extraction for product {}",
-            product_id
-        );
-        if let Some(product) = parse_from_next_data(&next_data, product_id, base_url) {
-            tracing::info!("Successfully extracted product from __NEXT_DATA__");
-            return Ok(product);
-        }
-        tracing::warn!("__NEXT_DATA__ extraction failed, falling back to DOM");
+        tracing::warn!("JS globals extraction failed, falling back to DOM");
     }
 
     // Fallback to DOM scraping
@@ -467,128 +460,6 @@ pub fn extract_spec(doc: &Html, label: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// Parse product detail from __NEXT_DATA__ JSON (kept as fallback).
-pub fn parse_from_next_data(
-    data: &serde_json::Value,
-    product_id: &str,
-    base_url: &str,
-) -> Option<ProductDetail> {
-    let props = data.get("props")?.get("pageProps")?;
-
-    let product = props
-        .get("product")
-        .or_else(|| props.get("productData"))
-        .or_else(|| props.get("initialProduct"))?;
-
-    let name = product
-        .get("title")
-        .or_else(|| product.get("name"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    if name.is_empty() {
-        return None;
-    }
-
-    let brand = product
-        .get("brandName")
-        .or_else(|| product.get("brand").and_then(|b| b.get("name")))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let price = product
-        .get("price")
-        .or_else(|| product.get("discountPrice"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-
-    let original_price = product
-        .get("listPrice")
-        .or_else(|| product.get("retailPrice"))
-        .and_then(|v| v.as_f64())
-        .filter(|&p| p > price);
-
-    let currency = product
-        .get("currency")
-        .and_then(|v| v.as_str())
-        .unwrap_or("USD")
-        .to_string();
-
-    let rating = product
-        .get("rating")
-        .or_else(|| product.get("averageRating"))
-        .and_then(|v| v.as_f64());
-
-    let review_count = product
-        .get("reviewCount")
-        .or_else(|| product.get("numberOfReviews"))
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
-
-    let in_stock = product
-        .get("inStock")
-        .or_else(|| product.get("isInStock"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-
-    let description = product
-        .get("description")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let product_code = product
-        .get("partNumber")
-        .or_else(|| product.get("productCode"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let upc = product
-        .get("upc")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let ingredients = product
-        .get("ingredients")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let suggested_use = product
-        .get("suggestedUse")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let warnings = product
-        .get("warnings")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let shipping_weight = product
-        .get("shippingWeight")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let product_url = format!("{}/pr/p/{}", base_url, product_id);
-
-    Some(ProductDetail {
-        name,
-        brand,
-        price,
-        original_price,
-        currency,
-        rating,
-        review_count,
-        product_url,
-        product_id: product_id.to_string(),
-        in_stock,
-        description,
-        product_code,
-        upc,
-        ingredients,
-        supplement_facts: None,
-        suggested_use,
-        warnings,
-        shipping_weight,
-        category_breadcrumb: None,
-        review_distribution: None,
-    })
 }
 
 /// Fallback: Parse product detail from HTML using CSS selectors.

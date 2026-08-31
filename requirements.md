@@ -215,6 +215,12 @@ Preferred extraction methods (in order of preference):
 2. **Internal XHR/API responses** — Intercept network requests the frontend makes to internal APIs and capture the JSON responses.
 3. **DOM scraping** — As a fallback, extract data from HTML elements using CSS selectors.
 
+> **Correction (#34).** Assumption 1 was wrong. iHerb serves no `__NEXT_DATA__`
+> block: not on any of the seven pages in `tests/fixtures/`, and not on pages
+> fetched live in August 2026. The parsers written against it never fired once
+> and have been deleted. What ships is JSON-LD → JS globals → DOM for a product
+> page, and DOM only for a search page. See `README.md` for the current chain.
+
 ### 6.3 Rate limiting & request behavior
 - **Default delay of 2 seconds** between requests — safe for Cloudflare, no tuning needed by agents
 - Configurable via `--delay <ms>` flag for power users (e.g., `--delay 500` for faster, `--delay 5000` for safer)

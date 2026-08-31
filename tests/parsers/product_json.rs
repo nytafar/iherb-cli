@@ -1,14 +1,12 @@
-//! The parsers fed JSON rather than page HTML: `parse_from_json_ld`,
-//! `parse_from_js_globals`, `parse_from_next_data`.
+//! The parsers fed JSON rather than page HTML: `parse_from_json_ld` and
+//! `parse_from_js_globals`.
 //!
 //! JSON-LD is the path production actually takes for every product page — all
 //! five captures carry a complete `Product` block — so it gets the most
-//! coverage. The other two are fed side-fixtures; see `tests/fixtures/*.json`
-//! for where each one's contents came from.
+//! coverage. `parse_from_js_globals` is fed a side-fixture transcribed from a
+//! captured page's inline `<script>`; see `tests/fixtures/README.md`.
 
-use iherb_cli::scraper::product::{
-    parse_from_js_globals, parse_from_json_ld, parse_from_next_data,
-};
+use iherb_cli::scraper::product::{parse_from_js_globals, parse_from_json_ld};
 
 use crate::fixture::{self, BASE_URL, B_COMPLEX, GOLD_C_POWDER, OLLY_GUMMIES, TWO_A_DAY};
 
@@ -124,53 +122,20 @@ fn js_globals_parse_when_the_expected_key_is_present() {
     assert_eq!(product.currency, "CHF");
 }
 
-/// No captured page contains a `__NEXT_DATA__` block: iHerb does not serve one.
-/// Both `__NEXT_DATA__` parsers are therefore unreachable in production today
-/// and can only be tested against the synthetic fixtures below — which is the
-/// evidence #34 proposes deleting them on. If this test ever fails, iHerb has
-/// changed platform, the parsers become live code, and #34 is moot.
+/// #34 deleted the `__NEXT_DATA__` parsers. This is the guard that says so:
+/// no captured page has ever carried the blob, and a live check on two freshly
+/// fetched product pages and one search page on 2026-08-31 found none either.
+/// If this test ever fails, iHerb has changed platform and the parsers are
+/// worth writing again — against a real fixture this time, which is what git
+/// history holds the deleted versions for.
 #[test]
 fn next_data_is_absent_from_every_captured_page() {
     for f in fixture::all() {
         assert!(
             !f.html().contains("__NEXT_DATA__"),
-            "{} now contains __NEXT_DATA__",
+            "{} now contains __NEXT_DATA__ — see #34 before assuming the \
+             parsers stay deleted",
             f.slug()
         );
     }
-}
-
-#[test]
-fn next_data_reads_a_product() {
-    let data = fixture::json("next-data-product-synthetic");
-    let product = parse_from_next_data(&data, "1", BASE_URL).unwrap();
-
-    assert_eq!(
-        product.name,
-        "Synthetic Brand, Synthetic Product, 60 Capsules"
-    );
-    assert_eq!(product.brand, "Synthetic Brand");
-    assert_eq!(product.price, 12.5);
-    assert_eq!(product.original_price, Some(19.99));
-    assert_eq!(product.currency, "CHF");
-    assert_eq!(product.rating, Some(4.25));
-    assert_eq!(product.review_count, Some(1234));
-    assert!(!product.in_stock);
-    assert_eq!(product.product_code.as_deref(), Some("SYN-00001"));
-    assert_eq!(product.upc.as_deref(), Some("000000000001"));
-    assert_eq!(product.shipping_weight.as_deref(), Some("0.5 lb"));
-
-    // __NEXT_DATA__ is the one strategy `extract_product` does not enrich from
-    // the DOM, so these stay empty however rich the page is.
-    assert!(product.supplement_facts.is_none());
-    assert!(product.review_distribution.is_none());
-}
-
-#[test]
-fn next_data_rejects_anything_it_cannot_find_a_product_in() {
-    assert!(parse_from_next_data(&serde_json::json!({}), "1", BASE_URL).is_none());
-    let no_page_props = serde_json::json!({ "props": {} });
-    assert!(parse_from_next_data(&no_page_props, "1", BASE_URL).is_none());
-    let nameless = serde_json::json!({ "props": { "pageProps": { "product": {} } } });
-    assert!(parse_from_next_data(&nameless, "1", BASE_URL).is_none());
 }

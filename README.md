@@ -171,14 +171,24 @@ Every result includes a `Data from:` timestamp so you know how fresh the data is
 
 iHerb uses Cloudflare anti-bot protection, so simple HTTP requests are blocked. iherb-cli uses a headless Chromium browser (via the Chrome DevTools Protocol) to load pages like a real user.
 
-**Data extraction** uses multiple strategies with automatic fallback:
+**Data extraction** for a product page uses three strategies with automatic
+fallback:
 
-1. **JSON-LD** structured data embedded in the page
-2. **JavaScript globals** (`window.PRODUCT_DETAILS`, etc.)
-3. **`__NEXT_DATA__`** — iHerb's Next.js server-side data
-4. **DOM scraping** — CSS selector-based extraction as a last resort
+1. **JSON-LD** structured data embedded in the page — this is the one that
+   fires today, on every page we have looked at
+2. **JavaScript globals** (`window.IHR_DL.product`, `window.PRODUCT_DETAILS`)
+3. **DOM scraping** — CSS selector-based extraction as a last resort
 
-This layered approach keeps the tool working even when iHerb changes their page structure.
+Whichever wins, the result is then enriched from the DOM, so the fields you get
+do not depend on which strategy got there first.
+
+A search page has one strategy: read the product cards out of the DOM.
+
+There used to be a fourth product rung, `__NEXT_DATA__`. iHerb does not serve
+that blob — not on any of the seven captured pages, and not on pages fetched
+live in August 2026 — so it was never a fallback, only the appearance of one.
+It is deleted rather than left in place, because an advertised fallback that has
+never fired is worse than an honest shorter chain.
 
 ## Claude Code skill
 

@@ -9,7 +9,7 @@
 //! | raw HTML (`parse_from_html`, `parse_search_from_html`) | [`Fixture::html`] |
 //! | a parsed document (`extract_spec`, `parse_supplement_facts_html`, …) | [`Fixture::doc`] |
 //! | the JSON-LD blob (`parse_from_json_ld`) | [`Fixture::json_ld`] |
-//! | a JSON side-fixture (`parse_from_next_data`, `parse_from_js_globals`) | [`json`] |
+//! | a JSON side-fixture (`parse_from_js_globals`) | [`json`] |
 //!
 //! Adding a page is **one line**: drop `<slug>.html.gz` in `tests/fixtures/`
 //! and add a row to the [`registry!`] block below. The named constant, the
@@ -147,10 +147,10 @@ pub const BASE_URL: &str = "https://www.iherb.com";
 
 /// Load a JSON side-fixture from `tests/fixtures/<name>.json`.
 ///
-/// Two parsers are fed JSON that never comes from the page HTML:
-/// `parse_from_js_globals` reads globals the browser evaluates, and
-/// `parse_from_next_data` reads a `__NEXT_DATA__` block no captured page has.
-/// See the files themselves for where each one's contents came from.
+/// One parser is fed JSON that never comes from the page HTML:
+/// `parse_from_js_globals` reads globals the browser evaluates rather than
+/// anything the HTML carries. See `tests/fixtures/README.md` for where the
+/// side-fixture's contents came from.
 pub fn json(name: &str) -> Value {
     let path = format!(
         "{}/tests/fixtures/{}.json",

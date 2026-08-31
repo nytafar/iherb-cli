@@ -1,5 +1,5 @@
-//! The search path: `parse_search_from_html`, `parse_search_from_next_data`,
-//! `build_search_url` and `SortOrder::as_url_param`.
+//! The search path: `parse_search_from_html`, `build_search_url` and
+//! `SortOrder::as_url_param`.
 //!
 //! Several assertions here read the *captured page* for the truth and compare
 //! the CLI against it — that is how #3's and #4's bugs become visible without a
@@ -8,12 +8,10 @@
 use std::collections::BTreeMap;
 
 use iherb_cli::cli::SortOrder;
-use iherb_cli::scraper::search::{
-    build_search_url, pages_needed, parse_search_from_html, parse_search_from_next_data,
-};
+use iherb_cli::scraper::search::{build_search_url, pages_needed, parse_search_from_html};
 use scraper::Selector;
 
-use crate::fixture::{self, BASE_URL, SEARCH_VITAMIN_C};
+use crate::fixture::{BASE_URL, SEARCH_VITAMIN_C};
 
 // ---------------------------------------------------------------------------
 // parse_search_from_html
@@ -112,35 +110,6 @@ fn a_page_with_no_cards_is_an_empty_result_not_an_error() {
     assert!(result.products.is_empty());
     assert_eq!(result.total_results, None);
     assert_eq!(result.query, "nothing");
-}
-
-#[test]
-fn search_next_data_reads_products() {
-    let data = fixture::json("next-data-search-synthetic");
-    let result = parse_search_from_next_data(&data, "vitamin c", BASE_URL).unwrap();
-
-    assert_eq!(result.total_results, Some(4321));
-    assert_eq!(result.products.len(), 2);
-    assert_eq!(result.products[0].product_id, "61864");
-    assert_eq!(result.products[0].price, 5.56);
-    assert_eq!(result.products[0].original_price, Some(7.99));
-    assert_eq!(result.products[0].currency, "CHF");
-    assert_eq!(
-        result.products[0].product_url,
-        "https://www.iherb.com/pr/synthetic/61864"
-    );
-
-    // Second entry uses every alternative key, and has no url of its own.
-    assert_eq!(result.products[1].product_id, "61865");
-    assert_eq!(result.products[1].brand, "Synthetic Brand");
-    assert_eq!(result.products[1].price, 13.11);
-    assert!(!result.products[1].in_stock);
-    assert_eq!(
-        result.products[1].product_url,
-        "https://www.iherb.com/pr/p/61865"
-    );
-
-    assert!(parse_search_from_next_data(&serde_json::json!({}), "q", BASE_URL).is_none());
 }
 
 // ---------------------------------------------------------------------------

@@ -1,18 +1,6 @@
 use crate::error::IherbError;
 use chromiumoxide::Page;
 
-/// Extract __NEXT_DATA__ JSON from the page via JS evaluation.
-pub async fn extract_next_data(page: &Page) -> Result<Option<serde_json::Value>, IherbError> {
-    let script = r#"
-        (function() {
-            var el = document.getElementById('__NEXT_DATA__');
-            if (el) return el.textContent;
-            return null;
-        })()
-    "#;
-    evaluate_and_parse_json(page, script, "__NEXT_DATA__").await
-}
-
 /// Extract JSON-LD structured data from the page.
 pub fn extract_json_ld(html: &str) -> Option<serde_json::Value> {
     let doc = scraper::Html::parse_document(html);
