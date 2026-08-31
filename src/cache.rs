@@ -5,16 +5,36 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+/// The cache layout generation, carried in every file name.
+///
+/// Bumping it abandons every entry on disk rather than reusing it, which is
+/// what a key derivation change has to do: an entry written under an older,
+/// coarser key cannot be shown to belong to the request now asking for it.
+/// `v2` is #1 — the generation in which an entry names the storefront it came
+/// from. `v1` files (`product_61864.json`, `search_<hash>.json`) are never
+/// read again and are left where they are; nothing deletes them, so a stale
+/// `v1` entry costs disk until the user clears the cache directory (#22 adds
+/// the command for that). Abandoning them is the point: a `v1` file cannot say
+/// which storefront it was fetched from, so serving one is guessing.
+const CACHE_GENERATION: &str = "v2";
+
 /// Where a fetched artefact lives in the cache.
 ///
 /// One value per kind of cacheable thing, so a new command declares its cache
 /// identity instead of adding another pair of `get_x`/`set_x` methods.
+///
+/// Every variant names a `country`, because every fetch goes to a per-country
+/// subdomain and comes back with that storefront's prices, currency and
+/// availability. A key that leaves the country out claims two different
+/// documents are the same document (#1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheKey {
     Product {
+        country: String,
         product_id: String,
     },
     Search {
+        country: String,
         query: String,
         sort: SortOrder,
         category: Option<String>,
@@ -22,27 +42,60 @@ pub enum CacheKey {
 }
 
 impl CacheKey {
-    /// The cache file name. The derivation is fixed: changing it orphans every
-    /// entry users already have on disk, which is why #8 pins it from `tests/`
-    /// and #1 will have to version the prefix rather than edit it in place.
+    /// The cache file name.
+    ///
+    /// Every input that changes *which document is fetched* has to appear here,
+    /// or two different documents share one entry and whichever was written
+    /// first is served for both. #1 was exactly that: the key held no country,
+    /// so `--country ch` was handed the cached US record — a USD price labelled
+    /// USD, from a `www.iherb.com` URL, with a plausible `Data from` timestamp
+    /// and no error, for the 30 days of the TTL.
+    ///
+    /// Changing the derivation orphans every entry users already have, which is
+    /// why the name carries [`CACHE_GENERATION`] rather than being edited in
+    /// place, and why #8 pins the derivation from `tests/`.
     pub fn file_name(&self) -> String {
         match self {
-            CacheKey::Product { product_id } => format!("product_{}.json", product_id),
+            CacheKey::Product {
+                country,
+                product_id,
+            } => format!(
+                "{}_product_{}_{}.json",
+                CACHE_GENERATION, country, product_id
+            ),
             CacheKey::Search {
+                country,
                 query,
                 sort,
                 category,
             } => {
+                // Every field is delimited by a NUL that cannot occur in any of
+                // them, and the optional one is tagged present or absent, so
+                // two distinct requests cannot hash alike — not by running
+                // together at a boundary, and not by `--category ""` looking
+                // like no category at all. Same failure class as the country,
+                // one storefront smaller.
                 let mut hasher = Sha256::new();
+                hasher.update(country.as_bytes());
+                hasher.update(b"\0");
                 hasher.update(query.as_bytes());
                 hasher.update(b"\0");
                 hasher.update(sort.as_cache_key().as_bytes());
                 hasher.update(b"\0");
-                if let Some(cat) = category {
-                    hasher.update(cat.as_bytes());
+                match category {
+                    Some(cat) => {
+                        hasher.update(b"1");
+                        hasher.update(cat.as_bytes());
+                    }
+                    None => hasher.update(b"0"),
                 }
                 let result = hasher.finalize();
-                format!("search_{}.json", hex::encode(&result[..8])) // 16 hex chars
+                // 16 hex chars.
+                format!(
+                    "{}_search_{}.json",
+                    CACHE_GENERATION,
+                    hex::encode(&result[..8])
+                )
             }
         }
     }

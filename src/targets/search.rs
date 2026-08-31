@@ -16,6 +16,7 @@ pub struct SearchTarget {
     limit: usize,
     sort: SortOrder,
     category: Option<String>,
+    country: String,
     base_url: String,
     currency: String,
 }
@@ -48,6 +49,7 @@ impl SearchTarget {
             limit,
             sort,
             category: category.map(str::to_string),
+            country: config.country.clone(),
             base_url: config.base_url(),
             currency: config.currency.clone(),
         })
@@ -68,6 +70,7 @@ impl FetchTarget for SearchTarget {
 
     fn cache_key(&self) -> CacheKey {
         CacheKey::Search {
+            country: self.country.clone(),
             query: self.query.clone(),
             sort: self.sort,
             category: self.category.clone(),
