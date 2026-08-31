@@ -109,6 +109,17 @@ pub async fn cmd_product(
     let fetched = fetch(&target, config, browser_session).await?;
 
     print!("{}", output::format_product_detail(&fetched.data, section));
+
+    // The provenance table is reachable from a caller, on demand. #9 renders
+    // the same data as a machine-readable block under `--json`; see
+    // `output::format_extraction_health` for exactly what it has to emit.
+    if config.debug {
+        print!(
+            "\n{}",
+            output::format_extraction_health(&fetched.data.health())
+        );
+    }
+
     println!(
         "\n- **Data from:** {}",
         output::format_cached_at(fetched.retrieved_at)

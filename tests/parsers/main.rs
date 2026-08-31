@@ -19,6 +19,13 @@
 //! outside `tests/fixtures/golden/` and a temp directory the cache tests
 //! remove after themselves.
 //!
+//! `provenance.rs` is the odd module out: its assertions are about where a
+//! value came from rather than what it is (#28). Those two are not the same
+//! test — `assert_eq!(p.upc, Some(..))` passes whether the UPC came from
+//! JSON-LD or from a DOM fallback that found the same digits, so it cannot
+//! notice a field quietly changing source, which is degradation before it
+//! becomes data loss.
+//!
 //! # These tests pin what the code does today, not what it should do
 //!
 //! Bugs #1-#6 are filed and unfixed. Where a parser is known-wrong, the
@@ -50,4 +57,5 @@ mod golden;
 mod helpers;
 mod product_dom;
 mod product_json;
+mod provenance;
 mod search;

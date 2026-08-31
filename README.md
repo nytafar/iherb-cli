@@ -184,6 +184,20 @@ do not depend on which strategy got there first.
 
 A search page has one strategy: read the product cards out of the DOM.
 
+**Every field records where it came from** — JSON-LD, JS globals, the DOM, or
+absent, meaning every strategy ran and none produced it. That distinction is
+why the tool can tell "iHerb publishes no shipping weight for this item" from
+"our selector rotted": both used to be an empty field and nothing could tell
+them apart. `--debug` prints the whole provenance table alongside the product,
+and a record missing something every product page publishes prints a
+`Data quality: degraded` line whether you asked for it or not.
+
+For the same reason, a page that loads and yields nothing is reported as a
+failed extraction rather than a missing product. The first means "retry is
+reasonable and a human should look at the selectors"; the second means "stop
+asking about this id". Reporting the first as the second is the worst available
+answer, and it is what the tool used to do.
+
 There used to be a fourth product rung, `__NEXT_DATA__`. iHerb does not serve
 that blob — not on any of the seven captured pages, and not on pages fetched
 live in August 2026 — so it was never a fallback, only the appearance of one.

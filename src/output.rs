@@ -1,5 +1,5 @@
 use crate::cli::Section;
-use crate::model::{ProductDetail, SearchResult};
+use crate::model::{ExtractionHealth, ProductDetail, SearchResult};
 use std::time::SystemTime;
 
 pub fn format_search_results(result: &SearchResult) -> String {
@@ -123,6 +123,18 @@ fn format_overview(product: &ProductDetail, out: &mut String) {
     if let Some(ref weight) = product.shipping_weight {
         out.push_str(&format!("- **Shipping Weight:** {}\n", weight));
     }
+
+    // One line, only when something a product page always publishes is missing.
+    // Silence is the normal case; a caller that wants the whole picture calls
+    // `format_extraction_health`.
+    let health = product.health();
+    if health.degraded {
+        out.push_str(&format!(
+            "- **Data quality:** degraded — no strategy produced {}. Run with --debug for the full provenance table.\n",
+            health.fields_absent.join(", ")
+        ));
+    }
+
     out.push('\n');
 }
 
@@ -305,4 +317,57 @@ fn format_number(n: u32) -> String {
         result.push(ch);
     }
     result.chars().rev().collect()
+}
+
+/// Render a scrape's report on itself as plain text.
+///
+/// **This is the seam #9 renders under `--json`.** `--json` does not exist yet
+/// — it is #9, and #9 depends on this issue — so provenance gets a plain-text
+/// surface here and a machine-readable one there. What #9 has to emit is
+/// [`ExtractionHealth`] verbatim: it already derives `Serialize`, the field
+/// names are the JSON keys, and `Source`/`Strategy` serialize as snake_case
+/// strings (`json_ld`, `js_globals`, `dom`, `absent`, `unrecorded`). So:
+///
+/// ```json
+/// "extraction": {
+///   "strategy": "json_ld",
+///   "enriched": true,
+///   "sources": { "name": "json_ld", "ingredients": "dom", "warnings": "absent", ... },
+///   "fields_absent": ["warnings", "..."],
+///   "degraded": false
+/// }
+/// ```
+///
+/// `serde_json::to_value(product.health())` produces exactly that. #9 needs to
+/// add no fields and compute nothing; it needs to place the block and map
+/// `degraded` onto its exit-code taxonomy.
+pub fn format_extraction_health(health: &ExtractionHealth) -> String {
+    let mut out = String::new();
+    out.push_str("## Extraction\n");
+    out.push_str(&format!("- **Strategy:** {:?}\n", health.strategy));
+    out.push_str(&format!("- **Enriched from DOM:** {}\n", health.enriched));
+    out.push_str(&format!(
+        "- **Degraded:** {}\n",
+        if health.degraded {
+            "yes — a field every product page publishes is missing, so the \
+             selectors may have rotted"
+        } else {
+            "no"
+        }
+    ));
+
+    if !health.fields_absent.is_empty() {
+        out.push_str(&format!(
+            "- **Absent:** {}\n",
+            health.fields_absent.join(", ")
+        ));
+    }
+
+    out.push_str("\n| Field | Source |\n|---|---|\n");
+    for (field, source) in &health.sources {
+        out.push_str(&format!("| {} | {:?} |\n", field, source));
+    }
+    out.push('\n');
+
+    out
 }

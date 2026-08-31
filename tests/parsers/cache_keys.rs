@@ -149,6 +149,8 @@ fn a_swiss_fetch_is_served_the_us_price() {
         shipping_weight: None,
         category_breadcrumb: None,
         review_distribution: None,
+        // Hand-built, not extracted: `Strategy::Unrecorded` with no sources.
+        extraction: Default::default(),
     };
 
     let us_key = ProductTarget::new(&us, "61864").unwrap().cache_key();

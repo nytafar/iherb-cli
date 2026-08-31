@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProductSummary {
@@ -44,6 +45,217 @@ pub struct ProductDetail {
     pub shipping_weight: Option<String>,
     pub category_breadcrumb: Option<Vec<String>>,
     pub review_distribution: Option<ReviewDistribution>,
+    /// Where every field above came from, and whether the record looks healthy.
+    ///
+    /// `#[serde(default)]` so a cache file written before provenance existed
+    /// still deserializes; it comes back [`Strategy::Unrecorded`] with no
+    /// sources, which is the truth about such a file.
+    #[serde(default)]
+    pub extraction: Extraction,
+}
+
+/// Where a field's value came from.
+///
+/// The point of this type is that [`Source::Absent`] is a value. Before it
+/// existed, "iHerb publishes no product code for this item" and "our selector
+/// rotted and ate the product code" were both `Option::None`, and no caller and
+/// no test could tell them apart. That conflation is the mechanism behind most
+/// of the bugs filed in this round (#28).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// The `application/ld+json` `Product` block.
+    JsonLd,
+    /// `window.IHR_DL.product` / `window.PRODUCT_DETAILS`, read by evaluating
+    /// JS on the live page.
+    JsGlobals,
+    /// CSS selectors over the page HTML, whether as the last-resort strategy or
+    /// as enrichment on top of another one.
+    Dom,
+    /// Every strategy ran and none produced this field.
+    Absent,
+}
+
+/// Which strategy produced the base record, before DOM enrichment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Strategy {
+    JsonLd,
+    JsGlobals,
+    Dom,
+    /// Not produced by an extractor at all: a hand-built record, or one read
+    /// back from a cache file written before provenance existed.
+    Unrecorded,
+}
+
+/// The provenance a [`ProductDetail`] carries: which strategy produced it,
+/// whether it was enriched, and where each field came from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Extraction {
+    pub strategy: Strategy,
+    /// Whether [`crate::scraper::product::enrich_from_html`] ran. It runs on
+    /// every path, so `false` on a freshly extracted record means something
+    /// went wrong.
+    pub enriched: bool,
+    /// Field name -> where its value came from. A field missing from this map
+    /// is [`Source::Absent`]; read it through [`Extraction::source_of`] rather
+    /// than indexing, so the two cannot drift apart.
+    sources: BTreeMap<String, Source>,
+}
+
+impl Default for Extraction {
+    fn default() -> Self {
+        Self {
+            strategy: Strategy::Unrecorded,
+            enriched: false,
+            sources: BTreeMap::new(),
+        }
+    }
+}
+
+impl Extraction {
+    pub fn new(strategy: Strategy) -> Self {
+        Self {
+            strategy,
+            ..Self::default()
+        }
+    }
+
+    /// Where `field` came from. A field nothing claimed is [`Source::Absent`].
+    pub fn source_of(&self, field: &str) -> Source {
+        self.sources.get(field).copied().unwrap_or(Source::Absent)
+    }
+
+    /// Attribute `field` to `source`, unless something already claimed it.
+    ///
+    /// First writer wins, because the strategies run in order of trust: if
+    /// JSON-LD supplied the price, DOM enrichment filling a gap must not
+    /// relabel it. Use [`Extraction::reclaim`] where a later pass genuinely
+    /// replaces a value rather than filling a gap.
+    pub fn claim(&mut self, field: &str, source: Source) {
+        self.sources.entry(field.to_string()).or_insert(source);
+    }
+
+    /// Attribute `field` to `source`, overwriting any earlier claim. For the
+    /// one case where a later pass really does replace an earlier value.
+    pub fn reclaim(&mut self, field: &str, source: Source) {
+        self.sources.insert(field.to_string(), source);
+    }
+}
+
+/// A scrape's report on itself: what produced it and whether to trust it.
+///
+/// This is the shape #9 renders under `--json`. It is derived from the record
+/// rather than stored on it, so it cannot go stale.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractionHealth {
+    pub strategy: Strategy,
+    pub enriched: bool,
+    /// Every tracked field and where it came from, `Absent` included.
+    pub sources: BTreeMap<String, Source>,
+    /// The tracked fields no strategy produced, in declaration order.
+    pub fields_absent: Vec<String>,
+    /// True when a field [`ProductDetail::EXPECTED_FIELDS`] says every product
+    /// page publishes came back absent.
+    ///
+    /// This is the "our selectors rotted" signal, and it is deliberately
+    /// distinct from "this product has no supplement facts because it is a
+    /// hairbrush" — which is why the expected set is short.
+    pub degraded: bool,
+}
+
+impl ProductDetail {
+    /// Fields any iHerb product page publishes.
+    ///
+    /// One of these coming back [`Source::Absent`] means extraction is broken,
+    /// not that the product lacks the attribute. Kept deliberately short:
+    /// `rating` and `review_count` are out because a product with no reviews
+    /// legitimately has neither, and supplement facts are out because plenty of
+    /// products are not supplements.
+    pub const EXPECTED_FIELDS: &'static [&'static str] = &[
+        "name",
+        "brand",
+        "price",
+        "currency",
+        "in_stock",
+        "product_code",
+        "upc",
+    ];
+
+    /// Every field provenance tracks, paired with whether this record has a
+    /// value for it.
+    ///
+    /// Name and presence are declared together on purpose: one list, so the
+    /// registry of tracked fields cannot drift out of step with the test for
+    /// whether each one is filled. `product_id` is absent from the list because
+    /// it is the caller's input, never extracted.
+    pub fn field_presence(&self) -> Vec<(&'static str, bool)> {
+        vec![
+            ("name", !self.name.is_empty()),
+            ("brand", !self.brand.is_empty()),
+            ("price", self.price > 0.0),
+            ("original_price", self.original_price.is_some()),
+            ("currency", !self.currency.is_empty()),
+            ("rating", self.rating.is_some()),
+            ("review_count", self.review_count.is_some()),
+            ("product_url", !self.product_url.is_empty()),
+            ("in_stock", self.in_stock.is_some()),
+            ("description", self.description.is_some()),
+            ("product_code", self.product_code.is_some()),
+            ("upc", self.upc.is_some()),
+            ("ingredients", self.ingredients.is_some()),
+            ("supplement_facts", self.supplement_facts.is_some()),
+            ("suggested_use", self.suggested_use.is_some()),
+            ("warnings", self.warnings.is_some()),
+            ("shipping_weight", self.shipping_weight.is_some()),
+            ("category_breadcrumb", self.category_breadcrumb.is_some()),
+            ("review_distribution", self.review_distribution.is_some()),
+        ]
+    }
+
+    /// Where `field` came from. Shorthand for `self.extraction.source_of`.
+    pub fn source_of(&self, field: &str) -> Source {
+        self.extraction.source_of(field)
+    }
+
+    /// Attribute every value this record holds, and that nothing has claimed
+    /// yet, to `source`.
+    ///
+    /// Derived from the values rather than written out by hand at each parser,
+    /// so a parser that starts filling a new field cannot forget to record it.
+    pub fn claim_unattributed(&mut self, source: Source) {
+        for (field, present) in self.field_presence() {
+            if present {
+                self.extraction.claim(field, source);
+            }
+        }
+    }
+
+    /// This record's report on itself.
+    pub fn health(&self) -> ExtractionHealth {
+        let mut sources = BTreeMap::new();
+        let mut fields_absent = Vec::new();
+
+        for (field, _) in self.field_presence() {
+            let source = self.extraction.source_of(field);
+            if source == Source::Absent {
+                fields_absent.push(field.to_string());
+            }
+            sources.insert(field.to_string(), source);
+        }
+
+        let degraded = Self::EXPECTED_FIELDS
+            .iter()
+            .any(|f| self.extraction.source_of(f) == Source::Absent);
+
+        ExtractionHealth {
+            strategy: self.extraction.strategy,
+            enriched: self.extraction.enriched,
+            sources,
+            fields_absent,
+            degraded,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

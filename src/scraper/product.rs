@@ -1,5 +1,7 @@
 use crate::error::IherbError;
-use crate::model::{Nutrient, ProductDetail, ReviewDistribution, SupplementFacts};
+use crate::model::{
+    Extraction, Nutrient, ProductDetail, ReviewDistribution, Source, Strategy, SupplementFacts,
+};
 use chromiumoxide::Page;
 use scraper::{Html, Selector};
 
@@ -256,7 +258,7 @@ pub fn parse_from_json_ld(
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("{}/pr/p/{}", base_url, product_id));
 
-    Some(ProductDetail {
+    let mut product = ProductDetail {
         name,
         brand,
         price,
@@ -277,7 +279,11 @@ pub fn parse_from_json_ld(
         shipping_weight: None,  // enriched from DOM
         category_breadcrumb: None,
         review_distribution: None, // enriched from DOM
-    })
+        extraction: Extraction::new(Strategy::JsonLd),
+    };
+
+    product.claim_unattributed(Source::JsonLd);
+    Some(product)
 }
 
 /// Parse product from JS globals (window.PRODUCT_DETAILS, window.IHR_DL).
@@ -353,7 +359,7 @@ pub fn parse_from_js_globals(
         .filter(|s| !s.is_empty())
         .map(|s| vec![s.to_string()]);
 
-    Some(ProductDetail {
+    let mut product = ProductDetail {
         name,
         brand,
         price,
@@ -374,10 +380,24 @@ pub fn parse_from_js_globals(
         shipping_weight: None,
         category_breadcrumb,
         review_distribution: None,
-    })
+        extraction: Extraction::new(Strategy::JsGlobals),
+    };
+
+    product.claim_unattributed(Source::JsGlobals);
+    Some(product)
 }
 
-/// Enrich a ProductDetail with fields only available in the DOM (ingredients, supplement facts, etc.)
+/// Enrich a ProductDetail with fields only available in the DOM (ingredients,
+/// supplement facts, etc.)
+///
+/// Runs on **every** extraction path, so which strategy won does not decide
+/// which fields you get (#28). Everything it fills is gap-filling — it never
+/// replaces a value a more trusted strategy already produced — with one
+/// documented exception in [`enrich_pricing`], which reclaims the field it
+/// corrects.
+///
+/// Every field left filled afterwards that nothing had claimed is attributed to
+/// [`Source::Dom`].
 pub fn enrich_from_html(html: &str, product: &mut ProductDetail) {
     let doc = Html::parse_document(html);
 
@@ -409,6 +429,9 @@ pub fn enrich_from_html(html: &str, product: &mut ProductDetail) {
     if product.review_distribution.is_none() {
         product.review_distribution = parse_review_distribution_html(&doc);
     }
+
+    product.claim_unattributed(Source::Dom);
+    product.extraction.enriched = true;
 }
 
 fn enrich_pricing(doc: &Html, product: &mut ProductDetail) {
@@ -432,7 +455,11 @@ fn enrich_pricing(doc: &Html, product: &mut ProductDetail) {
         if list > disc {
             product.original_price = Some(list);
             if (product.price - list).abs() < 0.01 || product.price == 0.0 {
+                // The one place enrichment replaces a value rather than filling
+                // a gap: an earlier strategy read the list price as the price.
+                // The corrected number came from the DOM, so say so.
                 product.price = disc;
+                product.extraction.reclaim("price", Source::Dom);
             }
         }
     }
@@ -468,6 +495,30 @@ fn parse_overview_sections(html: &str, product: &mut ProductDetail) {
     if product.ingredients.is_none() {
         if let Some(text) = extract_text(&doc, ".prodOverviewIngred") {
             product.ingredients = Some(text);
+        }
+    }
+
+    // Last resort for the description, and the only one the DOM path has: the
+    // page's own `<meta name="description">`. It is the JSON-LD description
+    // truncated to about 160 characters — the same opening words, cut short —
+    // so it is a real description rather than an invention, but a shorter one.
+    //
+    // It exists so that all three strategies produce the same field coverage
+    // for the same page (#28). A caller that cares which it got can ask: this
+    // one is `Source::Dom`, JSON-LD's is `Source::JsonLd`.
+    //
+    // The full text is on the page, under the `#product-overview` "Overview"
+    // heading rather than a "Description" one, which is why the heading scan
+    // below never finds it. Reading that markup properly is #13.
+    if product.description.is_none() {
+        if let Ok(sel) = Selector::parse(r#"meta[name="description"]"#) {
+            product.description = doc
+                .select(&sel)
+                .next()
+                .and_then(|el| el.value().attr("content"))
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .map(|c| c.to_string());
         }
     }
 
@@ -629,9 +680,12 @@ pub fn parse_from_html(
     let name =
         extract_text(&doc, "h1#name, h1[data-testid='product-name'], h1").unwrap_or_default();
 
-    // If we couldn't extract a meaningful product name, this is not a valid product page
-    if name.is_empty() || name == "Unknown Product" {
-        return Err(IherbError::ProductNotFound(product_id.to_string()));
+    // No name from any of the three selectors, on a page that did not identify
+    // itself as a 404. That is a broken extractor, not a missing product, and
+    // the difference matters: `ProductNotFound` tells a caller to stop asking
+    // about a perfectly valid id (#28).
+    if name.is_empty() {
+        return Err(IherbError::ParseFailed(product_id.to_string()));
     }
 
     let brand = extract_text(
@@ -693,10 +747,17 @@ pub fn parse_from_html(
         shipping_weight,
         category_breadcrumb: None,
         review_distribution,
+        extraction: Extraction::new(Strategy::Dom),
     };
 
-    // Parse structured overview sections
-    parse_overview_sections(html, &mut product);
+    product.claim_unattributed(Source::Dom);
+
+    // The DOM strategy enriches from the DOM like every other path does. It
+    // reads most of the same elements twice as a result, which is the price of
+    // every path producing the same field coverage for the same page (#28).
+    // `enrich_from_html` subsumes the `parse_overview_sections` call this used
+    // to make, and every other thing it does is gap-filling.
+    enrich_from_html(html, &mut product);
 
     Ok(product)
 }

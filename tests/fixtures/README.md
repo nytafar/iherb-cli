@@ -89,7 +89,12 @@ Rendered Markdown, regenerated with `UPDATE_GOLDEN=1 cargo test` — exactly `1`
 any other value still asserts. Read the diff before committing a change to one.
 
 **The goldens cover Markdown only.** #9 (`--json` output with a typed error
-taxonomy) and #28 (extraction provenance, so absent data and broken extraction
-stop looking alike) both change what callers consume, and neither is protected
-by anything here. Those waves must add their own snapshots or exact
-assertions — a Markdown golden will not notice a JSON schema change.
+taxonomy) changes what callers consume and is not protected by anything here;
+that wave must add its own snapshots or exact assertions, because a Markdown
+golden will not notice a JSON schema change.
+
+#28 (extraction provenance) has landed, and its assertions live in
+`tests/parsers/provenance.rs` rather than in a golden — deliberately. A golden
+pins a rendering; provenance is about where each value came from, which is
+invisible in any rendering of the values. `health_serializes_to_the_block_issue_9_renders`
+pins the JSON shape #9 has to emit.

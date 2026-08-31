@@ -2,6 +2,7 @@
 //! `enrich_from_html`, `extract_spec`, `parse_supplement_facts_html`,
 //! `parse_review_distribution_html`.
 
+use iherb_cli::error::IherbError;
 use iherb_cli::scraper::helpers::is_not_found_page;
 use iherb_cli::scraper::product::{
     enrich_from_html, extract_spec, parse_from_html, parse_from_json_ld,
@@ -154,8 +155,15 @@ fn dom_fallback_ignores_the_requested_currency() {
     }
 }
 
+/// Two rejections that used to be the same one (#28).
+///
+/// A page that says the product is gone is `ProductNotFound` — stop asking. A
+/// page that loaded fine and yielded no name is `ParseFailed` — the selectors
+/// are broken, the id is probably fine, and a human should look. Collapsing
+/// them into "product not found" is what tells a caller to give up on a valid
+/// id, which is the misclassification the whole issue is about.
 #[test]
-fn dom_fallback_rejects_a_page_with_no_product() {
+fn a_page_that_will_not_parse_is_not_a_missing_product() {
     let err = parse_from_html(
         "<html><body><p>nothing</p></body></html>",
         "1",
@@ -163,10 +171,20 @@ fn dom_fallback_rejects_a_page_with_no_product() {
         "USD",
     )
     .expect_err("a page with no h1 is not a product page");
+    assert!(
+        matches!(err, IherbError::ParseFailed(ref id) if id == "1"),
+        "expected ParseFailed, got {:?}",
+        err
+    );
     assert!(err.to_string().contains('1'));
 
     let err = parse_from_html("<html><title>404</title>", "42", BASE_URL, "USD")
         .expect_err("a 404 page is not a product page");
+    assert!(
+        matches!(err, IherbError::ProductNotFound(ref id) if id == "42"),
+        "expected ProductNotFound, got {:?}",
+        err
+    );
     assert!(err.to_string().contains("42"));
 }
 
