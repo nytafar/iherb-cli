@@ -124,6 +124,13 @@ fn dom_and_json_ld_agree_about_availability() {
 /// B-Complex page is in stock and carries `data-is-out-of-stock="True"` — on
 /// the 30-count variant, product 108265, which is a different product. A
 /// page-wide substring search would report the page out of stock.
+///
+/// This assertion alone does NOT protect the scoping: B-Complex has a
+/// `#stock-status` heading saying "In stock", which the reader consults first,
+/// so the variant rung never runs on this page and removing the scoping changes
+/// nothing here. `variant_scoping_survives_a_page_with_no_stock_status_heading`
+/// below is the one that bites. Both are kept: this one pins the shape of the
+/// page, that one pins the behaviour.
 #[test]
 fn an_out_of_stock_sibling_variant_does_not_condemn_the_page() {
     let html = B_COMPLEX.html();
@@ -131,6 +138,57 @@ fn an_out_of_stock_sibling_variant_does_not_condemn_the_page() {
 
     let product = parse_from_html(html, "108255", BASE_URL, "USD").unwrap();
     assert_eq!(product.in_stock, Some(true));
+}
+
+/// The test that fails the moment the variant scoping is removed.
+///
+/// The subtlety it protects: `[data-pid="<id>"][data-is-out-of-stock]` is
+/// matched against *this* product's id, not read off whichever element in the
+/// document happens to carry the attribute first. On the B-Complex page the
+/// first one in document order is product **108265**, the 30-count sibling
+/// variant, and it says `"True"`. Simplify the selector to
+/// `[data-is-out-of-stock]` and an in-stock page reports out of stock.
+///
+/// Reaching that rung takes some doing, which is exactly why the assertion
+/// above cannot protect it. The reader consults `#stock-status` first, and
+/// B-Complex has one. So this test neutralises that element and nothing else —
+/// producing a page shaped like the gummies capture, which genuinely has no
+/// `#stock-status` at all, but with an in-stock product and an out-of-stock
+/// sibling. That combination is the one that tells correct from naive, and no
+/// captured page has it on its own.
+#[test]
+fn variant_scoping_survives_a_page_with_no_stock_status_heading() {
+    // Rename the id rather than cutting the element out, so the surgery cannot
+    // disturb the document structure the rest of the parse depends on.
+    let html = B_COMPLEX.html().replace(
+        r#"id="stock-status""#,
+        r#"id="stock-status-disabled-by-this-test""#,
+    );
+
+    // The surgery has to have done something, or this test quietly stops
+    // testing anything — which is the failure mode it exists to fix.
+    assert!(
+        B_COMPLEX.html().contains(r#"id="stock-status""#),
+        "the capture must have the heading for removing it to mean anything"
+    );
+    assert!(!html.contains(r#"id="stock-status""#));
+
+    // The two variants, and the order they appear in. The sibling comes first,
+    // so a selector that takes the first match takes the wrong one.
+    assert!(
+        html.find(r#"data-pid="108265""#) < html.find(r#"data-pid="108255""#),
+        "the out-of-stock sibling must come first, or the naive selector \
+         would accidentally be right"
+    );
+
+    let product = parse_from_html(&html, "108255", BASE_URL, "USD").unwrap();
+    assert_eq!(
+        product.in_stock,
+        Some(true),
+        "product 108255 is in stock; 108265 is the sibling variant that is not. \
+         Reading the variant signal without scoping it to the requested product \
+         id reports this page out of stock."
+    );
 }
 
 /// A page with none of the signals is unknown, not in stock. This is the case
