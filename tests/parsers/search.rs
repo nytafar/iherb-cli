@@ -149,38 +149,77 @@ fn sort_options_on_the_page() -> BTreeMap<i32, String> {
         .collect()
 }
 
-/// CHARACTERIZATION, NOT DESIRED: pins the #3 bug against the page that proves
-/// it. iHerb's dropdown says Relevance is `sr=0` and Featured is `sr=13`, and
-/// `sr=13` is the option marked `selected` — i.e. what you get with no `sr` at
-/// all. `--sort relevance` emits no `sr`, so it returns Featured.
-///
-/// #3 flips this: `Relevance` becomes `&sr=0`, and a `featured` variant appears
-/// alongside it. Do not "fix" the mapping to satisfy this test; fix the test
-/// when #3 lands.
+/// #3, landed. iHerb's dropdown says Relevance is `sr=0` and Featured is
+/// `sr=13`, and `sr=13` is the option the page marks selected — i.e. what you
+/// get with no `sr` at all. `--sort relevance` used to emit no `sr` and so
+/// returned Featured; it now asks for `sr=0`, and Featured has a variant of its
+/// own rather than being reachable only by omission.
 #[test]
-fn relevance_actually_asks_for_featured() {
+fn relevance_asks_for_relevance_and_featured_has_its_own_name() {
     let options = sort_options_on_the_page();
     assert_eq!(options.get(&0).map(String::as_str), Some("Relevance"));
     assert_eq!(options.get(&13).map(String::as_str), Some("Featured"));
-    // 13 is the option the page marks selected, so an absent `sr` is Featured.
+    // 13 is still the option the page marks selected, so an absent `sr` is
+    // still Featured — which is why `relevance` must not be absent.
     assert_eq!(default_sort_on_the_page(), 13);
 
-    assert_eq!(SortOrder::Relevance.as_url_param(), "");
+    assert_eq!(SortOrder::Relevance.as_url_param(), "&sr=0");
     let url = build_search_url(BASE_URL, "vitamin c", SortOrder::Relevance, None, 1);
-    assert_eq!(url, "https://www.iherb.com/search?kw=vitamin+c");
-    assert!(!url.contains("sr="), "no sr means Featured, not Relevance");
+    assert_eq!(url, "https://www.iherb.com/search?kw=vitamin+c&sr=0");
+
+    assert_eq!(SortOrder::Featured.as_url_param(), "&sr=13");
+    assert_eq!(
+        build_search_url(BASE_URL, "vitamin c", SortOrder::Featured, None, 1),
+        "https://www.iherb.com/search?kw=vitamin+c&sr=13"
+    );
+
+    // The two orderings are different requests, which is the whole of #3.
+    assert_ne!(
+        SortOrder::Relevance.as_url_param(),
+        SortOrder::Featured.as_url_param()
+    );
 }
 
-/// The four sorts that do map correctly, checked against the page's own table
-/// rather than against a copy of `as_url_param` written out again.
+/// No `--sort` value asks for an ordering by saying nothing. An empty
+/// `as_url_param` is how #3 happened: the variant that emitted nothing got the
+/// site's default rather than the ordering it was named after, and nothing in
+/// the URL recorded which ordering had been asked for.
 #[test]
-fn the_other_sorts_map_to_the_values_the_page_uses() {
+fn every_sort_names_the_ordering_it_wants() {
+    for &sort in SortOrder::ALL {
+        let param = sort.as_url_param();
+        assert_eq!(
+            param,
+            format!("&sr={}", sort.sr()),
+            "{:?} must ask for its ordering by number",
+            sort
+        );
+        assert!(
+            build_search_url(BASE_URL, "q", sort, None, 1).contains("&sr="),
+            "{:?} produced a URL with no sr",
+            sort
+        );
+    }
+}
+
+/// Every `--sort` value, checked against the page's own dropdown rather than
+/// against a copy of the mapping written out again.
+///
+/// Before #3 this covered four variants; the site offers eleven orderings and
+/// the CLI now names nine of them.
+#[test]
+fn every_sort_maps_to_the_value_the_page_uses() {
     let options = sort_options_on_the_page();
     for (sort, sr, label) in [
+        (SortOrder::Relevance, 0, "Relevance"),
         (SortOrder::Rating, 1, "Top Rated"),
         (SortOrder::BestSelling, 2, "Best sellers"),
         (SortOrder::PriceDesc, 3, "Price: High to Low"),
         (SortOrder::PriceAsc, 4, "Price: Low to High"),
+        (SortOrder::Newest, 10, "Newest"),
+        (SortOrder::MostRated, 12, "Most Rated"),
+        (SortOrder::Featured, 13, "Featured"),
+        (SortOrder::HighestDiscount, 14, "Highest Discount"),
     ] {
         assert_eq!(
             options.get(&sr).map(String::as_str),
@@ -188,8 +227,13 @@ fn the_other_sorts_map_to_the_values_the_page_uses() {
             "the page no longer offers sr={}",
             sr
         );
+        assert_eq!(i32::from(sort.sr()), sr, "{:?}", sort);
         assert_eq!(sort.as_url_param(), format!("&sr={}", sr));
     }
+
+    // Every variant is covered above, so the enum cannot grow one that nothing
+    // checks against the page.
+    assert_eq!(SortOrder::ALL.len(), 9);
 }
 
 /// The `sr` value the page treats as the default, i.e. what an absent `sr`
@@ -202,52 +246,25 @@ fn default_sort_on_the_page() -> i32 {
         .expect("the dropdown marks one option selected")
 }
 
-/// The ordering a `--sort` value actually produces, which is not the same as
-/// the `sr` it emits: emitting nothing produces the page's default.
-fn ordering_produced_by(sort: SortOrder) -> i32 {
-    match sort.as_url_param() {
-        "" => default_sort_on_the_page(),
-        param => param
-            .trim_start_matches("&sr=")
-            .parse()
-            .expect("as_url_param is either empty or &sr=<n>"),
-    }
-}
-
-/// Every `--sort` value the CLI offers.
-const CLI_SORTS: &[SortOrder] = &[
-    SortOrder::Relevance,
-    SortOrder::PriceAsc,
-    SortOrder::PriceDesc,
-    SortOrder::Rating,
-    SortOrder::BestSelling,
-];
-
-/// CHARACTERIZATION, NOT DESIRED: the second half of #3 — six of the eleven
-/// orderings iHerb offers cannot be produced by any `--sort` value.
+/// CHARACTERIZATION, NOT DESIRED — narrowed by #3. Two of the eleven orderings
+/// iHerb offers still cannot be produced by any `--sort` value: Heaviest (6)
+/// and Lightest (7).
 ///
-/// Featured (13) is deliberately **not** on that list, even though no variant
-/// is named `featured`. `--sort relevance` emits no `sr`, and an absent `sr`
-/// is Featured — that is exactly what `relevance_actually_asks_for_featured`
-/// asserts. The CLI can produce that ordering; it just calls it the wrong
-/// thing. What it cannot produce at all is Relevance itself (0), Heaviest (6),
-/// Lightest (7), Newest (10), Most Rated (12) and Highest Discount (14).
-///
-/// #3 flips this. It points `relevance` at `sr=0` and adds `most-rated` (12),
-/// `newest` (10) and `highest-discount` (14) — and gives 13 an explicit
-/// `featured` variant, so it keeps being reachable under its own name rather
-/// than by accident. What is left after #3 is Heaviest (6) and Lightest (7),
-/// which #3 does not propose exposing. Do not add sort variants to satisfy
-/// this test; fix the test when #3 lands.
+/// #3 removed the other four from this list. It pointed `relevance` at `sr=0`,
+/// added `most-rated` (12), `newest` (10) and `highest-discount` (14), and gave
+/// 13 an explicit `featured` variant so the merchandised order is reachable
+/// under its own name rather than by emitting nothing. Heaviest and Lightest
+/// are what #3 deliberately did not propose exposing; whoever files that flips
+/// this. Do not add sort variants to satisfy this test.
 #[test]
-fn six_of_the_sites_orderings_cannot_be_produced_at_all() {
+fn two_of_the_sites_orderings_cannot_be_produced_at_all() {
     let options = sort_options_on_the_page();
     let reachable: std::collections::BTreeSet<i32> =
-        CLI_SORTS.iter().map(|&s| ordering_produced_by(s)).collect();
+        SortOrder::ALL.iter().map(|&s| i32::from(s.sr())).collect();
 
-    // Five variants, but only five distinct orderings because none collide.
-    assert_eq!(reachable.len(), CLI_SORTS.len());
-    // And Featured is among them, reached by emitting nothing at all.
+    // Nine variants, nine distinct orderings: none collides with another.
+    assert_eq!(reachable.len(), SortOrder::ALL.len());
+    // Featured included, now by name rather than by omission.
     assert!(reachable.contains(&default_sort_on_the_page()));
 
     let unreachable: Vec<_> = options
@@ -256,25 +273,22 @@ fn six_of_the_sites_orderings_cannot_be_produced_at_all() {
         .map(|(sr, label)| (*sr, label.as_str()))
         .collect();
 
-    assert_eq!(
-        unreachable,
-        vec![
-            (0, "Relevance"),
-            (6, "Heaviest"),
-            (7, "Lightest"),
-            (10, "Newest"),
-            (12, "Most Rated"),
-            (14, "Highest Discount"),
-        ]
-    );
+    assert_eq!(unreachable, vec![(6, "Heaviest"), (7, "Lightest")]);
 }
 
 /// Cache keys and URL params are two different vocabularies for the same enum;
 /// neither may collide.
 #[test]
 fn every_sort_has_a_distinct_cache_key() {
-    let keys: std::collections::BTreeSet<_> = CLI_SORTS.iter().map(|s| s.as_cache_key()).collect();
-    assert_eq!(keys.len(), CLI_SORTS.len());
+    let keys: std::collections::BTreeSet<_> =
+        SortOrder::ALL.iter().map(|s| s.as_cache_key()).collect();
+    assert_eq!(keys.len(), SortOrder::ALL.len());
+
+    // `relevance` deliberately does not key as "relevance": #3 changed what the
+    // variant asks iHerb for, so entries cached under the old identifier hold a
+    // different ordering and must not be served for it.
+    assert_eq!(SortOrder::Relevance.as_cache_key(), "relevance-sr0");
+    assert_eq!(SortOrder::Featured.as_cache_key(), "featured");
 }
 
 /// CHARACTERIZATION, NOT DESIRED: pins the #4 bug against the page that proves

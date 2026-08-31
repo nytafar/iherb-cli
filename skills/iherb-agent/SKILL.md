@@ -16,7 +16,12 @@ iherb-cli search "<query>" [--limit <n>] [--sort <method>] [--category <slug>]
 ```
 
 - `--limit`: max results (default 20)
-- `--sort`: `relevance` (default), `price-asc`, `price-desc`, `rating`, `best-selling`
+- `--sort`: `relevance` (default), `featured`, `best-selling`, `rating`, `most-rated`,
+  `price-asc`, `price-desc`, `newest`, `highest-discount`. `relevance` is iHerb's
+  ranking for the query; `featured` is its merchandised order, which is what the
+  site shows when no sort is asked for. `most-rated` orders by number of reviews,
+  which is usually what "well established" means — `rating` surfaces 5.0/5
+  products with three reviews.
 - `--category`: filter by category slug (e.g., `supplements`, `vitamins`, `protein`)
 
 Output: Markdown list with name, brand, price, rating, review count, product ID, URL.

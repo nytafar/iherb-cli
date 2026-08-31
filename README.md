@@ -51,7 +51,7 @@ iherb-cli search "protein" --category supplements --sort best-selling
 | Flag | Description | Default |
 |---|---|---|
 | `--limit <n>` | Max results to return (paginates automatically) | 20 |
-| `--sort <method>` | `relevance`, `price-asc`, `price-desc`, `rating`, `best-selling` | `relevance` |
+| `--sort <method>` | `relevance`, `featured`, `best-selling`, `rating`, `most-rated`, `price-asc`, `price-desc`, `newest`, `highest-discount` | `relevance` |
 | `--category <slug>` | Filter by category (e.g., `supplements`, `vitamins`) | — |
 
 **Example output:**

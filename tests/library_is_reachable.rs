@@ -45,7 +45,7 @@ fn search_urls_and_paging_are_derived_from_the_limit() {
         1,
     );
     assert!(url.starts_with("https://www.iherb.com"));
-    assert!(url.contains(SortOrder::PriceAsc.as_url_param()));
+    assert!(url.contains(&SortOrder::PriceAsc.as_url_param()));
 }
 
 #[test]
