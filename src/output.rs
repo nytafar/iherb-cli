@@ -1,5 +1,5 @@
 use crate::cli::Section;
-use crate::model::{ExtractionHealth, ProductDetail, SearchResult};
+use crate::model::{ExtractionHealth, ProductDetail, SearchResult, Source};
 use std::time::SystemTime;
 
 pub fn format_search_results(result: &SearchResult) -> String {
@@ -161,7 +161,29 @@ fn format_description(product: &ProductDetail, out: &mut String) {
     if let Some(ref desc) = product.description {
         out.push_str("## Description\n");
         out.push_str(desc);
-        out.push_str("\n\n");
+        out.push('\n');
+
+        // A description that came from the page HTML rather than its structured
+        // data is the `<meta name="description">` fallback, which iHerb writes
+        // as a ~160-character summary. It stops mid-phrase — page 104996's ends
+        // "…California Gold Nutrition® Multivitamin and" — and printing that
+        // unmarked shows a reader a sentence that simply stops, as if the
+        // product's description really were that. Same honesty rule as the rest
+        // of this wave: do not present a lesser value as the real one.
+        //
+        // When #13 lands and reads the full `#product-overview` markup, that
+        // will be `Source::Dom` too and this test stops distinguishing them.
+        // #13 owns splitting the source finely enough to tell them apart.
+        if product.source_of("description") == Source::Dom {
+            out.push_str(
+                "\n*Read from the page's `<meta name=\"description\">`, not its structured \
+                 data — iHerb writes that as a ~160-character summary, so the text above \
+                 may stop mid-sentence. The full description is in the page overview, \
+                 which the parser does not read yet (#13).*\n",
+            );
+        }
+
+        out.push('\n');
     }
 }
 

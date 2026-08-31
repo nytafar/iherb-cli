@@ -41,9 +41,12 @@
 //! #[test]
 //! fn gummies_are_out_of_stock() {
 //!     let product = parse_from_json_ld(&OLLY_GUMMIES.json_ld(), "119174", BASE_URL).unwrap();
-//!     assert!(!product.in_stock);
+//!     assert_eq!(product.in_stock, Some(false));
 //! }
 //! ```
+//!
+//! `in_stock` is an `Option<bool>` — `None` means no signal on the page said
+//! either way, which is a different answer from "no" (#30, #31).
 //!
 //! [`fixture`] hands each parser the shape it wants — `html()`, `doc()`,
 //! `json_ld()`, or a JSON side-fixture via `json()`. Adding a page is one line

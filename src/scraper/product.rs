@@ -533,30 +533,6 @@ fn parse_overview_sections(html: &str, product: &mut ProductDetail) {
         }
     }
 
-    // Last resort for the description, and the only one the DOM path has: the
-    // page's own `<meta name="description">`. It is the JSON-LD description
-    // truncated to about 160 characters — the same opening words, cut short —
-    // so it is a real description rather than an invention, but a shorter one.
-    //
-    // It exists so that all three strategies produce the same field coverage
-    // for the same page (#28). A caller that cares which it got can ask: this
-    // one is `Source::Dom`, JSON-LD's is `Source::JsonLd`.
-    //
-    // The full text is on the page, under the `#product-overview` "Overview"
-    // heading rather than a "Description" one, which is why the heading scan
-    // below never finds it. Reading that markup properly is #13.
-    if product.description.is_none() {
-        if let Ok(sel) = Selector::parse(r#"meta[name="description"]"#) {
-            product.description = doc
-                .select(&sel)
-                .next()
-                .and_then(|el| el.value().attr("content"))
-                .map(str::trim)
-                .filter(|c| !c.is_empty())
-                .map(|c| c.to_string());
-        }
-    }
-
     let h3_sel = match Selector::parse("#product-overview h3") {
         Ok(sel) => sel,
         Err(_) => return,
@@ -569,6 +545,33 @@ fn parse_overview_sections(html: &str, product: &mut ProductDetail) {
             _ => continue,
         };
         assign_section_by_heading(&heading, content, product);
+    }
+
+    // Genuinely last: the page's own `<meta name="description">`, which is the
+    // full description truncated to about 160 characters — the same opening
+    // words, cut short. A real description rather than an invention, but a
+    // lesser one, so it runs after the heading scan above rather than before
+    // it. (It ran before it when first added, which would have let the
+    // truncated text pre-empt a real "Description" section on any page that
+    // has one. No capture does, so nothing observed it.)
+    //
+    // It exists so that all three strategies produce the same field coverage
+    // for the same page (#28), and `output::format_description` marks what it
+    // produces so a reader is not shown a sentence that simply stops.
+    //
+    // The full text is on the page, under the `#product-overview` "Overview"
+    // heading rather than a "Description" one, which is why the scan above
+    // never finds it. Reading that markup properly is #13.
+    if product.description.is_none() {
+        if let Ok(sel) = Selector::parse(r#"meta[name="description"]"#) {
+            product.description = doc
+                .select(&sel)
+                .next()
+                .and_then(|el| el.value().attr("content"))
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .map(|c| c.to_string());
+        }
     }
 }
 

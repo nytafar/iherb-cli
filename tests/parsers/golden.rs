@@ -135,3 +135,101 @@ fn no_captured_page_is_degraded_on_the_production_path() {
         assert!(!product.health().degraded, "{}", f.slug());
     }
 }
+
+/// The `Data quality` line names only the fields that actually caused the
+/// degradation, not every absent field on the page.
+///
+/// `degraded` is decided by `EXPECTED_FIELDS`, but the line used to print
+/// `fields_absent`, which is every absent field there is. On the DOM path the
+/// gummies page has eight absent fields and exactly one of them — `product_code`,
+/// eaten by #2 — is why the record is degraded. Naming the other seven sends a
+/// reader hunting a selector that is working fine and is worse than saying
+/// nothing.
+#[test]
+fn the_degraded_line_names_only_what_caused_the_degradation() {
+    let product = iherb_cli::scraper::product::parse_from_html(
+        crate::fixture::OLLY_GUMMIES.html(),
+        "119174",
+        BASE_URL,
+        "USD",
+    )
+    .unwrap();
+
+    let health = product.health();
+    assert!(health.degraded);
+    // The innocents: absent, and none of them a reason to call anything broken.
+    for innocent in ["ingredients", "suggested_use", "warnings", "original_price"] {
+        assert!(
+            health.fields_absent.contains(&innocent.to_string()),
+            "{} should be absent on this page",
+            innocent
+        );
+    }
+
+    let line = format_product_detail(&product, Some(Section::Overview));
+    assert!(
+        line.contains("degraded — no strategy produced product_code."),
+        "the line must name the culprit and only the culprit: {:?}",
+        line
+    );
+    for innocent in ["ingredients", "suggested_use", "warnings", "original_price"] {
+        assert!(
+            !line.contains(innocent),
+            "{} is absent but blameless, and must not appear in the degraded line: {:?}",
+            innocent,
+            line
+        );
+    }
+}
+
+/// A description that came from the `<meta name="description">` fallback is
+/// marked as such. It is the full text cut to ~160 characters and it stops
+/// mid-phrase, so printing it unmarked shows a reader a sentence that just ends
+/// as though that were the product's description.
+#[test]
+fn a_truncated_description_says_it_is_truncated() {
+    let via_dom =
+        iherb_cli::scraper::product::parse_from_html(TWO_A_DAY.html(), "104996", BASE_URL, "USD")
+            .unwrap();
+
+    // The fallback really is what filled it, and it really does stop mid-phrase.
+    assert_eq!(
+        via_dom.source_of("description"),
+        iherb_cli::model::Source::Dom
+    );
+    let desc = via_dom
+        .description
+        .clone()
+        .expect("the page has a meta description");
+    assert!(
+        desc.ends_with("California Gold Nutrition® Multivitamin and"),
+        "{:?}",
+        desc
+    );
+
+    let rendered = format_product_detail(&via_dom, Some(Section::Description));
+    assert!(rendered.contains(&desc), "the text itself is unchanged");
+    assert!(
+        rendered.contains("may stop mid-sentence"),
+        "the truncation must be marked: {:?}",
+        rendered
+    );
+    assert!(rendered.contains("#13"), "and point at who fixes it");
+
+    // The JSON-LD description is the full one and carries no such note.
+    let via_json_ld = as_production_would(TWO_A_DAY);
+    assert_eq!(
+        via_json_ld.source_of("description"),
+        iherb_cli::model::Source::JsonLd
+    );
+    let rendered = format_product_detail(&via_json_ld, Some(Section::Description));
+    assert!(
+        !rendered.contains("may stop mid-sentence"),
+        "{:?}",
+        rendered
+    );
+    assert!(
+        via_json_ld.description.unwrap().len() > desc.len(),
+        "the structured-data description is the longer one"
+    );
+}
