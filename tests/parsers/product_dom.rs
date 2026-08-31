@@ -5,7 +5,7 @@
 use iherb_cli::error::IherbError;
 use iherb_cli::scraper::helpers::is_not_found_page;
 use iherb_cli::scraper::product::{
-    enrich_from_html, extract_spec, parse_from_html, parse_from_json_ld,
+    enrich_from_html, extract_spec, parse_from_html, parse_from_json_ld, parse_product_specs,
     parse_review_distribution_html, parse_supplement_facts_html,
 };
 
@@ -51,22 +51,38 @@ fn dom_fallback_agrees_with_json_ld_on_price_and_rating() {
     }
 }
 
-/// CHARACTERIZATION, NOT DESIRED: pins the #2 bug from the outside. The DOM
-/// fallback loses `product_code` and `shipping_weight` on every page, because
-/// `extract_spec` is asked for `"Product Code"` / `"Shipping Weight"` and the
-/// page says `Product code:` / `Shipping weight:`. `UPC` survives only because
-/// it is an initialism and the case happens to match.
+/// #2, flipped. This was `dom_fallback_loses_product_code_and_shipping_weight`.
 ///
-/// #2 flips this: after it lands, `product_code` and `shipping_weight` are
-/// `Some`. Do not "fix" the code to match this test; fix the test when #2 lands.
+/// The DOM fallback used to lose `product_code` and `shipping_weight` on every
+/// page, because `extract_spec` was asked for `"Product Code"` /
+/// `"Shipping Weight"` and the page says `Product code:` / `Shipping weight:`.
+/// `UPC` survived only because it is an initialism and the case happened to
+/// match. The lookup is case-insensitive now, so all three resolve.
+///
+/// The values are asserted, not just their presence: a case fix alone would
+/// hand `shipping_weight` back with the info tooltip glued on, which is a
+/// different bug wearing the same `Some`.
 #[test]
-fn dom_fallback_loses_product_code_and_shipping_weight() {
+fn dom_fallback_reads_product_code_and_shipping_weight() {
     for f in fixture::products() {
         let product = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD").unwrap();
-        assert_eq!(product.product_code, None, "{}", f.slug());
-        assert_eq!(product.shipping_weight, None, "{}", f.slug());
+        assert!(product.product_code.is_some(), "{}", f.slug());
         assert!(product.upc.is_some(), "{}", f.slug());
+
+        let weight = product
+            .shipping_weight
+            .unwrap_or_else(|| panic!("{}: no shipping weight", f.slug()));
+        assert!(
+            weight.ends_with(" lb"),
+            "{}: shipping weight is a bare weight, not the tooltip too: {:?}",
+            f.slug(),
+            weight
+        );
     }
+
+    let nordic = parse_from_html(ULTIMATE_OMEGA.html(), "12949", BASE_URL, "USD").unwrap();
+    assert_eq!(nordic.product_code.as_deref(), Some("NOR-03790"));
+    assert_eq!(nordic.shipping_weight.as_deref(), Some("0.72 lb"));
 }
 
 /// #31, flipped. This was `dom_fallback_reports_the_gummies_as_in_stock`.
@@ -302,40 +318,100 @@ fn enrichment_adds_nothing_it_cannot_find() {
 // extract_spec — #product-specs-list
 // ---------------------------------------------------------------------------
 
-/// CHARACTERIZATION, NOT DESIRED: pins the #2 bug at the parser. The match is
-/// `text.starts_with(label)`, so the label's case has to be exactly right.
+/// #2, flipped. This was `extract_spec_matches_labels_case_sensitively`.
 ///
-/// Note for whoever fixes #2: lowercasing the comparison is necessary but not
-/// sufficient. `Shipping weight` matches once the case is right, and then
-/// returns the value with the whole info-tooltip glued to it, because the
-/// tooltip lives inside the same `<li>` and the parser takes everything after
-/// the first colon. The fix has to bound the value as well as the label.
+/// The match was `text.starts_with(label)`, so the label's case had to be
+/// exactly right and the two lookups production asks for in title case could
+/// never resolve. Both cases answer now, and answer the same thing.
+///
+/// Lowercasing the comparison was necessary but not sufficient: `Shipping
+/// weight` matched once the case was right, and then came back with the whole
+/// 500-word info tooltip glued on, because the tooltip lives inside the same
+/// `<li>` and the old parser took everything after the first colon. The last
+/// assertion here is the one that catches a half-fix.
 #[test]
-fn extract_spec_matches_labels_case_sensitively() {
+fn extract_spec_matches_labels_whatever_their_case() {
     let doc = ULTIMATE_OMEGA.doc();
 
     // What production asks for.
-    assert_eq!(extract_spec(&doc, "Product Code"), None);
-    assert_eq!(extract_spec(&doc, "Shipping Weight"), None);
+    assert_eq!(
+        extract_spec(&doc, "Product Code").as_deref(),
+        Some("NOR-03790")
+    );
+    assert_eq!(
+        extract_spec(&doc, "Shipping Weight").as_deref(),
+        Some("0.72 lb")
+    );
     assert_eq!(extract_spec(&doc, "UPC").as_deref(), Some("768990037900"));
 
-    // What the page actually says.
+    // What the page actually says, and the shouted form neither uses.
     assert_eq!(
         extract_spec(&doc, "Product code").as_deref(),
         Some("NOR-03790")
     );
+    assert_eq!(
+        extract_spec(&doc, "SHIPPING WEIGHT").as_deref(),
+        Some("0.72 lb")
+    );
+
+    // The tooltip lives in the `Shipping weight` row and is not the value.
     let weight = extract_spec(&doc, "Shipping weight").expect("the page has one");
-    assert!(weight.starts_with("0.72 lb"), "{:?}", weight);
     assert!(
-        weight.contains("The Shipping Weight includes the product"),
-        "the tooltip is still glued to the value: {:?}",
+        !weight.contains("The Shipping Weight includes the product"),
+        "the tooltip is glued to the value again: {:?}",
         weight
     );
 }
 
+/// The whole list in one call, which is what `extract_spec` looks up in.
+///
+/// Six rows on every capture, in page order, values bounded. `Dimensions` is
+/// the row that proves the value is read rather than reassembled: its two
+/// `<span>`s are joined by a comma that belongs to the page, and on three of
+/// the five captures that comma sits on its own source line.
+#[test]
+fn the_whole_spec_list_parses_in_page_order() {
+    for f in fixture::products() {
+        let labels: Vec<String> = parse_product_specs(&f.doc())
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "First available",
+                "Shipping weight",
+                "Product code",
+                "UPC",
+                "Package quantity",
+                "Dimensions",
+            ],
+            "{}",
+            f.slug()
+        );
+    }
+
+    let nordic = parse_product_specs(&ULTIMATE_OMEGA.doc());
+    assert_eq!(
+        nordic,
+        [
+            ("First available".to_string(), "03/2019".to_string()),
+            ("Shipping weight".to_string(), "0.72 lb".to_string()),
+            ("Product code".to_string(), "NOR-03790".to_string()),
+            ("UPC".to_string(), "768990037900".to_string()),
+            ("Package quantity".to_string(), "180 count".to_string()),
+            (
+                "Dimensions".to_string(),
+                "5.85 x 3.2 x 3.15 in, 0.72 lb".to_string()
+            ),
+        ]
+    );
+}
+
 /// Every capture has a `#product-specs-list`, the gummies page included — the
-/// three labels below resolve on all five once the case is right. #2 also wants
-/// `Package quantity` and `First available`, which are already reachable.
+/// three labels below resolve on all five. `Package quantity` and
+/// `First available` are reachable too; nothing on `ProductDetail` has a home
+/// for them yet, which is the separate specs-extraction issue's business.
 #[test]
 fn every_product_page_has_a_spec_list() {
     for f in fixture::products() {
@@ -374,6 +450,11 @@ fn extract_spec_returns_none_for_a_label_that_is_not_there() {
     let doc = ULTIMATE_OMEGA.doc();
     assert_eq!(extract_spec(&doc, "Country of origin"), None);
     assert_eq!(extract_spec(&fixture::empty_doc(), "UPC"), None);
+
+    // Whole label, not a prefix. The match used to be `starts_with`, which let
+    // a half-typed label answer with a neighbouring row's value.
+    assert_eq!(extract_spec(&doc, "Product"), None);
+    assert_eq!(extract_spec(&doc, "Shipping"), None);
 }
 
 // ---------------------------------------------------------------------------

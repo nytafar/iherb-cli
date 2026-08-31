@@ -6,6 +6,7 @@
 - **Rating:** 4.6/5 (330 reviews)
 - **Availability:** Out of Stock
 - **Product Code:** OLE-00570
+- **Shipping Weight:** 0.35 lb
 
 ## Description
 Keep Calm & Stay Alert GABA, L-Theanine & Lemon Balm Dietary Supplement With Other Natural Flavors No Synthetic Flavors or Colors Gluten Free Contents Certified NSF Certified B Corporation Delightfully Tasty A zen blend of strawberry and lemon verbena flavors. The Goods Inside GABA Starts working within 30-60 minutes to support a relaxed state of mind in moments of occasional stress. L-Theanine GABA's partner in sublime - this amino acid goes right to work in your brain to help you keep your cool. Lemon Balm Extract A traditional botanical that has been used for centuries.

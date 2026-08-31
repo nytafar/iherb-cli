@@ -72,13 +72,17 @@ fn every_field_names_the_strategy_that_produced_it() {
         );
     }
 
-    // And the ones nothing produced. `shipping_weight` is absent because of #2,
-    // not because the page lacks it — which is exactly the distinction that
-    // used to be invisible: before provenance, this was `None` and so was a
-    // field iHerb genuinely does not publish.
-    assert_eq!(product.source_of("shipping_weight"), Source::Absent);
+    // `shipping_weight` was in the list below until #2 landed. It was absent
+    // because the label lookup was case-sensitive, not because the page lacked
+    // it — exactly the distinction that used to be invisible: before
+    // provenance, this was `None` and so was a field iHerb genuinely does not
+    // publish. It now says `Dom`, which is where the page carries it.
+    assert_eq!(product.source_of("shipping_weight"), Source::Dom);
+
+    // And the one nothing produced. `review_distribution` was here too until
+    // #32; it is `Dom` on this page now, and still `Absent` on the four
+    // captures whose histogram widget is an empty shell or missing entirely.
     assert_eq!(product.source_of("category_breadcrumb"), Source::Absent);
-    assert_eq!(product.source_of("review_distribution"), Source::Absent);
 
     // And the one that has a value nobody read.
     assert_eq!(product.source_of("product_url"), Source::Defaulted);
@@ -116,15 +120,12 @@ fn the_dom_strategy_records_itself_and_enriches() {
 /// thinner record with no warning.
 ///
 /// Coverage, not values: `product_code` differs in *source* between the two
-/// paths on some pages, and #2 keeps it absent on the DOM path, which is why
-/// the comparison excludes the fields #2 owns and says so.
+/// paths on some pages, but no longer in presence. The exclusion list this test
+/// used to carry — `product_code` and `shipping_weight`, which #2 kept absent
+/// on the DOM path — is gone, and its absence is the assertion: every tracked
+/// field is now compared.
 #[test]
 fn every_strategy_produces_the_same_field_coverage() {
-    // #2's territory: `extract_spec` asks for "Product Code" / "Shipping
-    // Weight" and the page writes "Product code" / "Shipping weight", so the
-    // DOM path loses both. Flip this list to empty when #2 lands.
-    const LOST_TO_ISSUE_2: &[&str] = &["product_code", "shipping_weight"];
-
     for f in fixture::products() {
         let dom = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD").unwrap();
         let json_ld = as_production_would(f);
@@ -132,13 +133,13 @@ fn every_strategy_produces_the_same_field_coverage() {
         let dom_has: Vec<&str> = dom
             .field_presence()
             .into_iter()
-            .filter(|(name, present)| *present && !LOST_TO_ISSUE_2.contains(name))
+            .filter(|(_, present)| *present)
             .map(|(name, _)| name)
             .collect();
         let ld_has: Vec<&str> = json_ld
             .field_presence()
             .into_iter()
-            .filter(|(name, present)| *present && !LOST_TO_ISSUE_2.contains(name))
+            .filter(|(_, present)| *present)
             .map(|(name, _)| name)
             .collect();
 
@@ -164,11 +165,12 @@ fn a_scrape_reports_its_own_health() {
     assert_eq!(health.sources.len(), 19);
     assert_eq!(health.sources["name"], Source::JsonLd);
     assert_eq!(health.sources["ingredients"], Source::Dom);
-    assert_eq!(health.sources["shipping_weight"], Source::Absent);
+    assert_eq!(health.sources["shipping_weight"], Source::Dom);
+    assert_eq!(health.sources["category_breadcrumb"], Source::Absent);
 
     assert!(health
         .fields_absent
-        .contains(&"shipping_weight".to_string()));
+        .contains(&"category_breadcrumb".to_string()));
     assert!(!health.fields_absent.contains(&"name".to_string()));
 }
 
@@ -176,9 +178,14 @@ fn a_scrape_reports_its_own_health() {
 /// facts because it is a hairbrush".
 ///
 /// The gummies page has no ingredients, no suggested use and no warnings, and
-/// is not degraded: those fields are legitimately absent. The DOM path on the
-/// same page *is* degraded, because #2 eats `product_code` — something every
-/// product page publishes.
+/// is not degraded: those fields are legitimately absent. Neither is the DOM
+/// path on the same page, now that #2 has landed — it used to be, because
+/// `extract_spec` ate `product_code`, and that half of this test was the one
+/// real degradation the captures could produce.
+///
+/// So the rot half is simulated instead of borrowed from a bug: renaming
+/// `#product-specs-list` is what a selector rotting looks like from the
+/// parser's side, and it costs the DOM path both `product_code` and `upc`.
 #[test]
 fn degraded_distinguishes_rotted_selectors_from_a_sparse_page() {
     let sparse = as_production_would(OLLY_GUMMIES).health();
@@ -192,10 +199,23 @@ fn degraded_distinguishes_rotted_selectors_from_a_sparse_page() {
     let via_dom = parse_from_html(OLLY_GUMMIES.html(), "119174", BASE_URL, "USD")
         .unwrap()
         .health();
-    assert_eq!(via_dom.sources["product_code"], Source::Absent);
+    assert_eq!(via_dom.sources["product_code"], Source::Dom);
     assert!(
-        via_dom.degraded,
-        "product_code is in EXPECTED_FIELDS, so losing it to #2 is degradation"
+        !via_dom.degraded,
+        "the DOM path reads every expected field off this page"
+    );
+
+    let renamed = OLLY_GUMMIES
+        .html()
+        .replace("product-specs-list", "product-specs-listicle");
+    let rotted = parse_from_html(&renamed, "119174", BASE_URL, "USD")
+        .unwrap()
+        .health();
+    assert_eq!(rotted.sources["product_code"], Source::Absent);
+    assert_eq!(rotted.sources["upc"], Source::Absent);
+    assert!(
+        rotted.degraded,
+        "product_code and upc are in EXPECTED_FIELDS, so losing them is degradation"
     );
 }
 
@@ -314,7 +334,8 @@ fn health_serializes_to_the_block_issue_9_renders() {
     assert_eq!(json["degraded"], false);
     assert_eq!(json["sources"]["name"], "json_ld");
     assert_eq!(json["sources"]["ingredients"], "dom");
-    assert_eq!(json["sources"]["shipping_weight"], "absent");
+    assert_eq!(json["sources"]["shipping_weight"], "dom");
+    assert_eq!(json["sources"]["category_breadcrumb"], "absent");
     assert_eq!(json["sources"]["product_url"], "defaulted");
     assert!(json["fields_absent"].is_array());
     assert!(json["fields_defaulted"].is_array());
@@ -414,10 +435,10 @@ fn defaulted_is_not_absent() {
     assert!(!health.fields_absent.contains(&"product_url".to_string()));
     assert!(health
         .fields_absent
-        .contains(&"shipping_weight".to_string()));
+        .contains(&"category_breadcrumb".to_string()));
     assert!(!health
         .fields_defaulted
-        .contains(&"shipping_weight".to_string()));
+        .contains(&"category_breadcrumb".to_string()));
 }
 
 /// The captures all publish a currency, so none of them is degraded on that

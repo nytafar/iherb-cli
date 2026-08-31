@@ -6,6 +6,7 @@
 - **Rating:** 4.7/5 (13,195 reviews)
 - **Availability:** In Stock
 - **Product Code:** CGN-01990
+- **Shipping Weight:** 0.2 lb
 
 ## Description
 Over 25 Vitamins and Minerals Featuring Methyl B12, L-MethylFolate, and Quercetin Helps Support a Healthy Lifestyle* California Gold Nutrition® Multivitamin and Mineral Two-A-Day can help you get your daily dose of numerous vitamins and minerals, helping to support a healthier lifestyle.* Our high-potency formula contains vitamins A, C, D, E, B6, and B12, which can help promote antioxidant activity and support your cells and numerous systems, including the immune system.* You’ll also find high levels of important minerals, like zinc and magnesium, which can help support brain, muscle, and nerve function.* iTested Verified

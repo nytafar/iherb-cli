@@ -615,34 +615,113 @@ fn assign_section_by_heading(heading: &str, content: String, product: &mut Produ
     }
 }
 
-/// Extract a value from #product-specs-list by label prefix.
-pub fn extract_spec(doc: &Html, label: &str) -> Option<String> {
-    if let Ok(sel) = Selector::parse("#product-specs-list li") {
-        for li in doc.select(&sel) {
-            let text: String = li.text().collect::<Vec<_>>().join("").trim().to_string();
-            if text.starts_with(label) {
-                // Extract the value after the label and colon
-                let value = text
-                    .split_once(':')
-                    .map(|(_, v)| v.trim().to_string())
-                    .filter(|s| !s.is_empty());
-                if value.is_some() {
-                    return value;
-                }
-                // Try extracting from span child
-                if let Ok(span_sel) = Selector::parse("span") {
-                    if let Some(span) = li.select(&span_sel).next() {
-                        let span_text: String =
-                            span.text().collect::<Vec<_>>().join("").trim().to_string();
-                        if !span_text.is_empty() {
-                            return Some(span_text);
-                        }
-                    }
-                }
+/// Every `label: value` row in `#product-specs-list`, in page order.
+///
+/// The list is a flat `<ul>` of `<li>Label: <span>value</span></li>` rows —
+/// `First available`, `Shipping weight`, `Product code`, `UPC`,
+/// `Package quantity` and `Dimensions` on all five captures. Parsing the whole
+/// list once and looking a label up in the result replaces the old
+/// label-at-a-time scan, and is what makes bounding the value possible: the
+/// `Shipping weight` row also contains the info tooltip, which is not part of
+/// the value (#2).
+pub fn parse_product_specs(doc: &Html) -> Vec<(String, String)> {
+    let Ok(row_sel) = Selector::parse("#product-specs-list li") else {
+        return Vec::new();
+    };
+    // The "what does shipping weight mean" popover, which lives *inside* the
+    // `Shipping weight` row. It is page chrome, not the value, and the old
+    // "everything after the first colon" rule swallowed all 500 words of it.
+    let Ok(tooltip_sel) = Selector::parse("#cms-popover-tooltip, cms-popover") else {
+        return Vec::new();
+    };
+
+    doc.select(&row_sel)
+        .filter_map(|li| parse_spec_row(li, &tooltip_sel))
+        .collect()
+}
+
+/// Split one `<li>` into its label and its value.
+///
+/// Walks the row's own children in document order rather than taking
+/// `li.text()` wholesale, because the row is not just text: the colon that
+/// separates label from value is in a text node, the value is in one or more
+/// `<span>`s, and the tooltip is a subtree that has to be skipped rather than
+/// read. `Dimensions` is why the text nodes *between* spans are kept — the
+/// `", "` joining `5.85 x 3.2 x 3.15 in` to `0.72 lb` is the page's own.
+fn parse_spec_row<'a>(
+    li: scraper::ElementRef<'a>,
+    tooltip_sel: &Selector,
+) -> Option<(String, String)> {
+    let mut label = String::new();
+    let mut value = String::new();
+    let mut seen_colon = false;
+
+    for child in li.children() {
+        if let Some(text) = child.value().as_text() {
+            if seen_colon {
+                value.push_str(text);
+            } else if let Some((before, after)) = text.split_once(':') {
+                label.push_str(before);
+                value.push_str(after);
+                seen_colon = true;
+            } else {
+                label.push_str(text);
             }
+            continue;
+        }
+        let Some(el) = scraper::ElementRef::wrap(child) else {
+            continue;
+        };
+        if tooltip_sel.matches(&el) {
+            continue;
+        }
+        let text: String = el.text().collect();
+        if seen_colon {
+            value.push_str(&text);
+        } else {
+            label.push_str(&text);
         }
     }
-    None
+
+    if !seen_colon {
+        return None;
+    }
+    let value = squeeze(&value);
+    if value.is_empty() {
+        return None;
+    }
+    Some((squeeze(&label), value))
+}
+
+/// Collapse the HTML source's line breaks and indentation into single spaces.
+///
+/// The `Dimensions` row writes its separating comma on its own line on three of
+/// the five captures, so the space that would otherwise be left in front of it
+/// is indentation rather than content and goes too.
+fn squeeze(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for word in text.split_whitespace() {
+        if !out.is_empty() && !word.starts_with(',') {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
+
+/// Look one label up in `#product-specs-list`.
+///
+/// The match is case-insensitive because the page writes `Product code:` and
+/// `Shipping weight:` in sentence case while the call sites ask in title case,
+/// so two of the three production lookups could never resolve (#2). It is also
+/// whole-label rather than the old `starts_with`: a prefix match would let
+/// `"Product"` answer with the product code, and every real caller names a
+/// whole label anyway.
+pub fn extract_spec(doc: &Html, label: &str) -> Option<String> {
+    parse_product_specs(doc)
+        .into_iter()
+        .find(|(found, _)| found.eq_ignore_ascii_case(label))
+        .map(|(_, value)| value)
 }
 
 /// Read availability out of the DOM, in preference order, or `None` when the

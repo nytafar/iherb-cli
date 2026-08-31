@@ -5,12 +5,13 @@
 //! a checked-in file; run `UPDATE_GOLDEN=1 cargo test` to rewrite the goldens,
 //! then read the diff before committing it.
 //!
-//! The goldens are characterizations like everything else here, and two known
-//! bugs are visible in them. `## Overview` has no `Shipping Weight` line,
-//! because #2 loses it; and `## Reviews` never appears at all, because
+//! The goldens are characterizations like everything else here, and one known
+//! bug is still visible in them: `## Reviews` never appears, because
 //! `parse_review_distribution_html` finds nothing on a real page (see
-//! `product_dom::review_distribution_is_never_found_on_a_real_page`). When
-//! either lands, the golden grows a line and that diff is the proof.
+//! `product_dom::review_distribution_is_never_found_on_a_real_page`). When it
+//! lands, the golden grows a section and that diff is the proof. The
+//! `Shipping Weight` line that #2 used to eat is there now, and its arrival was
+//! the same kind of diff.
 
 use iherb_cli::cli::Section;
 use iherb_cli::output::{format_product_detail, format_search_results};
@@ -140,20 +141,23 @@ fn no_captured_page_is_degraded_on_the_production_path() {
 /// degradation, not every absent field on the page.
 ///
 /// `degraded` is decided by `EXPECTED_FIELDS`, but the line used to print
-/// `fields_absent`, which is every absent field there is. On the DOM path the
-/// gummies page has eight absent fields and exactly one of them — `product_code`,
-/// eaten by #2 — is why the record is degraded. Naming the other seven sends a
-/// reader hunting a selector that is working fine and is worse than saying
-/// nothing.
+/// `fields_absent`, which is every absent field there is. The gummies page on
+/// the DOM path has several absent fields and only one of them is ever a reason
+/// to call the record broken. Naming the innocents sends a reader hunting a
+/// selector that is working fine, and is worse than saying nothing.
+///
+/// The degradation is manufactured, because no capture produces one any more:
+/// #2 used to eat `product_code` off every page and this test borrowed that.
+/// Relabelling the one spec row costs the DOM path `product_code` and nothing
+/// else, which is the single-culprit shape the line is about.
 #[test]
 fn the_degraded_line_names_only_what_caused_the_degradation() {
-    let product = iherb_cli::scraper::product::parse_from_html(
-        crate::fixture::OLLY_GUMMIES.html(),
-        "119174",
-        BASE_URL,
-        "USD",
-    )
-    .unwrap();
+    let relabelled = crate::fixture::OLLY_GUMMIES
+        .html()
+        .replace("Product code:", "Product identifier:");
+    let product =
+        iherb_cli::scraper::product::parse_from_html(&relabelled, "119174", BASE_URL, "USD")
+            .unwrap();
 
     let health = product.health();
     assert!(health.degraded);
