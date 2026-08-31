@@ -146,6 +146,31 @@ impl BrowserSession {
         Ok(page)
     }
 
+    /// The URL of every tab this browser currently has open.
+    ///
+    /// Read back over CDP rather than counted locally, so it is the browser's
+    /// answer and not ours. It exists because #45 could not be demonstrated any
+    /// other way: the fetch pipeline *said* it opened a page per target, and
+    /// nothing said how many were still open afterwards. #10 will want the same
+    /// answer once it runs targets concurrently.
+    ///
+    /// A tab Chrome is still tearing down can appear here for a moment after
+    /// `Page::close` returns, because closing is a request rather than an
+    /// answer. A caller that wants a settled count has to read twice.
+    pub async fn open_page_urls(&self) -> Result<Vec<String>, IherbError> {
+        let browser = self.browser.lock().await;
+        let pages = browser
+            .pages()
+            .await
+            .map_err(|e| IherbError::BrowserLaunch(format!("Failed to list pages: {}", e)))?;
+
+        let mut urls = Vec::with_capacity(pages.len());
+        for page in pages {
+            urls.push(page.url().await.ok().flatten().unwrap_or_default());
+        }
+        Ok(urls)
+    }
+
     pub async fn close(self) -> Result<(), IherbError> {
         let mut browser = self.browser.lock().await;
         browser

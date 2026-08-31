@@ -182,10 +182,37 @@ pub async fn fetch_on<T: FetchTarget>(
     config: &AppConfig,
     session: &BrowserSession,
 ) -> Result<Fetched<T::Output>> {
+    let page = session.new_page().await?;
+
+    // The tab is closed on the way out of *both* arms, which is why the work is
+    // a separate call rather than the body of this one: a `?` anywhere in there
+    // used to return past the close, and a single fetch never noticed because
+    // the process exited and Chrome died with it. #10 runs N targets over one
+    // shared session, where every leaked tab is a live renderer process that
+    // stays live (#45).
+    let result = read_target(target, config, &page).await;
+
+    if let Err(e) = page.close().await {
+        // A tab that will not close is not a reason to throw away a good
+        // result; it is a reason to say so.
+        tracing::warn!("Failed to close page: {}", e);
+    }
+
+    result
+}
+
+/// Navigate, extract and cache one target on an already-open page.
+///
+/// Split out of [`fetch_on`] so that the page it was handed can be closed on
+/// every path out, including the error ones. It owns nothing and closes
+/// nothing.
+async fn read_target<T: FetchTarget>(
+    target: &T,
+    config: &AppConfig,
+    page: &Page,
+) -> Result<Fetched<T::Output>> {
     let cache = Cache::new(config.cache_dir.clone(), config.no_cache);
     let key = target.cache_key();
-
-    let page = session.new_page().await?;
     let navigator = Navigator::new(config.delay_ms);
 
     // Exhaustive so that #11 has to decide what a new variant means here.
@@ -204,11 +231,11 @@ pub async fn fetch_on<T: FetchTarget>(
 
         let url = target.url(page_num);
         let html = navigator
-            .navigate_with_retry(&page, &url, NAVIGATION_RETRIES)
+            .navigate_with_retry(page, &url, NAVIGATION_RETRIES)
             .await
             .context(target.navigation_context())?;
 
-        if target.extract(&page, &html, &mut acc).await? == Paging::Done {
+        if target.extract(page, &html, &mut acc).await? == Paging::Done {
             break;
         }
 
