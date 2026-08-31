@@ -124,7 +124,7 @@ Take 1 capsule daily with or without food.
 | `--currency <code>` | Currency code (e.g., `USD`, `CHF`, `EUR`) | `USD` |
 | `--no-cache` | Bypass local cache and fetch fresh data | — |
 | `--delay <ms>` | Delay between requests in milliseconds | `2000` |
-| `--debug` | Run browser in headed (visible) mode | — |
+| `--debug` | Run the browser headed (a visible window), log at debug level, and print the provenance table | — |
 
 ```bash
 # Swiss storefront with CHF pricing

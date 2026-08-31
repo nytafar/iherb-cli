@@ -70,9 +70,22 @@ impl BrowserSession {
             builder = builder.arg(*flag);
         }
 
-        if !config.debug {
-            builder = builder.arg(("headless", "new"));
-        }
+        // Headless is a *mode* on the builder, not a switch in `args`, and the
+        // mode defaults to `HeadlessMode::True` (#47). Setting `("headless",
+        // "new")` as an ordinary arg therefore never produced a headful
+        // browser: on the `--debug` path nothing was set, the default mode
+        // still appended `--headless`, and the flag only ever changed logging.
+        // It looked right on the headless path purely by accident — the mode
+        // appends a *valueless* `headless` key, which merges into the `new`
+        // value already under that key and comes out as `--headless=new`.
+        //
+        // `--debug` has to be genuinely headful: #12's `setup` command exists so
+        // a human can complete a Cloudflare challenge in a window they can see.
+        builder = if config.debug {
+            builder.with_head()
+        } else {
+            builder.new_headless_mode()
+        };
 
         // Chrome refuses to run as root without --no-sandbox
         #[cfg(target_os = "linux")]
