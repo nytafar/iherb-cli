@@ -239,6 +239,158 @@ async fn a_default_run_is_still_headless_new() {
 // #45: pages are closed, so a batch does not accumulate a tab per target.
 // ---------------------------------------------------------------------------
 
+/// Block until a profile directory appears that was not in `before`, and
+/// return it.
+///
+/// Polled rather than predicted: the name carries a millisecond timestamp
+/// chosen inside `launch`, so a test cannot compute it, and watching for it is
+/// also what tells us the launch has got past `create_dir_all` and is somewhere
+/// inside starting Chrome — which is the moment the interrupt has to arrive.
+async fn wait_for_new_profile_dir(before: &[PathBuf]) -> PathBuf {
+    loop {
+        if let Some(dir) = profile_dirs().into_iter().find(|d| !before.contains(d)) {
+            return dir;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+}
+
+/// #46, the case the first implementation missed: **an interrupt during the
+/// launch itself**.
+///
+/// `app.rs` races the command against Ctrl+C in a `select!`, so an interrupt
+/// drops the command future — and with it a `BrowserSession::launch` that has
+/// not finished. The launch used to create the profile directory and remove it
+/// in the `Err` arm of the await below it, which a dropped future never
+/// reaches. Nothing else could clean up either: `browser_session` was still
+/// `None`, because `dispatch` had not yet had a session to assign, so the
+/// post-select cleanup found nothing to do. The directory stayed.
+///
+/// The assertion is on the filesystem, not on a type: a guard that is
+/// constructed but never runs would satisfy any test that only watched the
+/// construction.
+#[tokio::test]
+async fn an_interrupt_during_launch_leaves_no_profile_directory() {
+    let _serial = ONE_AT_A_TIME.lock().await;
+    let Some(chrome) = system_chrome() else {
+        eprintln!("SKIPPED: no system Chrome; this test needs a real browser");
+        return;
+    };
+
+    let scratch = Scratch::new("interrupt-launch");
+    let config = test_config(scratch.path(), false);
+    let before = profile_dirs();
+
+    // Boxed so the future can be dropped on demand. This is what the `select!`
+    // in `app.rs` does to the command future when Ctrl+C wins the race.
+    let mut launching = Box::pin(BrowserSession::launch(chrome, &config));
+
+    let profile_dir = tokio::select! {
+        _ = &mut launching => panic!(
+            "the browser finished launching before the interrupt could arrive; \
+             this test needs to interrupt a launch that is still in flight"
+        ),
+        dir = wait_for_new_profile_dir(&before) => dir,
+    };
+
+    assert!(
+        profile_dir.exists(),
+        "the launch should have created {} by now",
+        profile_dir.display()
+    );
+
+    // The interrupt.
+    drop(launching);
+
+    assert!(
+        !profile_dir.exists(),
+        "an interrupt during launch left the profile directory behind: {}",
+        profile_dir.display()
+    );
+
+    // And nothing else was left either, in case the launch had got far enough
+    // to start a second one.
+    let left: Vec<PathBuf> = profile_dirs()
+        .into_iter()
+        .filter(|d| !before.contains(d))
+        .collect();
+    for dir in &left {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    assert!(
+        left.is_empty(),
+        "profile directories left behind: {:?}",
+        left
+    );
+}
+
+/// #46's other missed case: **a panic unwinding past a live session**.
+///
+/// `close` is not what cleans up any more, and this is why it cannot be. A
+/// panic never calls it; unwinding only drops. Before, the drop path got a
+/// single bare `remove_dir_all` with no wait and no retry — the weakest
+/// available attempt, handed to the situation least likely to survive it,
+/// because a session being unwound past is a session whose Chrome is still
+/// alive and still writing. The independent review reproduced exactly this: a
+/// broken-pipe panic left a 34 MB profile behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panic_unwinding_past_a_session_leaves_no_profile_directory() {
+    let _serial = ONE_AT_A_TIME.lock().await;
+    let Some(chrome) = system_chrome() else {
+        eprintln!("SKIPPED: no system Chrome; this test needs a real browser");
+        return;
+    };
+
+    let scratch = Scratch::new("panic-unwind");
+    let config = test_config(scratch.path(), false);
+    let before = profile_dirs();
+
+    let (tell, hear) = tokio::sync::oneshot::channel();
+    let panicked = tokio::spawn(async move {
+        let session = BrowserSession::launch(chrome, &config)
+            .await
+            .expect("failed to launch the browser");
+        tell.send(session.profile_dir().to_path_buf())
+            .expect("the test stopped listening");
+
+        // The session is a live local; the unwind is the only thing that will
+        // ever drop it.
+        panic!("something went wrong while the browser was open");
+    });
+
+    let profile_dir = hear.await.expect("the task never reported its profile dir");
+    assert!(
+        profile_dir.exists(),
+        "the launch created no profile directory"
+    );
+
+    let err = panicked.await.expect_err("the task was supposed to panic");
+    assert!(
+        err.is_panic(),
+        "the task ended without panicking: {:?}",
+        err
+    );
+
+    assert!(
+        !profile_dir.exists(),
+        "a panic left the profile directory behind: {}",
+        profile_dir.display()
+    );
+
+    let left: Vec<PathBuf> = profile_dirs()
+        .into_iter()
+        .filter(|d| !before.contains(d))
+        .collect();
+    for dir in &left {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    assert!(
+        left.is_empty(),
+        "profile directories left behind: {:?}",
+        left
+    );
+}
+
 /// Where the tests below find a browser, or `None`.
 ///
 /// Deliberately *not* `resolve_chrome`: that downloads Chrome for Testing when

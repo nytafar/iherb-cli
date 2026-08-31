@@ -20,10 +20,6 @@ use crate::targets::{ProductTarget, SearchTarget};
 /// The exit status a process killed by SIGINT reports: 128 + SIGINT.
 const EXIT_INTERRUPTED: i32 = 130;
 
-/// How long a second Ctrl+C waits for Chrome's subprocesses to die before
-/// sweeping the profile directory they were writing into.
-const IMPATIENT_CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
-
 /// Run the CLI: configure logging, load config, and dispatch the subcommand.
 pub async fn run(cli: Cli) -> Result<()> {
     let filter = if cli.debug {
@@ -110,7 +106,6 @@ pub async fn run(cli: Cli) -> Result<()> {
     // it, and *that* is what kills Chrome and removes the profile directory.
     // The old handler's `process::exit` is the one thing that reaches neither.
     if let Some(session) = browser_session.take() {
-        let profile_dir = session.profile_dir().to_path_buf();
         tokio::select! {
             result = session.close() => {
                 if let Err(e) = result {
@@ -118,13 +113,18 @@ pub async fn run(cli: Cli) -> Result<()> {
                 }
             }
             _ = impatient.notified() => {
-                // The session went with the cancelled future, and dropping it
-                // is what kills Chrome. Chrome's own subprocesses take a moment
-                // to follow, and they are still writing into the profile while
-                // `Drop` is trying to remove it — so it gets one more pass once
-                // they are gone. Bounded, because a third Ctrl+C exits outright.
-                tokio::time::sleep(IMPATIENT_CLEANUP_GRACE).await;
-                let _ = std::fs::remove_dir_all(&profile_dir);
+                // Nothing to do here, and that is the fix rather than an
+                // omission. Abandoning the graceful close drops the future that
+                // owns the session, and dropping a session kills Chrome and
+                // then removes its profile directory, waiting for Chrome to let
+                // go if the first attempt finds it still holding on.
+                //
+                // This arm used to sleep and then call `remove_dir_all` itself,
+                // because `Drop` at the time got a single bare attempt that
+                // usually lost the race. It no longer does, so a second removal
+                // here would only run *before* Chrome had been killed and
+                // achieve nothing. Bounded either way: a third Ctrl+C exits
+                // outright.
             }
         }
     }
