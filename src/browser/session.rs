@@ -57,6 +57,25 @@ impl BrowserSession {
             ))
         })?;
 
+        // Nothing else can clean this directory up if the launch fails: `close`
+        // and `Drop` both belong to a session that, in that case, never exists
+        // (#46). Chrome that will not start is exactly when a launch is retried,
+        // so this is the leak that repeats.
+        match Self::launch_into(chrome_path, config, user_data_dir.clone()).await {
+            Ok(session) => Ok(session),
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&user_data_dir);
+                Err(e)
+            }
+        }
+    }
+
+    /// The launch proper, on a profile directory that already exists.
+    async fn launch_into(
+        chrome_path: PathBuf,
+        config: &AppConfig,
+        user_data_dir: PathBuf,
+    ) -> Result<Self, IherbError> {
         let mut builder = BrowserConfig::builder()
             .chrome_executable(chrome_path)
             .user_data_dir(user_data_dir.clone())
@@ -144,6 +163,16 @@ impl BrowserSession {
             .await;
 
         Ok(page)
+    }
+
+    /// The temporary profile directory Chrome was launched against.
+    ///
+    /// Exposed so that a caller who abandons [`Self::close`] can still finish
+    /// what it started: dropping the session kills Chrome, but its subprocesses
+    /// keep writing here for a moment afterwards, and the removal `Drop`
+    /// attempts in that moment is the one that leaves a partial directory (#46).
+    pub fn profile_dir(&self) -> &std::path::Path {
+        &self.user_data_dir
     }
 
     /// The URL of every tab this browser currently has open.

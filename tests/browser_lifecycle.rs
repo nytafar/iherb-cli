@@ -1,12 +1,18 @@
 //! What the browser actually does, observed rather than read.
 //!
-//! The two bugs this file guards (#45, #47) were both invisible to code
-//! review: the builder call *said* `("headless", "new")` and the fetch pipeline
-//! *said* `session.new_page()`, and neither said what Chrome received or how
-//! many tabs were left behind. So every assertion here is made against
-//! something the process did — an argv vector a real executable was handed, a
-//! tab count read back over CDP — and never against the call that was supposed
-//! to produce it.
+//! The bugs this file guards (#45, #46, #47) were all invisible to code review:
+//! the builder call *said* `("headless", "new")` and the fetch pipeline *said*
+//! `session.new_page()`, and neither said what Chrome received, how many tabs
+//! were left behind, or what stayed on disk. So every assertion here is made
+//! against something the process did — an argv vector a real executable was
+//! handed, a tab list read back over CDP, a directory that is or is not still
+//! there — and never against the call that was supposed to produce it.
+//!
+//! #46's other half, the Ctrl+C path, is not here. Signal handling is
+//! process-global and `ctrlc::set_handler` may be called once, so a test cannot
+//! own it; it was verified by interrupting real runs and reading the process
+//! list and the temp directory, before and after. The commit message records
+//! both readings.
 //!
 //! `--headless` is asserted through a stub executable rather than through
 //! Chrome itself. The stub is not a mock of the builder: it is a real program
@@ -19,6 +25,8 @@
 //! network.
 
 use std::path::{Path, PathBuf};
+
+use tokio::sync::Mutex;
 
 use iherb_cli::browser::session::BrowserSession;
 use iherb_cli::cache::CacheKey;
@@ -40,19 +48,41 @@ fn test_config(scratch: &Path, debug: bool) -> AppConfig {
     }
 }
 
-fn scratch_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "iherb-cli-test-{}-{}-{}",
-        name,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A temp directory that removes itself, including when an assertion panics on
+/// the way past it. A test that leaks a directory on failure is a test that
+/// makes the next failure harder to read.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "iherb-cli-test-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
 }
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Every test here reads process-wide state — the temp directory, and a real
+/// browser's tab list — so they run one at a time. Two of them concurrently
+/// would each see the other's profile directory as its own leak.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::const_new(());
 
 /// The `iherb-cli-<pid>-<millis>` profile directories that exist right now.
 fn profile_dirs() -> Vec<PathBuf> {
@@ -105,14 +135,22 @@ async fn captured_argv(scratch: &Path, debug: bool) -> Vec<String> {
     // on its way out is the whole point.
     let _ = BrowserSession::launch(exe, &test_config(scratch, debug)).await;
 
-    // A launch that never got as far as exec would leave the profile directory
-    // behind; sweep whatever this call created either way, so the assertions
-    // below are the only thing that can fail.
-    for dir in profile_dirs() {
-        if !before.contains(&dir) {
-            let _ = std::fs::remove_dir_all(&dir);
-        }
+    // #46: a launch that fails still created a profile directory, and nothing
+    // else will ever clean it up — `close` and `Drop` both belong to a session
+    // that in this case does not exist. Every call here fails, so every call
+    // here is that path.
+    let left_behind: Vec<PathBuf> = profile_dirs()
+        .into_iter()
+        .filter(|d| !before.contains(d))
+        .collect();
+    for dir in &left_behind {
+        let _ = std::fs::remove_dir_all(dir);
     }
+    assert!(
+        left_behind.is_empty(),
+        "a failed launch left its profile directory behind: {:?}",
+        left_behind
+    );
 
     let recorded = std::fs::read_to_string(&argv_file).unwrap_or_else(|e| {
         panic!(
@@ -157,9 +195,9 @@ fn headless_args(argv: &[String]) -> Vec<&String> {
 /// fix; this is the same observation, made from a test.
 #[tokio::test]
 async fn debug_launches_a_headful_browser() {
-    let scratch = scratch_dir("headful");
-    let argv = captured_argv(&scratch, true).await;
-    let _ = std::fs::remove_dir_all(&scratch);
+    let _serial = ONE_AT_A_TIME.lock().await;
+    let scratch = Scratch::new("headful");
+    let argv = captured_argv(scratch.path(), true).await;
 
     assert_argv_is_ours(&argv);
     assert!(
@@ -177,9 +215,9 @@ async fn debug_launches_a_headful_browser() {
 /// passed as one string.
 #[tokio::test]
 async fn a_default_run_is_still_headless_new() {
-    let scratch = scratch_dir("headless");
-    let argv = captured_argv(&scratch, false).await;
-    let _ = std::fs::remove_dir_all(&scratch);
+    let _serial = ONE_AT_A_TIME.lock().await;
+    let scratch = Scratch::new("headless");
+    let argv = captured_argv(scratch.path(), false).await;
 
     assert_argv_is_ours(&argv);
     assert_eq!(
@@ -340,13 +378,14 @@ async fn settled_pages(session: &BrowserSession) -> Vec<String> {
 /// because the error path leaked the same page the success path did.
 #[tokio::test]
 async fn a_batch_does_not_accumulate_a_tab_per_target() {
+    let _serial = ONE_AT_A_TIME.lock().await;
     let Some(chrome) = system_chrome() else {
         eprintln!("SKIPPED: no system Chrome; this test needs a real browser");
         return;
     };
 
-    let scratch = scratch_dir("tabs");
-    let config = test_config(&scratch, false);
+    let scratch = Scratch::new("tabs");
+    let config = test_config(scratch.path(), false);
     let session = BrowserSession::launch(chrome, &config)
         .await
         .expect("failed to launch the browser");
@@ -372,7 +411,6 @@ async fn a_batch_does_not_accumulate_a_tab_per_target() {
     open_after_each.push(settled_pages(&session).await);
 
     let _ = session.close().await;
-    let _ = std::fs::remove_dir_all(&scratch);
 
     // Every fetch navigated somewhere recognisable, so a page of ours that is
     // still listed is a page that was never closed.
