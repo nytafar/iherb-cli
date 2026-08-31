@@ -1,18 +1,184 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// One product as a search results page presents it.
+///
+/// The search half of #28's provenance (#49). `ProductDetail` stopped
+/// fabricating values in #30/#31 and started recording where each one came
+/// from; the search path did not, and carried the same class of confidently
+/// wrong data — a currency nobody read, a price of `0.0` for a card whose price
+/// would not parse, and an `in_stock` that said "yes" when the card said
+/// nothing. It now answers the same questions in the same shape, so a caller —
+/// and #9's `--json` — sees one provenance block rather than one that exists on
+/// products and silently not on search.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProductSummary {
     pub name: String,
     pub brand: String,
-    pub price: f64,
+    /// The price on the card, or `None` when neither the microdata nor the
+    /// card's own attributes carried one that parsed.
+    ///
+    /// An `Option` rather than an `f64` because the fallback was `0.0`, which a
+    /// caller cannot tell from a genuinely free product — the same conflation
+    /// `in_stock` had before #31. (`ProductDetail::price` still uses `0.0` that
+    /// way; that is #50, and not this.)
+    pub price: Option<f64>,
     pub original_price: Option<f64>,
     pub currency: String,
     pub rating: Option<f64>,
     pub review_count: Option<u32>,
     pub product_url: String,
     pub product_id: String,
-    pub in_stock: bool,
+    /// Whether the product can be bought, or `None` when nothing on the card
+    /// said either way. The same `Option` and for the same reason as
+    /// [`ProductDetail::in_stock`] (#31): the card's stock attribute is absent
+    /// often enough that defaulting to `true` reported unbuyable products as
+    /// purchasable.
+    pub in_stock: Option<bool>,
+    /// Where every field above came from.
+    ///
+    /// `#[serde(default)]` so a cache entry written before this existed still
+    /// deserializes, as [`Strategy::Unrecorded`] with no sources — which is the
+    /// truth about such a file.
+    #[serde(default)]
+    pub extraction: Extraction,
+}
+
+impl ProductSummary {
+    /// Fields any search card publishes.
+    ///
+    /// One of these coming back unattested means the card selectors have
+    /// rotted, not that the product lacks the attribute. Short, for the same
+    /// reason as [`ProductDetail::EXPECTED_FIELDS`]: `rating` and
+    /// `review_count` are out because an unreviewed product legitimately has
+    /// neither, `original_price` because most products are not discounted, and
+    /// `in_stock` because the card genuinely omits the attribute on products
+    /// that are in stock.
+    pub const EXPECTED_FIELDS: &'static [&'static str] = &[
+        "name",
+        "brand",
+        "price",
+        "currency",
+        "product_url",
+        "product_id",
+    ];
+
+    /// Every field provenance tracks, paired with whether this record has a
+    /// value for it.
+    ///
+    /// # This destructuring is load-bearing
+    ///
+    /// Same rule as [`ProductDetail::field_presence`], and for the same reason:
+    /// no `..` rest, so adding a field to this struct stops the build until
+    /// someone decides whether provenance tracks it. See that method for the
+    /// argument.
+    pub fn field_presence(&self) -> Vec<(&'static str, bool)> {
+        let Self {
+            name,
+            brand,
+            price,
+            original_price,
+            currency,
+            rating,
+            review_count,
+            product_url,
+            // Tracked, unlike on `ProductDetail`. There the id is the caller's
+            // input echoed back; here it is read off the card, and a card whose
+            // id could not be read produces no summary at all.
+            product_id,
+            in_stock,
+            // Not tracked: the provenance record itself.
+            extraction: _,
+        } = self;
+
+        vec![
+            ("name", !name.is_empty()),
+            ("brand", !brand.is_empty()),
+            ("price", price.is_some()),
+            ("original_price", original_price.is_some()),
+            ("currency", !currency.is_empty()),
+            ("rating", rating.is_some()),
+            ("review_count", review_count.is_some()),
+            ("product_url", !product_url.is_empty()),
+            ("product_id", !product_id.is_empty()),
+            ("in_stock", in_stock.is_some()),
+        ]
+    }
+
+    /// Where `field` came from. Shorthand for `self.extraction.source_of`.
+    pub fn source_of(&self, field: &str) -> Source {
+        self.extraction.source_of(field)
+    }
+
+    /// Attribute every value this record holds, and that nothing has claimed
+    /// yet, to `source`.
+    pub fn claim_unattributed(&mut self, source: Source) {
+        let presence = self.field_presence();
+        claim_present(&mut self.extraction, &presence, source);
+    }
+
+    /// This record's report on itself, in the same shape a [`ProductDetail`]
+    /// reports — which is the point of #49: #9 renders one block, not two.
+    pub fn health(&self) -> ExtractionHealth {
+        derive_health(
+            &self.extraction,
+            &self.field_presence(),
+            Self::EXPECTED_FIELDS,
+        )
+    }
+}
+
+/// Attribute every present field that nothing has claimed yet to `source`.
+///
+/// Derived from the values rather than written out by hand at each parser, so a
+/// parser that starts filling a new field cannot forget to record it.
+fn claim_present(extraction: &mut Extraction, presence: &[(&'static str, bool)], source: Source) {
+    for (field, present) in presence {
+        if *present {
+            extraction.claim(field, source);
+        }
+    }
+}
+
+/// Derive a record's report on itself from its field registry.
+///
+/// Shared by [`ProductDetail`] and [`ProductSummary`] so the two cannot drift
+/// into reporting the same thing in two shapes — which is what #49 was about at
+/// the level below this one.
+fn derive_health(
+    extraction: &Extraction,
+    presence: &[(&'static str, bool)],
+    expected: &[&'static str],
+) -> ExtractionHealth {
+    let mut sources = BTreeMap::new();
+    let mut fields_absent = Vec::new();
+    let mut fields_defaulted = Vec::new();
+
+    for (field, _) in presence {
+        let source = extraction.source_of(field);
+        match source {
+            Source::Absent => fields_absent.push((*field).to_string()),
+            Source::Defaulted => fields_defaulted.push((*field).to_string()),
+            _ => {}
+        }
+        sources.insert((*field).to_string(), source);
+    }
+
+    // Not `== Absent`: a field that carries a hardcoded constant was not
+    // produced either, and treating it as if it had been makes its slot in the
+    // expected set a rot-detector that can never fire.
+    let degraded = expected
+        .iter()
+        .any(|f| !extraction.source_of(f).is_attested());
+
+    ExtractionHealth {
+        strategy: extraction.strategy,
+        enriched: extraction.enriched,
+        sources,
+        fields_absent,
+        fields_defaulted,
+        degraded,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,44 +461,17 @@ impl ProductDetail {
     /// Derived from the values rather than written out by hand at each parser,
     /// so a parser that starts filling a new field cannot forget to record it.
     pub fn claim_unattributed(&mut self, source: Source) {
-        for (field, present) in self.field_presence() {
-            if present {
-                self.extraction.claim(field, source);
-            }
-        }
+        let presence = self.field_presence();
+        claim_present(&mut self.extraction, &presence, source);
     }
 
     /// This record's report on itself.
     pub fn health(&self) -> ExtractionHealth {
-        let mut sources = BTreeMap::new();
-        let mut fields_absent = Vec::new();
-        let mut fields_defaulted = Vec::new();
-
-        for (field, _) in self.field_presence() {
-            let source = self.extraction.source_of(field);
-            match source {
-                Source::Absent => fields_absent.push(field.to_string()),
-                Source::Defaulted => fields_defaulted.push(field.to_string()),
-                _ => {}
-            }
-            sources.insert(field.to_string(), source);
-        }
-
-        // Not `== Absent`: a field that carries a hardcoded constant was not
-        // produced either, and treating it as if it had been makes its slot in
-        // EXPECTED_FIELDS a rot-detector that can never fire.
-        let degraded = Self::EXPECTED_FIELDS
-            .iter()
-            .any(|f| !self.extraction.source_of(f).is_attested());
-
-        ExtractionHealth {
-            strategy: self.extraction.strategy,
-            enriched: self.extraction.enriched,
-            sources,
-            fields_absent,
-            fields_defaulted,
-            degraded,
-        }
+        derive_health(
+            &self.extraction,
+            &self.field_presence(),
+            Self::EXPECTED_FIELDS,
+        )
     }
 }
 

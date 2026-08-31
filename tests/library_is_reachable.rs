@@ -56,14 +56,15 @@ fn search_results_render_as_markdown() {
         products: vec![ProductSummary {
             name: "Acme, Vitamin C, 60 Capsules".to_string(),
             brand: "Acme".to_string(),
-            price: 12.34,
+            price: Some(12.34),
             original_price: None,
             currency: "USD".to_string(),
             rating: Some(4.5),
             review_count: Some(7),
             product_url: "https://www.iherb.com/pr/acme/1".to_string(),
             product_id: "1".to_string(),
-            in_stock: true,
+            in_stock: Some(true),
+            extraction: Default::default(),
         }],
         fetch: Default::default(),
     };

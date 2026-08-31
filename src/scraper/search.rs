@@ -1,6 +1,6 @@
 use crate::cli::SortOrder;
 use crate::error::IherbError;
-use crate::model::{ProductSummary, SearchFetch, SearchResult};
+use crate::model::{Extraction, ProductSummary, SearchFetch, SearchResult, Source, Strategy};
 use chromiumoxide::Page;
 use scraper::{Html, Selector};
 use std::collections::HashSet;
@@ -182,7 +182,18 @@ pub fn parse_search_from_html(
 ) -> Result<SearchResult, IherbError> {
     let doc = Html::parse_document(html);
     let total_results = extract_total_results(&doc);
-    let detected_currency = detect_currency_from_html(&doc).unwrap_or_else(|| currency.to_string());
+
+    // The page's own currency marker, or `None` when it publishes none. The
+    // `--currency` label is substituted below, and the substitution is recorded
+    // rather than hidden: asserting the configured currency as if it had been
+    // read off the page is what #49 was filed about. Making the label *right*
+    // is #5 and is a different question from not vouching for it.
+    let read_currency = detect_currency_from_html(&doc);
+    let currency_source = match read_currency {
+        Some(_) => Source::Dom,
+        None => Source::Defaulted,
+    };
+    let detected_currency = read_currency.unwrap_or_else(|| currency.to_string());
 
     let mut cards_parsed = 0usize;
     let mut products = Vec::new();
@@ -195,7 +206,15 @@ pub fn parse_search_from_html(
         tracing::debug!("Found {} product-cell-container cards", cards.len());
         let parsed: Vec<_> = cards
             .iter()
-            .filter_map(|card| parse_product_card(card, &link_sel, &detected_currency, base_url))
+            .filter_map(|card| {
+                parse_product_card(
+                    card,
+                    &link_sel,
+                    &detected_currency,
+                    currency_source,
+                    base_url,
+                )
+            })
             .collect();
         cards_parsed = parsed.len();
         products = retain_first_seen(parsed, &mut seen);
@@ -225,10 +244,19 @@ pub fn parse_search_from_html(
     })
 }
 
+/// Read one card into a [`ProductSummary`], recording where each value came
+/// from.
+///
+/// `currency_source` is the page's answer, not the card's: iHerb publishes one
+/// currency marker for the whole results page, so every card either got a
+/// currency that was read or the same label nobody read. Passing it in is what
+/// stops [`ProductSummary::claim_unattributed`] attributing a substituted label
+/// to the DOM, which is #49's first fabrication.
 fn parse_product_card(
     card_el: &scraper::ElementRef,
     link_sel: &Selector,
     currency: &str,
+    currency_source: Source,
     base_url: &str,
 ) -> Option<ProductSummary> {
     let link = card_el.select(link_sel).next();
@@ -259,18 +287,23 @@ fn parse_product_card(
         .unwrap_or("")
         .to_string();
 
+    // No `unwrap_or(0.0)`. A card whose price neither source could parse has no
+    // price, and `0.0` said "free" — indistinguishable from a genuinely free
+    // product and from a selector that had stopped matching (#49).
     let price = extract_card_attr(card_el, "meta[itemprop='price']", "content")
         .and_then(|s| parse_price_str(&s))
         .or_else(|| {
             link_attrs
                 .and_then(|a| a.attr("data-ga-discount-price"))
                 .and_then(parse_price_str)
-        })
-        .unwrap_or(0.0);
+        });
 
+    // A strikethrough price is only an original price if it is above the price
+    // being charged. With no price to compare against there is no discount to
+    // claim, so the value is dropped rather than presented as one.
     let original_price = extract_element_text(card_el, "span.price-olp bdi, span.price-olp")
         .and_then(|s| parse_price_str(&s))
-        .filter(|&p| p > price);
+        .filter(|&original| price.is_some_and(|p| original > p));
 
     let rating = extract_card_rating(card_el);
 
@@ -279,18 +312,21 @@ fn parse_product_card(
 
     let in_stock = extract_card_stock_status(card_el, link_attrs);
 
-    let product_url = link_attrs
-        .and_then(|a| a.attr("href"))
-        .map(|u| {
-            if u.starts_with("http") {
-                u.to_string()
-            } else {
-                format!("{}{}", base_url, u)
-            }
-        })
+    let read_product_url = link_attrs.and_then(|a| a.attr("href")).map(|u| {
+        if u.starts_with("http") {
+            u.to_string()
+        } else {
+            format!("{}{}", base_url, u)
+        }
+    });
+    // A URL assembled from the base and the id is a guess that happens to work,
+    // not something the card published — the same distinction `ProductDetail`
+    // draws for its own product_url.
+    let product_url = read_product_url
+        .clone()
         .unwrap_or_else(|| format!("{}/pr/p/{}", base_url, product_id));
 
-    Some(ProductSummary {
+    let mut summary = ProductSummary {
         name,
         brand,
         price,
@@ -298,10 +334,24 @@ fn parse_product_card(
         currency: currency.to_string(),
         rating,
         review_count,
-        product_url,
+        product_url: product_url.clone(),
         product_id,
         in_stock,
-    })
+        extraction: Extraction::new(Strategy::Dom),
+    };
+
+    // One strategy reads a card: CSS selectors over the page HTML. Everything
+    // filled above therefore came from the DOM...
+    summary.claim_unattributed(Source::Dom);
+
+    // ...except the two values that did not, which `claim_unattributed` would
+    // otherwise attribute to it because they are non-empty.
+    summary.extraction.reclaim("currency", currency_source);
+    if read_product_url.is_none() {
+        summary.extraction.reclaim("product_url", Source::Defaulted);
+    }
+
+    Some(summary)
 }
 
 fn extract_card_rating(card_el: &scraper::ElementRef) -> Option<f64> {
@@ -311,10 +361,17 @@ fn extract_card_rating(card_el: &scraper::ElementRef) -> Option<f64> {
     title.split('/').next()?.trim().parse::<f64>().ok()
 }
 
+/// Whether the card says the product can be bought, or `None` when neither of
+/// its two stock attributes is there to say.
+///
+/// The `unwrap_or(true)` this replaces is #31's bug on the search path: a card
+/// whose markup we no longer understand, or that simply omits the attribute,
+/// was reported as purchasable. "We could not tell" is a different answer from
+/// "yes" to anyone deciding whether to buy something.
 fn extract_card_stock_status(
     card_el: &scraper::ElementRef,
     link_attrs: Option<&scraper::node::Element>,
-) -> bool {
+) -> Option<bool> {
     Selector::parse("div.product.ga-product, div.product")
         .ok()
         .and_then(|sel| card_el.select(&sel).next())
@@ -325,7 +382,6 @@ fn extract_card_stock_status(
                 .and_then(|a| a.attr("data-ga-is-out-of-stock"))
                 .map(|s| s.to_lowercase() != "true")
         })
-        .unwrap_or(true)
 }
 
 /// Keep the first card seen for each product id, dropping the rest (#33).

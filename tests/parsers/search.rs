@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 use iherb_cli::cache::Cache;
 use iherb_cli::cli::SortOrder;
 use iherb_cli::fetch::{cached, FetchTarget, Paging};
+use iherb_cli::model::{Source, Strategy};
+use iherb_cli::output::format_search_results;
 use iherb_cli::scraper::search::{
     build_search_url, page_budget, parse_search_from_html, CategoryId, CATEGORY_ALIASES,
 };
@@ -39,7 +41,12 @@ fn search_page_yields_a_full_page_of_products() {
     for product in &result.products {
         assert!(!product.name.is_empty());
         assert!(!product.product_id.is_empty());
-        assert!(product.price > 0.0, "{}", product.name);
+        assert!(
+            product.price.is_some_and(|p| p > 0.0),
+            "{}: {:?}",
+            product.name,
+            product.price
+        );
         assert!(product.product_url.starts_with(BASE_URL));
         assert_eq!(product.currency, "USD");
     }
@@ -57,11 +64,11 @@ fn search_cards_carry_brand_rating_and_discount() {
         first.name,
         "California Gold Nutrition, Gold C®, USP Grade Vitamin C, 1,000 mg, 60 Veggie Capsules"
     );
-    assert_eq!(first.price, 5.56);
+    assert_eq!(first.price, Some(5.56));
     assert_eq!(first.original_price, None);
     assert_eq!(first.rating, Some(4.8));
     assert_eq!(first.review_count, Some(381_864));
-    assert!(first.in_stock);
+    assert_eq!(first.in_stock, Some(true));
     assert_eq!(
         first.product_url,
         "https://www.iherb.com/pr/california-gold-nutrition-gold-c-usp-grade-vitamin-c-1-000-mg-60-veggie-capsules/61864"
@@ -70,7 +77,7 @@ fn search_cards_carry_brand_rating_and_discount() {
     // The strikethrough price is read from the card, not from any JSON.
     let discounted = &result.products[1];
     assert_eq!(discounted.product_id, "61865");
-    assert_eq!(discounted.price, 13.11);
+    assert_eq!(discounted.price, Some(13.11));
     assert_eq!(discounted.original_price, Some(15.42));
 }
 
@@ -207,6 +214,272 @@ fn a_page_with_no_cards_is_an_empty_result_not_an_error() {
 }
 
 // ---------------------------------------------------------------------------
+// #49 — what the search path read, and what it did not
+// ---------------------------------------------------------------------------
+
+/// Every value on a search card names the strategy that produced it, exactly as
+/// a product page's values do (#28, extended by #49).
+///
+/// Not one value is checked here; every assertion is about where a value came
+/// from. A card that stopped carrying `data-ga-brand-name` and started getting
+/// its brand from somewhere else would pass every value assertion in this file
+/// and fail this one.
+#[test]
+fn every_card_field_names_the_strategy_that_produced_it() {
+    let result = parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD")
+        .expect("the search page must parse");
+    let first = &result.products[0];
+
+    // One strategy reads a results page: CSS selectors over its HTML.
+    assert_eq!(first.extraction.strategy, Strategy::Dom);
+    for field in [
+        "name",
+        "brand",
+        "price",
+        "currency",
+        "rating",
+        "review_count",
+        "product_url",
+        "product_id",
+        "in_stock",
+    ] {
+        assert_eq!(first.source_of(field), Source::Dom, "{}", field);
+    }
+
+    // The first card is not discounted, so there is no original price — absent,
+    // which is a different answer from a price that failed to parse.
+    assert_eq!(first.original_price, None);
+    assert_eq!(first.source_of("original_price"), Source::Absent);
+
+    // A discounted card has one, and it was read.
+    let discounted = &result.products[1];
+    assert!(discounted.original_price.is_some());
+    assert_eq!(discounted.source_of("original_price"), Source::Dom);
+
+    // No card on this page is degraded: the capture publishes everything a
+    // results card is expected to carry.
+    for product in &result.products {
+        assert!(!product.health().degraded, "{}", product.product_id);
+    }
+}
+
+/// A currency the page did not publish is not attributed to the page.
+///
+/// `search.rs` used to stamp `detect_currency_from_html(..).unwrap_or(currency)`
+/// on every card, so the `--currency` label — a string from the command line —
+/// was presented exactly as a currency read off the page. That is #49's first
+/// fabrication, and it is the same shape #28 removed from the product path.
+///
+/// Making the label *right* is #5. This is about not vouching for it.
+#[test]
+fn an_undetected_currency_is_not_attributed_to_the_page() {
+    // The captured page publishes one, so it is read.
+    let read =
+        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "CHF").unwrap();
+    assert_eq!(read.products[0].currency, "USD");
+    assert_eq!(read.products[0].source_of("currency"), Source::Dom);
+
+    // A page with cards and no currency marker anywhere: the label is used,
+    // and recorded as a value nobody read.
+    let unmarked =
+        parse_search_from_html(&a_card_with_no_currency(), "q", BASE_URL, "CHF").unwrap();
+    let card = &unmarked.products[0];
+    assert_eq!(card.currency, "CHF", "the label is still what gets used");
+    assert_eq!(card.source_of("currency"), Source::Defaulted);
+
+    // And it is visible as such rather than buried: `currency` is a field every
+    // results card publishes, so a page that does not publish one is degraded.
+    let health = card.health();
+    assert!(health.fields_defaulted.contains(&"currency".to_string()));
+    assert!(
+        health.degraded,
+        "a currency nobody read must be able to make a record degraded"
+    );
+}
+
+/// A card whose price neither source could parse has no price.
+///
+/// `unwrap_or(0.0)` made three different situations one value: a genuinely free
+/// product, a card whose price markup changed, and a card that carries no price
+/// at all. `$0.00` printed for any of them, and a caller sorting by price put
+/// them first.
+#[test]
+fn a_card_with_no_readable_price_has_none() {
+    let result = parse_search_from_html(&a_card_with_no_price(), "q", BASE_URL, "USD").unwrap();
+    let card = &result.products[0];
+
+    assert_eq!(card.price, None);
+    assert_eq!(card.source_of("price"), Source::Absent);
+    assert!(card.health().fields_absent.contains(&"price".to_string()));
+    assert!(
+        card.health().degraded,
+        "price is a field every card publishes"
+    );
+
+    // And the rendering says so instead of showing a free product.
+    let rendered = format_search_results(&result);
+    assert!(rendered.contains("no price could be read"), "{}", rendered);
+    assert!(!rendered.contains("$0.00"), "{}", rendered);
+
+    // A strikethrough price with no price to compare it against is not a
+    // discount, and is dropped rather than presented as one.
+    assert_eq!(card.original_price, None);
+}
+
+/// A card that says nothing about stock says nothing, rather than "yes".
+///
+/// The search path's `unwrap_or(true)` is #31's bug: a card whose markup we no
+/// longer understand — or that simply omits the attribute — was reported as
+/// purchasable. `ProductDetail::in_stock` became an `Option` for this reason;
+/// `ProductSummary::in_stock` is one now for the same reason, which is also
+/// what lets #9 render the field the same way in both commands.
+#[test]
+fn a_card_with_no_stock_signal_does_not_claim_to_be_in_stock() {
+    let result =
+        parse_search_from_html(&a_card_with_no_stock_marker(), "q", BASE_URL, "USD").unwrap();
+    let card = &result.products[0];
+
+    assert_eq!(card.in_stock, None);
+    assert_eq!(card.source_of("in_stock"), Source::Absent);
+
+    // Out of stock is still read as out of stock, so this is not the parser
+    // giving up on the field.
+    let out = parse_search_from_html(&a_card_out_of_stock(), "q", BASE_URL, "USD").unwrap();
+    assert_eq!(out.products[0].in_stock, Some(false));
+    assert_eq!(out.products[0].source_of("in_stock"), Source::Dom);
+
+    // And every card on the real capture carries the attribute, so this is not
+    // a change that quietly blanks the field on live pages.
+    let real =
+        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD").unwrap();
+    assert!(real.products.iter().all(|p| p.in_stock == Some(true)));
+}
+
+/// #49's last acceptance criterion: one shape, not two.
+///
+/// A search result and a product detail report on themselves through the same
+/// type, with the same keys and the same vocabulary, so #9 renders one
+/// provenance block under `--json` rather than one that exists on products and
+/// silently not on search.
+#[test]
+fn a_search_card_reports_its_health_in_the_same_shape_a_product_does() {
+    let result =
+        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD").unwrap();
+    let json = serde_json::to_value(result.products[0].health()).expect("must serialize");
+
+    // The same keys `provenance::health_serializes_to_the_block_issue_9_renders`
+    // pins for a product.
+    for key in [
+        "strategy",
+        "enriched",
+        "sources",
+        "fields_absent",
+        "fields_defaulted",
+        "degraded",
+    ] {
+        assert!(json.get(key).is_some(), "missing {}", key);
+    }
+    assert_eq!(json["strategy"], "dom");
+    assert_eq!(json["degraded"], false);
+    assert_eq!(json["sources"]["name"], "dom");
+    assert_eq!(json["sources"]["original_price"], "absent");
+
+    // And the vocabulary is the same one: `defaulted` on a card means what it
+    // means on a product.
+    let unmarked =
+        parse_search_from_html(&a_card_with_no_currency(), "q", BASE_URL, "CHF").unwrap();
+    let json = serde_json::to_value(unmarked.products[0].health()).unwrap();
+    assert_eq!(json["sources"]["currency"], "defaulted");
+    assert_eq!(json["degraded"], true);
+}
+
+/// A cached search written before #49 still loads, and comes back honest about
+/// knowing nothing — rather than failing to parse, or claiming the DOM produced
+/// values nobody recorded.
+#[test]
+fn a_pre_provenance_search_entry_still_deserializes() {
+    let stored = serde_json::json!({
+        "query": "vitamin c",
+        "total_results": 11_952,
+        "products": [{
+            "name": "Acme, Vitamin C, 60 Capsules",
+            "brand": "Acme",
+            "price": 12.34,
+            "original_price": null,
+            "currency": "USD",
+            "rating": 4.5,
+            "review_count": 7,
+            "product_url": "https://www.iherb.com/pr/acme/1",
+            "product_id": "1",
+            "in_stock": true,
+        }],
+    });
+
+    let result: iherb_cli::model::SearchResult =
+        serde_json::from_value(stored).expect("an old entry must still load");
+    let card = &result.products[0];
+    assert_eq!(card.price, Some(12.34));
+    assert_eq!(card.in_stock, Some(true));
+    assert_eq!(card.extraction.strategy, Strategy::Unrecorded);
+    assert_eq!(card.source_of("name"), Source::Absent);
+    assert_eq!(result.fetch, iherb_cli::model::SearchFetch::default());
+}
+
+/// A results card, with only the parts a test cares about filled in. The
+/// selectors are the ones `parse_product_card` reads, so a card built here goes
+/// down the same path a real one does.
+fn a_card(price_markup: &str, stock_attr: &str, currency_marker: &str) -> String {
+    format!(
+        r#"<html><body>{currency_marker}
+        <div class="product-cell-container">
+          <div class="product ga-product" {stock_attr}>
+            <a class="absolute-link product-link" href="/pr/thing/1"
+               data-product-id="1" data-ga-brand-name="Acme" title="Acme, Thing"></a>
+            <div class="product-title" content="Acme, Thing"></div>
+            {price_markup}
+          </div>
+        </div></body></html>"#
+    )
+}
+
+/// A card with a price, on a page whose currency cannot be detected: no
+/// `priceCurrency` meta, and a price with no recognisable symbol.
+fn a_card_with_no_currency() -> String {
+    a_card(
+        r#"<meta itemprop="price" content="9.60">"#,
+        r#"data-is-out-of-stock="false""#,
+        "",
+    )
+}
+
+/// A card whose price neither the microdata nor the link attributes carry.
+fn a_card_with_no_price() -> String {
+    a_card(
+        "",
+        r#"data-is-out-of-stock="false""#,
+        r#"<meta itemprop="priceCurrency" content="USD">"#,
+    )
+}
+
+/// A card with neither of the two attributes that say whether it is in stock.
+fn a_card_with_no_stock_marker() -> String {
+    a_card(
+        r#"<meta itemprop="price" content="9.60">"#,
+        "",
+        r#"<meta itemprop="priceCurrency" content="USD">"#,
+    )
+}
+
+/// A card that says it is out of stock.
+fn a_card_out_of_stock() -> String {
+    a_card(
+        r#"<meta itemprop="price" content="9.60">"#,
+        r#"data-is-out-of-stock="true""#,
+        r#"<meta itemprop="priceCurrency" content="USD">"#,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // #6 — a cached search that is short of --limit
 // ---------------------------------------------------------------------------
 
@@ -303,6 +576,8 @@ fn a_walk_records_what_it_did() {
     assert_eq!(target.absorb(one_captured_page(), &mut acc), Paging::More);
     assert_eq!(target.absorb(one_captured_page(), &mut acc), Paging::More);
     assert_eq!(target.absorb(an_empty_page(), &mut acc), Paging::Done);
+    assert_eq!(acc.pages_fetched(), 3);
+    assert_eq!(acc.gathered(), 45);
 
     let result = target.finish(acc).unwrap();
     assert_eq!(result.fetch.pages_fetched, Some(3));

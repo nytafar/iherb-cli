@@ -19,11 +19,12 @@ pub fn format_search_results(result: &SearchResult) -> String {
         out.push_str(&format!("### {}. {}\n", i + 1, product.name));
         out.push_str(&format!("- **Brand:** {}\n", product.brand));
 
-        let price_str = format_price(
-            product.price,
-            product.original_price.as_ref(),
-            &product.currency,
-        );
+        // A card with no price prints one, honestly. It used to print `$0.00`,
+        // which reads as free (#49).
+        let price_str = match product.price {
+            Some(price) => format_price(price, product.original_price.as_ref(), &product.currency),
+            None => "Unknown (no price could be read from the card)".to_string(),
+        };
         out.push_str(&format!("- **Price:** {}\n", price_str));
 
         if let (Some(rating), Some(count)) = (product.rating, product.review_count) {

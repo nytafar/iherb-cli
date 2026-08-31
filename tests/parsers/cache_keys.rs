@@ -252,14 +252,15 @@ fn a_widened_search_still_finds_the_narrow_entry() {
             .map(|i| ProductSummary {
                 name: format!("Magnesium {}", i),
                 brand: "Acme".to_string(),
-                price: 1.0,
+                price: Some(1.0),
                 original_price: None,
                 currency: "USD".to_string(),
                 rating: None,
                 review_count: None,
                 product_url: format!("https://www.iherb.com/pr/p/{}", i),
                 product_id: i.to_string(),
-                in_stock: true,
+                in_stock: Some(true),
+                extraction: Default::default(),
             })
             .collect(),
         // What a `--limit 10` run leaves behind: one page walked, and iHerb
