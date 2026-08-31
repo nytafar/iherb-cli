@@ -85,3 +85,53 @@ fn search_results_render() {
     result.products.truncate(5);
     assert_golden("search-vitamin-c-top5", &format_search_results(&result));
 }
+
+/// The `Data quality` line names the fields that were not read, whether they
+/// are absent or merely defaulted. A record degraded purely by a defaulted
+/// currency used to print an empty list, because the line only ever reported
+/// absent fields.
+#[test]
+fn the_degraded_line_names_a_defaulted_field() {
+    // A block complete except that the offers name no currency.
+    let no_currency = serde_json::json!({
+        "@type": "Product",
+        "name": "Acme, Thing, 60 Capsules",
+        "brand": { "name": "Acme" },
+        "sku": "ACM-1",
+        "gtin12": "000000000001",
+        "offers": { "price": "9.60", "availability": "https://schema.org/InStock" },
+    });
+    let product = parse_from_json_ld(&no_currency, "1", BASE_URL).unwrap();
+    let health = product.health();
+    assert!(health.degraded);
+    // Plenty of *unexpected* fields are absent — no ingredients, no warnings.
+    // None of the EXPECTED ones is, so currency being defaulted is the only
+    // thing making this record degraded, and it is the only thing the line has
+    // to name. Reporting `fields_absent` here would print the wrong list.
+    assert!(health.fields_defaulted.contains(&"currency".to_string()));
+    for expected in iherb_cli::model::ProductDetail::EXPECTED_FIELDS {
+        assert!(
+            !health.fields_absent.contains(&expected.to_string()),
+            "{} should have been read",
+            expected
+        );
+    }
+
+    let rendered = format_product_detail(&product, Some(Section::Overview));
+    assert!(
+        rendered.contains("- **Data quality:** degraded — no strategy produced currency."),
+        "the line must name the field, not print an empty list: {:?}",
+        rendered
+    );
+}
+
+/// None of the captured pages is degraded on the production path, which is why
+/// no golden carries a `Data quality` line. If one starts to, the goldens
+/// change and this says why first.
+#[test]
+fn no_captured_page_is_degraded_on_the_production_path() {
+    for f in crate::fixture::products() {
+        let product = as_production_would(f);
+        assert!(!product.health().degraded, "{}", f.slug());
+    }
+}

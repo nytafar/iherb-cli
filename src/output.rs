@@ -131,11 +131,30 @@ fn format_overview(product: &ProductDetail, out: &mut String) {
     if health.degraded {
         out.push_str(&format!(
             "- **Data quality:** degraded — no strategy produced {}. Run with --debug for the full provenance table.\n",
-            health.fields_absent.join(", ")
+            unread_expected_fields(&health).join(", ")
         ));
     }
 
     out.push('\n');
+}
+
+/// The expected fields no strategy read, absent and defaulted together.
+///
+/// `degraded` is true when any expected field was not read, and a field can go
+/// unread in two ways: nothing produced it, or something substituted a
+/// constant. Reporting only the absent ones would print an empty list for a
+/// record degraded purely by a defaulted currency.
+fn unread_expected_fields(health: &ExtractionHealth) -> Vec<String> {
+    ProductDetail::EXPECTED_FIELDS
+        .iter()
+        .filter(|f| {
+            health
+                .sources
+                .get(**f)
+                .is_some_and(|source| !source.is_attested())
+        })
+        .map(|f| (*f).to_string())
+        .collect()
 }
 
 fn format_description(product: &ProductDetail, out: &mut String) {
@@ -332,11 +351,19 @@ fn format_number(n: u32) -> String {
 /// "extraction": {
 ///   "strategy": "json_ld",
 ///   "enriched": true,
-///   "sources": { "name": "json_ld", "ingredients": "dom", "warnings": "absent", ... },
+///   "sources": { "name": "json_ld", "ingredients": "dom", "warnings": "absent",
+///                "product_url": "defaulted", ... },
 ///   "fields_absent": ["warnings", "..."],
+///   "fields_defaulted": ["product_url", "..."],
 ///   "degraded": false
 /// }
 /// ```
+///
+/// `defaulted` is the one that needs a word of explanation to a consumer: the
+/// field has a value and nobody read it off the page — a hardcoded constant, or
+/// a label passed on the command line. It is not `absent`, because absent means
+/// there is nothing there; it is the more dangerous of the two, because a
+/// defaulted value looks exactly like data.
 ///
 /// `serde_json::to_value(product.health())` produces exactly that. #9 needs to
 /// add no fields and compute nothing; it needs to place the block and map
@@ -349,8 +376,8 @@ pub fn format_extraction_health(health: &ExtractionHealth) -> String {
     out.push_str(&format!(
         "- **Degraded:** {}\n",
         if health.degraded {
-            "yes — a field every product page publishes is missing, so the \
-             selectors may have rotted"
+            "yes — a field every product page publishes was not read off it, \
+             so the selectors may have rotted"
         } else {
             "no"
         }
@@ -360,6 +387,12 @@ pub fn format_extraction_health(health: &ExtractionHealth) -> String {
         out.push_str(&format!(
             "- **Absent:** {}\n",
             health.fields_absent.join(", ")
+        ));
+    }
+    if !health.fields_defaulted.is_empty() {
+        out.push_str(&format!(
+            "- **Defaulted (a value nobody read):** {}\n",
+            health.fields_defaulted.join(", ")
         ));
     }
 

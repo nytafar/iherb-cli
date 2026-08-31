@@ -119,10 +119,11 @@ impl FetchTarget for ProductTarget {
         let health = product.health();
         if health.degraded {
             tracing::warn!(
-                "Product {} extracted via {:?} is degraded: {} absent",
+                "Product {} extracted via {:?} is degraded: [{}] absent, [{}] defaulted",
                 self.product_id,
                 health.strategy,
-                health.fields_absent.join(", ")
+                health.fields_absent.join(", "),
+                health.fields_defaulted.join(", ")
             );
         }
 

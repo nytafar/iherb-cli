@@ -8,7 +8,9 @@
 //! *before* it becomes data loss, and asserting the source is what catches it.
 
 use iherb_cli::model::{ProductDetail, Source, Strategy};
-use iherb_cli::scraper::product::{enrich_from_html, parse_from_html, parse_from_json_ld};
+use iherb_cli::scraper::product::{
+    enrich_from_html, parse_from_html, parse_from_js_globals, parse_from_json_ld,
+};
 
 use crate::fixture::{self, BASE_URL, OLLY_GUMMIES, TWO_A_DAY, ULTIMATE_OMEGA};
 
@@ -31,7 +33,9 @@ fn as_production_would(f: crate::fixture::Fixture) -> ProductDetail {
 fn every_field_names_the_strategy_that_produced_it() {
     let product = as_production_would(TWO_A_DAY);
 
-    // JSON-LD's own fields.
+    // JSON-LD's own fields. `product_url` is not among them — no capture
+    // publishes `url`, so every product URL is synthesised from the id, and
+    // `product_url_is_never_read_from_a_page` below pins that.
     for field in [
         "name",
         "brand",
@@ -40,7 +44,6 @@ fn every_field_names_the_strategy_that_produced_it() {
         "currency",
         "rating",
         "review_count",
-        "product_url",
         "in_stock",
         "description",
         "product_code",
@@ -76,6 +79,9 @@ fn every_field_names_the_strategy_that_produced_it() {
     assert_eq!(product.source_of("shipping_weight"), Source::Absent);
     assert_eq!(product.source_of("category_breadcrumb"), Source::Absent);
     assert_eq!(product.source_of("review_distribution"), Source::Absent);
+
+    // And the one that has a value nobody read.
+    assert_eq!(product.source_of("product_url"), Source::Defaulted);
 
     assert_eq!(product.extraction.strategy, Strategy::JsonLd);
     assert!(product.extraction.enriched);
@@ -309,8 +315,189 @@ fn health_serializes_to_the_block_issue_9_renders() {
     assert_eq!(json["sources"]["name"], "json_ld");
     assert_eq!(json["sources"]["ingredients"], "dom");
     assert_eq!(json["sources"]["shipping_weight"], "absent");
+    assert_eq!(json["sources"]["product_url"], "defaulted");
     assert!(json["fields_absent"].is_array());
+    assert!(json["fields_defaulted"].is_array());
 
     let via_globals = serde_json::json!(Strategy::JsGlobals);
     assert_eq!(via_globals, "js_globals");
+    assert_eq!(serde_json::json!(Source::Defaulted), "defaulted");
+    assert_eq!(serde_json::json!(Strategy::Unrecorded), "unrecorded");
+}
+
+// ---------------------------------------------------------------------------
+// Values nobody read: `Source::Defaulted`
+// ---------------------------------------------------------------------------
+
+/// Provenance must not vouch for a value nobody read off the page.
+///
+/// `currency` is the live case. Every path falls back to a constant `"USD"` or
+/// to whatever label the caller passed to `--currency`, and before this the
+/// fallback was recorded as though the strategy had read it. That made the
+/// `currency` slot in `EXPECTED_FIELDS` a rot-detector that could never fire:
+/// the field is always non-empty, so its source was always attested, so it
+/// could never contribute to `degraded` however thoroughly the currency
+/// selectors rotted.
+///
+/// Fixing the *value* is #5 and not done here. This is about not lying about it.
+#[test]
+fn an_undetected_currency_is_not_attributed_to_a_strategy() {
+    // JSON-LD with a price but no `priceCurrency` anywhere.
+    let no_currency = serde_json::json!({
+        "@type": "Product",
+        "name": "Thing",
+        "offers": { "price": "9.60" },
+    });
+    let product = parse_from_json_ld(&no_currency, "1", BASE_URL).unwrap();
+
+    // The value is unchanged — that is #5's to fix, not this test's.
+    assert_eq!(product.currency, "USD");
+    // What changed: provenance no longer claims JSON-LD supplied it.
+    assert_eq!(product.source_of("currency"), Source::Defaulted);
+    assert!(!product.source_of("currency").is_attested());
+}
+
+/// The rot-detector can now fire. This is the whole point of the change: a
+/// field that is only ever a default cannot make `degraded` true, so its slot
+/// in `EXPECTED_FIELDS` is dead weight.
+#[test]
+fn a_defaulted_expected_field_makes_the_record_degraded() {
+    assert!(
+        ProductDetail::EXPECTED_FIELDS.contains(&"currency"),
+        "this test is about currency's slot in the expected set"
+    );
+
+    let no_currency = serde_json::json!({
+        "@type": "Product",
+        "name": "Thing",
+        "brand": { "name": "Acme" },
+        "sku": "ACM-1",
+        "gtin12": "000000000001",
+        "offers": { "price": "9.60", "availability": "https://schema.org/InStock" },
+    });
+    let health = parse_from_json_ld(&no_currency, "1", BASE_URL)
+        .unwrap()
+        .health();
+
+    // Everything else in the expected set was read.
+    assert!(health.fields_absent.is_empty() || !health.fields_absent.contains(&"name".to_string()));
+    assert!(health.fields_defaulted.contains(&"currency".to_string()));
+    assert!(
+        health.degraded,
+        "a currency nobody read is exactly the 'our selectors rotted' signal"
+    );
+
+    // And the same page with a currency is not degraded, so `degraded` is
+    // tracking the currency and not something incidental.
+    let mut with_currency = no_currency.clone();
+    with_currency["offers"]["priceCurrency"] = serde_json::json!("CHF");
+    let ok = parse_from_json_ld(&with_currency, "1", BASE_URL)
+        .unwrap()
+        .health();
+    assert_eq!(ok.sources["currency"], Source::JsonLd);
+    assert!(!ok.degraded);
+}
+
+/// `Defaulted` and `Absent` are different answers, and the health block keeps
+/// them apart. A caller can ignore an absent field; a defaulted one will
+/// silently look like data.
+#[test]
+fn defaulted_is_not_absent() {
+    assert!(!Source::Defaulted.is_attested());
+    assert!(!Source::Absent.is_attested());
+    assert!(Source::JsonLd.is_attested());
+    assert!(Source::JsGlobals.is_attested());
+    assert!(Source::Dom.is_attested());
+
+    let health = as_production_would(TWO_A_DAY).health();
+    assert!(health.fields_defaulted.contains(&"product_url".to_string()));
+    assert!(!health.fields_absent.contains(&"product_url".to_string()));
+    assert!(health
+        .fields_absent
+        .contains(&"shipping_weight".to_string()));
+    assert!(!health
+        .fields_defaulted
+        .contains(&"shipping_weight".to_string()));
+}
+
+/// The captures all publish a currency, so none of them is degraded on that
+/// account — which is what keeps the change from being a blanket "everything is
+/// degraded now".
+#[test]
+fn every_captured_page_publishes_a_currency() {
+    for f in fixture::products() {
+        let via_json_ld = as_production_would(f);
+        assert_eq!(
+            via_json_ld.source_of("currency"),
+            Source::JsonLd,
+            "{}: JSON-LD offers carry priceCurrency",
+            f.slug()
+        );
+
+        let via_dom = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD").unwrap();
+        assert_eq!(
+            via_dom.source_of("currency"),
+            Source::Dom,
+            "{}: the page carries a currency marker",
+            f.slug()
+        );
+    }
+}
+
+/// The JS-globals blob carries no currency at all, so that path's currency is
+/// always the caller's `--currency` label. Attributing it to the strategy would
+/// mean provenance vouching for a value that came from the command line.
+#[test]
+fn the_js_globals_currency_is_always_the_callers_label() {
+    let globals = fixture::json("js-globals-12949");
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "CHF").unwrap();
+
+    assert_eq!(product.currency, "CHF");
+    assert_eq!(product.source_of("currency"), Source::Defaulted);
+    assert!(
+        product.health().degraded,
+        "a currency taken from the command line is not extraction succeeding"
+    );
+
+    // The fields the blob really does carry are still attributed to it.
+    assert_eq!(product.source_of("name"), Source::JsGlobals);
+    assert_eq!(product.source_of("upc"), Source::JsGlobals);
+}
+
+/// No capture publishes a canonical `url`, on any path, so the product URL is
+/// always built from the id. Same class as currency: a real value that no
+/// strategy read.
+#[test]
+fn product_url_is_never_read_from_a_page() {
+    for f in fixture::products() {
+        let via_json_ld = as_production_would(f);
+        assert_eq!(
+            via_json_ld.source_of("product_url"),
+            Source::Defaulted,
+            "{}",
+            f.slug()
+        );
+        assert_eq!(
+            via_json_ld.product_url,
+            format!("{}/pr/p/{}", BASE_URL, f.product_id())
+        );
+
+        let via_dom = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD").unwrap();
+        assert_eq!(
+            via_dom.source_of("product_url"),
+            Source::Defaulted,
+            "{}",
+            f.slug()
+        );
+    }
+
+    // A block that does publish one is attributed to it.
+    let with_url = serde_json::json!({
+        "@type": "Product",
+        "name": "Thing",
+        "url": "https://www.iherb.com/pr/thing/1",
+    });
+    let product = parse_from_json_ld(&with_url, "1", BASE_URL).unwrap();
+    assert_eq!(product.source_of("product_url"), Source::JsonLd);
+    assert_eq!(product.product_url, "https://www.iherb.com/pr/thing/1");
 }
