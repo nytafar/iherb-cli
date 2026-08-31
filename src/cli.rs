@@ -42,7 +42,8 @@ pub enum Commands {
         #[arg(long, default_value = "20")]
         limit: usize,
 
-        /// Sort order: relevance, price-asc, price-desc, rating, best-selling
+        /// Sort order: relevance, featured, best-selling, rating, most-rated,
+        /// price-asc, price-desc, newest, highest-discount
         #[arg(long, value_enum, default_value_t = SortOrder::Relevance)]
         sort: SortOrder,
 
@@ -62,36 +63,108 @@ pub enum Commands {
     },
 }
 
+/// The orderings iHerb's own sort dropdown offers, each named after what it
+/// does rather than after the `sr` number that produces it.
+///
+/// The dropdown on a captured results page is the source of truth for the
+/// numbers; `tests/parsers/search.rs` reads it and checks every variant here
+/// against it, so a variant that stops matching the site is a test failure
+/// rather than a silently wrong ordering.
+///
+/// Two of the site's eleven orderings are deliberately absent: Heaviest (6) and
+/// Lightest (7), which #3 did not propose exposing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SortOrder {
+    /// iHerb's relevance ranking for the query, `sr=0`.
+    ///
+    /// This is **not** the same as sending no `sr` at all: an absent `sr` gets
+    /// [`SortOrder::Featured`], the merchandised order. Emitting nothing here
+    /// is what #3 was filed about — an agent told relevance is the neutral
+    /// ranking was handed a promoted one.
     Relevance,
+    /// iHerb's merchandised order, `sr=13`, and the site's own default.
+    Featured,
     #[value(name = "price-asc")]
     PriceAsc,
     #[value(name = "price-desc")]
     PriceDesc,
+    /// Highest average rating first. Surfaces 5.0/5 products with three
+    /// reviews; [`SortOrder::MostRated`] is what "well established" wants.
     Rating,
     #[value(name = "best-selling")]
     BestSelling,
+    #[value(name = "most-rated")]
+    MostRated,
+    Newest,
+    #[value(name = "highest-discount")]
+    HighestDiscount,
 }
 
 impl SortOrder {
-    pub fn as_url_param(self) -> &'static str {
+    /// Every variant, so a sweep over the sorts cannot fall behind the enum.
+    ///
+    /// Written out rather than derived because `ValueEnum::value_variants` is
+    /// about clap's parsing surface; this list is what the tests sweep, and it
+    /// is short enough that the compiler catching a missing arm in
+    /// [`SortOrder::as_url_param`] is the real guard.
+    pub const ALL: &'static [SortOrder] = &[
+        SortOrder::Relevance,
+        SortOrder::Featured,
+        SortOrder::PriceAsc,
+        SortOrder::PriceDesc,
+        SortOrder::Rating,
+        SortOrder::BestSelling,
+        SortOrder::MostRated,
+        SortOrder::Newest,
+        SortOrder::HighestDiscount,
+    ];
+
+    /// The `sr` value iHerb's dropdown uses for this ordering.
+    pub fn sr(self) -> u8 {
         match self {
-            SortOrder::Relevance => "",
-            SortOrder::PriceAsc => "&sr=4",
-            SortOrder::PriceDesc => "&sr=3",
-            SortOrder::Rating => "&sr=1",
-            SortOrder::BestSelling => "&sr=2",
+            SortOrder::Relevance => 0,
+            SortOrder::Rating => 1,
+            SortOrder::BestSelling => 2,
+            SortOrder::PriceDesc => 3,
+            SortOrder::PriceAsc => 4,
+            SortOrder::Newest => 10,
+            SortOrder::MostRated => 12,
+            SortOrder::Featured => 13,
+            SortOrder::HighestDiscount => 14,
         }
     }
 
+    /// The query-string fragment to append, `&sr=<n>`.
+    ///
+    /// Every variant emits one, [`SortOrder::Featured`] included. Featured is
+    /// also what an absent `sr` gets you, so it could be spelled as the empty
+    /// string — but then one variant would be reachable only by omission, and
+    /// "relevance emits nothing" is precisely the confusion #3 is about. Asking
+    /// for an ordering by name always says which one.
+    pub fn as_url_param(self) -> String {
+        format!("&sr={}", self.sr())
+    }
+
+    /// This ordering's identity in a cache file name.
+    ///
+    /// Kept as words rather than the `sr` number so a cache directory stays
+    /// readable, and stable per variant so entries survive across runs.
     pub fn as_cache_key(self) -> &'static str {
         match self {
-            SortOrder::Relevance => "relevance",
+            // Not "relevance". #3 repointed this variant from Featured (no
+            // `sr`) to `sr=0`, so entries written under the old name hold
+            // Featured-ordered results for a request that now means something
+            // else. Changing the identifier abandons them instead of serving
+            // them as if the ordering had not changed.
+            SortOrder::Relevance => "relevance-sr0",
+            SortOrder::Featured => "featured",
             SortOrder::PriceAsc => "price-asc",
             SortOrder::PriceDesc => "price-desc",
             SortOrder::Rating => "rating",
             SortOrder::BestSelling => "best-selling",
+            SortOrder::MostRated => "most-rated",
+            SortOrder::Newest => "newest",
+            SortOrder::HighestDiscount => "highest-discount",
         }
     }
 }

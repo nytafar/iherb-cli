@@ -14,7 +14,8 @@
 //! `## Reviews` is genuinely absent and must not be rendered as zeroes.
 
 use iherb_cli::cli::Section;
-use iherb_cli::output::{format_product_detail, format_search_results};
+use iherb_cli::model::SearchFetch;
+use iherb_cli::output::{format_product_detail, format_search_results, format_search_shortfall};
 use iherb_cli::scraper::product::{enrich_from_html, parse_from_json_ld};
 use iherb_cli::scraper::search::parse_search_from_html;
 
@@ -86,6 +87,44 @@ fn search_results_render() {
     // cover the separator, the discount line and the rating line.
     result.products.truncate(5);
     assert_golden("search-vitamin-c-top5", &format_search_results(&result));
+}
+
+/// A search that came up short of `--limit` says so, and says which kind of
+/// short it is. `--limit` counts distinct products (#33), so a short result is
+/// ordinary — which is exactly why it has to be stated: a caller counting rows
+/// cannot otherwise tell "iHerb had no more" from "we stopped walking" (#6).
+#[test]
+fn a_search_short_of_the_limit_says_which_kind_of_short() {
+    let mut result =
+        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD").unwrap();
+    assert_eq!(result.products.len(), 45);
+
+    // Asked for what we have: nothing to report.
+    assert_eq!(format_search_shortfall(&result, 45), None);
+    assert_eq!(format_search_shortfall(&result, 10), None);
+
+    // Short because the walk stopped, with 11,952 results behind it.
+    result.fetch = SearchFetch {
+        pages_fetched: Some(1),
+        exhausted: Some(false),
+    };
+    let note = format_search_shortfall(&result, 200).expect("45 is short of 200");
+    assert!(
+        note.contains("asked for 200, returning 45 distinct products"),
+        "{}",
+        note
+    );
+    assert!(note.contains("more behind these"), "{}", note);
+
+    // Short because there is no more. Same count, opposite advice.
+    result.fetch.exhausted = Some(true);
+    let note = format_search_shortfall(&result, 200).expect("45 is short of 200");
+    assert!(note.contains("iHerb had no more"), "{}", note);
+
+    // A record that does not say is reported as not saying.
+    result.fetch = SearchFetch::default();
+    let note = format_search_shortfall(&result, 200).unwrap();
+    assert!(note.contains("does not say"), "{}", note);
 }
 
 /// The `Data quality` line names the fields that were not read, whether they

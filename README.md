@@ -50,9 +50,9 @@ iherb-cli search "protein" --category supplements --sort best-selling
 
 | Flag | Description | Default |
 |---|---|---|
-| `--limit <n>` | Max results to return (paginates automatically) | 20 |
-| `--sort <method>` | `relevance`, `price-asc`, `price-desc`, `rating`, `best-selling` | `relevance` |
-| `--category <slug>` | Filter by category (e.g., `supplements`, `vitamins`) | — |
+| `--limit <n>` | Max **distinct products** to return (paginates automatically). iHerb places some products twice on a results page; those count once. A result short of the limit says whether iHerb ran out or the walk did. | 20 |
+| `--sort <method>` | `relevance`, `featured`, `best-selling`, `rating`, `most-rated`, `price-asc`, `price-desc`, `newest`, `highest-discount` | `relevance` |
+| `--category <slug\|id>` | Filter by category name (`supplements`, `vitamins`, `protein`, …) or numeric iHerb category id (`1855`). An unknown name is an error, not a silent no-op; the message lists the names that work. | — |
 
 **Example output:**
 

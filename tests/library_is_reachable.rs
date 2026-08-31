@@ -11,7 +11,7 @@ use iherb_cli::fetch::fetch_on;
 use iherb_cli::fetch::FetchTarget;
 use iherb_cli::model::{ProductDetail, ProductSummary, SearchResult, Source, Strategy};
 use iherb_cli::output::format_search_results;
-use iherb_cli::scraper::search::{build_search_url, pages_needed};
+use iherb_cli::scraper::search::{build_search_url, page_budget};
 use iherb_cli::targets::product::parse_product_identifier;
 use iherb_cli::targets::{ProductTarget, SearchTarget};
 
@@ -34,8 +34,8 @@ fn config_validates_country_codes() {
 
 #[test]
 fn search_urls_and_paging_are_derived_from_the_limit() {
-    assert_eq!(pages_needed(1), 1);
-    assert!(pages_needed(100) > 1);
+    assert!(page_budget(1) >= 1);
+    assert!(page_budget(100) > 1);
 
     let url = build_search_url(
         "https://www.iherb.com",
@@ -45,7 +45,7 @@ fn search_urls_and_paging_are_derived_from_the_limit() {
         1,
     );
     assert!(url.starts_with("https://www.iherb.com"));
-    assert!(url.contains(SortOrder::PriceAsc.as_url_param()));
+    assert!(url.contains(&SortOrder::PriceAsc.as_url_param()));
 }
 
 #[test]
@@ -56,15 +56,17 @@ fn search_results_render_as_markdown() {
         products: vec![ProductSummary {
             name: "Acme, Vitamin C, 60 Capsules".to_string(),
             brand: "Acme".to_string(),
-            price: 12.34,
+            price: Some(12.34),
             original_price: None,
             currency: "USD".to_string(),
             rating: Some(4.5),
             review_count: Some(7),
             product_url: "https://www.iherb.com/pr/acme/1".to_string(),
             product_id: "1".to_string(),
-            in_stock: true,
+            in_stock: Some(true),
+            extraction: Default::default(),
         }],
+        fetch: Default::default(),
     };
 
     let rendered = format_search_results(&result);

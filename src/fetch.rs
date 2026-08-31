@@ -104,6 +104,22 @@ pub trait FetchTarget {
     /// Reject an output that extraction produced but that is not real data.
     /// Runs before the cache store, so a rejected result is never cached.
     fn validate(&self, out: &Self::Output) -> Result<()>;
+
+    /// Whether an entry found in the cache answers *this* request.
+    ///
+    /// The cache key says which requests share an entry; this says whether the
+    /// entry that was found is enough for the one asking. They are different
+    /// questions, and #6 is what happens when only the first is asked: two
+    /// searches differing only in `--limit` share an entry on purpose, because
+    /// the entry holds everything either run fetched — but a `--limit 200`
+    /// request reading what a `--limit 10` run left behind was handed 48
+    /// products and told nothing.
+    ///
+    /// Answering `false` makes the pipeline refetch, exactly as a miss would.
+    /// A target whose entries always answer every request keeps the default.
+    fn cache_is_sufficient(&self, _cached: &Self::Output) -> bool {
+        true
+    }
 }
 
 /// Fetch a target: cache lookup, lazy browser launch, navigation with retry,
@@ -116,20 +132,39 @@ pub async fn fetch<T: FetchTarget>(
     config: &AppConfig,
     browser_session: &mut Option<BrowserSession>,
 ) -> Result<Fetched<T::Output>> {
-    let cache = Cache::new(config.cache_dir.clone(), config.no_cache);
-    let key = target.cache_key();
-
     // The cache lookup comes first and nothing above the launch below touches
     // the browser: a cache hit must never start Chrome.
-    if let Some(hit) = cache.get::<T::Output>(&key) {
-        return Ok(Fetched {
-            data: hit.data,
-            retrieved_at: hit.cached_at,
-        });
+    if let Some(hit) = cached(target, config) {
+        return Ok(hit);
     }
 
     let session = get_or_launch_browser(config, browser_session).await?;
     fetch_on(target, config, session).await
+}
+
+/// The cache half of [`fetch`]: the stored entry for this target, if there is
+/// one and it answers the request.
+///
+/// Split out so the decision is reachable without a browser — the one in
+/// [`FetchTarget::cache_is_sufficient`] is behaviour, and behaviour that only
+/// runs inside a function that launches Chrome is behaviour nothing tests.
+pub fn cached<T: FetchTarget>(target: &T, config: &AppConfig) -> Option<Fetched<T::Output>> {
+    let cache = Cache::new(config.cache_dir.clone(), config.no_cache);
+    let key = target.cache_key();
+    let hit = cache.get::<T::Output>(&key)?;
+
+    if !target.cache_is_sufficient(&hit.data) {
+        tracing::info!(
+            "Cached {} does not answer this request; refetching",
+            key.label()
+        );
+        return None;
+    }
+
+    Some(Fetched {
+        data: hit.data,
+        retrieved_at: hit.cached_at,
+    })
 }
 
 /// Fetch a target on a session that is already running, without consulting the

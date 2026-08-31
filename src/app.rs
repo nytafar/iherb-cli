@@ -92,6 +92,14 @@ pub async fn cmd_search(
     result.products.truncate(limit);
 
     print!("{}", output::format_search_results(&result));
+
+    // `--limit` counts distinct products, so falling short of it is a fact
+    // about the fetch and has to be said out loud (#6, #33). A caller counting
+    // rows cannot otherwise tell "iHerb has no more" from "we stopped walking".
+    if let Some(note) = output::format_search_shortfall(&result, limit) {
+        print!("\n{}", note);
+    }
+
     println!(
         "\n- **Data from:** {}",
         output::format_cached_at(fetched.retrieved_at)
