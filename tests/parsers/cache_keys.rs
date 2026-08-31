@@ -4,8 +4,10 @@
 //! #6 are about are demonstrated through the layer that actually carries the
 //! request context — `ProductTarget` and `SearchTarget`, built from two
 //! `AppConfig`s that differ — and then through a real `Cache` round-trip in a
-//! temp directory. `CacheKey` itself cannot express a country or a limit, so
-//! asserting on it alone could only ever compare a value to itself.
+//! temp directory. `CacheKey` could not express a country or a limit, so
+//! asserting on it alone could only ever compare a value to itself; #1 gave it
+//! the country, and the round-trips below are what proves the country reaches
+//! it from a config rather than only from a hand-built key.
 
 use std::path::PathBuf;
 
@@ -18,15 +20,17 @@ use iherb_cli::targets::{ProductTarget, SearchTarget};
 
 use crate::fixture::TempDir;
 
-fn product(id: &str) -> String {
+fn product(country: &str, id: &str) -> String {
     CacheKey::Product {
+        country: country.to_string(),
         product_id: id.to_string(),
     }
     .file_name()
 }
 
-fn search(query: &str, sort: SortOrder, category: Option<&str>) -> String {
+fn search(country: &str, query: &str, sort: SortOrder, category: Option<&str>) -> String {
     CacheKey::Search {
+        country: country.to_string(),
         query: query.to_string(),
         sort,
         category: category.map(str::to_string),
@@ -53,32 +57,68 @@ fn config(country: &str, currency: &str, cache_dir: PathBuf) -> AppConfig {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn product_entries_are_named_after_the_product_id() {
-    assert_eq!(product("61864"), "product_61864.json");
-    assert_ne!(product("61864"), product("61865"));
+fn product_entries_are_named_after_the_storefront_and_the_product_id() {
+    assert_eq!(product("us", "61864"), "v2_product_us_61864.json");
+    assert_ne!(product("us", "61864"), product("us", "61865"));
+    assert_ne!(product("us", "61864"), product("ch", "61864"));
+}
+
+/// The `v2_` generation is not decoration: it is what stops a `v1` entry,
+/// written before the key knew about storefronts, from being read now. Nothing
+/// deletes those files; they are simply never named again.
+#[test]
+fn v1_entries_can_never_be_named_by_the_current_key() {
+    let dir = TempDir::new("v1-orphaned");
+    let us = config("us", "USD", dir.path());
+    let cache = Cache::new(dir.path(), false);
+
+    // A poisoned entry exactly as v1 wrote it, with a mtime of now so the TTL
+    // cannot be what saves us.
+    std::fs::create_dir_all(dir.path()).unwrap();
+    std::fs::write(dir.path().join("product_61864.json"), r#""stale""#).unwrap();
+
+    let key = ProductTarget::new(&us, "61864").unwrap().cache_key();
+    assert_ne!(key.file_name(), "product_61864.json");
+    assert!(cache.get::<String>(&key).is_none(), "v1 entry was read");
 }
 
 #[test]
-fn search_entries_are_a_hash_of_query_sort_and_category() {
-    let base = search("magnesium", SortOrder::Relevance, None);
-    assert!(base.starts_with("search_"));
+fn search_entries_are_a_hash_of_country_query_sort_and_category() {
+    let base = search("us", "magnesium", SortOrder::Relevance, None);
+    assert!(base.starts_with("v2_search_"));
     assert!(base.ends_with(".json"));
     // 16 hex characters between the prefix and the extension.
-    assert_eq!(base.len(), "search_".len() + 16 + ".json".len());
+    assert_eq!(base.len(), "v2_search_".len() + 16 + ".json".len());
 
-    assert_eq!(base, search("magnesium", SortOrder::Relevance, None));
+    assert_eq!(base, search("us", "magnesium", SortOrder::Relevance, None));
+    assert_ne!(base, search("ch", "magnesium", SortOrder::Relevance, None));
     assert_ne!(
         base,
-        search("magnesium citrate", SortOrder::Relevance, None)
+        search("us", "magnesium citrate", SortOrder::Relevance, None)
     );
-    assert_ne!(base, search("magnesium", SortOrder::Rating, None));
+    assert_ne!(base, search("us", "magnesium", SortOrder::Rating, None));
     assert_ne!(
         base,
-        search("magnesium", SortOrder::Relevance, Some("107703"))
+        search("us", "magnesium", SortOrder::Relevance, Some("107703"))
     );
     assert_ne!(
-        search("magnesium", SortOrder::Relevance, Some("107703")),
-        search("magnesium", SortOrder::Relevance, Some("101022"))
+        search("us", "magnesium", SortOrder::Relevance, Some("107703")),
+        search("us", "magnesium", SortOrder::Relevance, Some("101022"))
+    );
+
+    // Every field is NUL-delimited, so no two distinct requests can hash alike
+    // by running together at a field boundary...
+    assert_ne!(
+        search("us", "magnesium", SortOrder::Relevance, None),
+        search("u", "smagnesium", SortOrder::Relevance, None)
+    );
+
+    // ...and the optional field is tagged, so an empty category is not the
+    // same request as no category. Same failure class as #1, one storefront
+    // smaller.
+    assert_ne!(
+        search("us", "magnesium", SortOrder::Relevance, None),
+        search("us", "magnesium", SortOrder::Relevance, Some(""))
     );
 }
 
@@ -86,16 +126,12 @@ fn search_entries_are_a_hash_of_query_sort_and_category() {
 // #1 — the country collision
 // ---------------------------------------------------------------------------
 
-/// CHARACTERIZATION, NOT DESIRED: pins #1. Two configs that differ only in
-/// `--country` produce targets that fetch *different URLs* and land on the
-/// *same cache file*.
-///
-/// #1 flips this: the last assertion becomes `assert_ne!`, because the key
-/// gains a country (and a `v2_` prefix so poisoned entries are abandoned
-/// rather than reused). Do not change the file naming to satisfy this test;
-/// fix the test when #1 lands.
+/// FLIPPED BY #1. This asserted the collision: two configs differing only in
+/// `--country` produced targets that fetched *different URLs* and landed on
+/// the *same cache file*. The key now carries the country, so different
+/// requests get different entries.
 #[test]
-fn two_storefronts_share_one_product_cache_file() {
+fn two_storefronts_get_their_own_product_cache_file() {
     let dir = TempDir::new("country-key");
     let us = config("us", "USD", dir.path());
     let ch = config("ch", "CHF", dir.path());
@@ -108,21 +144,22 @@ fn two_storefronts_share_one_product_cache_file() {
     assert_eq!(from_ch.url(1), "https://ch.iherb.com/pr/item/61864");
     assert_ne!(from_us.url(1), from_ch.url(1));
 
-    // ...and the cache cannot tell the two apart.
-    assert_eq!(
+    // ...and so does the entry it is filed under.
+    assert_ne!(
         from_us.cache_key().file_name(),
         from_ch.cache_key().file_name()
     );
+    assert_eq!(from_us.cache_key().file_name(), "v2_product_us_61864.json");
+    assert_eq!(from_ch.cache_key().file_name(), "v2_product_ch_61864.json");
 }
 
-/// CHARACTERIZATION, NOT DESIRED: the same #1, shown as the failure a user
-/// actually hits — the Swiss storefront being handed the US price, with no
-/// error and a plausible `Data from` timestamp.
-///
-/// #1 flips this: the Swiss read becomes a miss, so `get` returns `None` and
-/// the `expect` below fails.
+/// FLIPPED BY #1, and the one that matters: the failure a user actually hit
+/// was the Swiss storefront being handed the US price, with no error and a
+/// plausible `Data from` timestamp, for the 30 days of the TTL. The Swiss read
+/// is now a miss, so the caller fetches Switzerland instead of being told a
+/// USD price is a Swiss one.
 #[test]
-fn a_swiss_fetch_is_served_the_us_price() {
+fn a_swiss_fetch_is_not_served_the_us_price() {
     let dir = TempDir::new("country-roundtrip");
     let us = config("us", "USD", dir.path());
     let ch = config("ch", "CHF", dir.path());
@@ -158,23 +195,29 @@ fn a_swiss_fetch_is_served_the_us_price() {
     assert_eq!(dir.file_count(), 1);
 
     let ch_key = ProductTarget::new(&ch, "61864").unwrap().cache_key();
-    let served = cache
-        .get::<ProductDetail>(&ch_key)
-        .expect("the Swiss read hits the US entry")
-        .data;
+    assert!(
+        cache.get::<ProductDetail>(&ch_key).is_none(),
+        "the Swiss read was served the US entry"
+    );
 
-    // A CHF request comes back with a USD price labelled USD, from a URL on
-    // the US storefront. Nothing in the value says it is the wrong storefront.
-    assert_eq!(served.currency, "USD");
-    assert_eq!(served.price, 9.60);
-    assert_eq!(served.product_url, "https://www.iherb.com/pr/item/61864");
-    assert_eq!(dir.file_count(), 1, "one storefront, one file, both reads");
+    // The US entry is untouched and still readable by the request that wrote
+    // it: this is a miss for Switzerland, not a cache that stopped working.
+    let still_there = cache
+        .get::<ProductDetail>(&us_key)
+        .expect("the US read still hits its own entry")
+        .data;
+    assert_eq!(still_there.currency, "USD");
+    assert_eq!(still_there.price, 9.60);
+
+    // Once Switzerland is written it is a second file, not an overwrite.
+    cache.set(&ch_key, &us_data).expect("write the Swiss entry");
+    assert_eq!(dir.file_count(), 2, "two storefronts, two files");
 }
 
-/// CHARACTERIZATION, NOT DESIRED: the search half of #1 — same query, two
-/// storefronts, one entry. Flipped by the same fix as the two above.
+/// FLIPPED BY #1: the search half — same query, two storefronts, which used to
+/// be one entry and is now two.
 #[test]
-fn two_storefronts_share_one_search_cache_file() {
+fn two_storefronts_get_their_own_search_cache_file() {
     let dir = TempDir::new("country-search-key");
     let us = config("us", "USD", dir.path());
     let de = config("de", "EUR", dir.path());
@@ -183,7 +226,7 @@ fn two_storefronts_share_one_search_cache_file() {
     let from_de = SearchTarget::new(&de, "magnesium", 20, SortOrder::Rating, None).unwrap();
 
     assert_ne!(from_us.url(1), from_de.url(1));
-    assert_eq!(
+    assert_ne!(
         from_us.cache_key().file_name(),
         from_de.cache_key().file_name()
     );

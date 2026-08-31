@@ -87,14 +87,65 @@ pub fn extract_element_text(el: &scraper::ElementRef, selectors: &str) -> Option
     None
 }
 
-/// Parse a review count from text by extracting digits.
+/// Parse a review count out of the text that surrounds it.
+///
+/// A review count is *one* whole number, optionally written with thousands
+/// separators: `42,328 Reviews`, `(1,234)`, `7`. Anything else is refused.
+///
+/// The refusal is the point (#37). This used to keep every digit it found and
+/// concatenate them, so `"4.8/5 - 24,938 Reviews"` — the `title` attribute of
+/// `a.stars` on a real search card — became `Some(48_524_938)`: a rating, a
+/// scale and a count glued together into a number 1,950x too large, delivered
+/// with no error to a caller who cannot check it. Picking one of the three
+/// numbers would be a guess, and a guess is the failure this crate exists to
+/// avoid, so a string carrying more than one number yields `None` and #28
+/// records the field as absent rather than extracted.
 pub fn parse_review_count(text: &str) -> Option<u32> {
-    text.replace(',', "")
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .collect::<String>()
-        .parse::<u32>()
-        .ok()
+    let mut numbers = number_runs(text);
+    let only = numbers.next()?;
+    if numbers.next().is_some() {
+        // More than one number in the string: which one is the count is a
+        // guess, so refuse rather than concatenate or pick.
+        return None;
+    }
+    grouped_integer(only)
+}
+
+/// The maximal runs of digits-and-separators in `text`, each starting with a
+/// digit. `"4.8/5 - 24,938 Reviews"` yields `"4.8"`, `"5"`, `"24,938"`.
+fn number_runs(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !(c.is_ascii_digit() || c == ',' || c == '.'))
+        .map(|run| run.trim_matches([',', '.']))
+        .filter(|run| run.chars().any(|c| c.is_ascii_digit()))
+}
+
+/// Read a whole number that may carry thousands separators, and nothing else.
+///
+/// Accepts `7`, `42,328` and `42.328`; rejects `4.8` and `1,234.56`, because a
+/// separator followed by anything other than exactly three digits is a decimal
+/// point, not a grouping mark, and a review count has no decimals.
+fn grouped_integer(run: &str) -> Option<u32> {
+    let mut groups = run.split([',', '.']);
+
+    let first = groups.next()?;
+    if first.is_empty() || first.len() > 3 || !first.chars().all(|c| c.is_ascii_digit()) {
+        // A leading group longer than three digits is only ever an ungrouped
+        // number, which has no separators at all.
+        return if run.chars().all(|c| c.is_ascii_digit()) {
+            run.parse().ok()
+        } else {
+            None
+        };
+    }
+
+    let mut digits = first.to_string();
+    for group in groups {
+        if group.len() != 3 || !group.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        digits.push_str(group);
+    }
+    digits.parse().ok()
 }
 
 /// Dump HTML to /tmp for debugging when debug level is enabled.

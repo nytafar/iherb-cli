@@ -38,33 +38,48 @@ fn review_counts_survive_their_surrounding_text() {
     assert_eq!(parse_review_count(""), None);
 }
 
-/// CHARACTERIZATION, NOT DESIRED: `parse_review_count` keeps every digit it
-/// finds, wherever it finds it, so a string carrying more than one number is
-/// concatenated into a single count instead of rejected. The string below is
-/// not invented — it is the `title` attribute of `a.stars` on the captured
-/// search page, which `extract_card_rating` already reads. Routed through
-/// `parse_review_count` it reports 24,938 reviews as 48,524,938.
+/// FLIPPED BY #37. This asserted the old behaviour: `parse_review_count` kept
+/// every digit it found, wherever it found it, so `"4.8/5 - 24,938 Reviews"`
+/// — the `title` attribute of `a.stars` on the captured search page, which
+/// `extract_card_rating` already reads — was concatenated into
+/// `Some(48_524_938)`, reporting 24,938 reviews as 48.5 million.
 ///
-/// DESIRED: `Some(24_938)`, or `None`. Either is defensible; silently
-/// multiplying a review count by two thousand is not.
-///
-/// NO ISSUE COVERS THIS YET — it is not one of #1-#6 and not one of #30-#36.
-/// It is latent rather than live: the selector that feeds the parser today
-/// (`a.rating-count span`) yields a bare count, so nothing reaches this path.
-/// Whoever files it flips the assertion. Do not "fix" the parser to satisfy
-/// this test.
+/// #37 offered `Some(24_938)` or `None`. `None` is what landed: choosing the
+/// count out of three numbers is a guess, and this crate exists not to guess.
+/// A caller gets no review count and #28 records the field as absent, which is
+/// a thing an agent can act on; a number 1,950x too large is not.
 #[test]
-fn review_counts_concatenate_every_number_in_the_string() {
-    assert_eq!(
-        parse_review_count("4.8/5 - 24,938 Reviews"),
-        Some(48_524_938)
-    );
+fn a_string_carrying_more_than_one_number_has_no_review_count() {
+    assert_eq!(parse_review_count("4.8/5 - 24,938 Reviews"), None);
 
     // The string really is on the page, so this is one selector change away
     // from being live.
     assert!(SEARCH_VITAMIN_C
         .html()
         .contains(r#"title="4.8/5 - 24,938 Reviews""#));
+}
+
+/// The boundary the refusal is drawn on: one whole number, thousands
+/// separators allowed, is a count; anything with a fractional part, and
+/// anything with a second number in it, is not.
+#[test]
+fn only_a_lone_whole_number_is_a_review_count() {
+    // Grouped either way round, because a European storefront groups with dots.
+    assert_eq!(parse_review_count("42.328 Reviews"), Some(42_328));
+    assert_eq!(parse_review_count("1.234.567"), Some(1_234_567));
+
+    // A lone rating is not a count: the old parser answered `Some(48)`.
+    assert_eq!(parse_review_count("4.8"), None);
+    assert_eq!(parse_review_count("4.8 out of 5"), None);
+
+    // Nor is a price: the old parser answered `Some(123456)`.
+    assert_eq!(parse_review_count("$1,234.56"), None);
+
+    // Two counts is not one count, however they are written.
+    assert_eq!(parse_review_count("12 of 3,456 Reviews"), None);
+
+    // Beyond u32 there is no count to report, rather than a wrapped one.
+    assert_eq!(parse_review_count("99,999,999,999"), None);
 }
 
 #[test]

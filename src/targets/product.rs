@@ -12,6 +12,7 @@ use crate::scraper;
 
 pub struct ProductTarget {
     product_id: String,
+    country: String,
     base_url: String,
     currency: String,
 }
@@ -21,6 +22,7 @@ impl ProductTarget {
     pub fn new(config: &AppConfig, id_or_url: &str) -> Result<Self> {
         Ok(Self {
             product_id: parse_product_identifier(id_or_url)?,
+            country: config.country.clone(),
             base_url: config.base_url(),
             currency: config.currency.clone(),
         })
@@ -37,6 +39,7 @@ impl FetchTarget for ProductTarget {
 
     fn cache_key(&self) -> CacheKey {
         CacheKey::Product {
+            country: self.country.clone(),
             product_id: self.product_id.clone(),
         }
     }
