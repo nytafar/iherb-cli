@@ -1,5 +1,9 @@
 use crate::cli::Section;
+use crate::config::AppConfig;
+use crate::error::ErrorKind;
 use crate::model::{ExtractionHealth, ProductDetail, SearchResult, Source};
+use serde::Serialize;
+use serde_json::{Map, Value};
 use std::time::SystemTime;
 
 pub fn format_search_results(result: &SearchResult) -> String {
@@ -86,32 +90,91 @@ pub fn format_search_shortfall(result: &SearchResult, limit: usize) -> Option<St
     })
 }
 
-pub fn format_product_detail(product: &ProductDetail, section: Option<Section>) -> String {
+/// What a `product` invocation shows, decided once from `--section`.
+///
+/// The flag used to be handed to the renderer, which then decided the layout
+/// from it — `format_product_detail` branched on `section.is_some()` to work
+/// out whether supplement facts belonged under Ingredients. That was fine while
+/// there was one renderer. `--json` is a second one (#9), and two renderers
+/// each re-deriving the layout from the same flag are two renderers that will
+/// drift: the day someone changes what `--section ingredients` means, they
+/// change it in one of the two.
+///
+/// So the decision is made here, once, and both renderings consume the answer.
+/// Markdown walks [`ProductView::sections`] and prints each; `--json` walks the
+/// same list and keeps each section's fields. Neither one asks what flag was
+/// passed, and neither can disagree with the other about it.
+#[derive(Debug, Clone)]
+pub struct ProductView {
+    sections: Vec<Section>,
+    titled: bool,
+    requested: Option<Section>,
+}
+
+impl ProductView {
+    /// Resolve `--section` into what actually gets shown.
+    pub fn for_section(section: Option<Section>) -> Self {
+        match section {
+            // The whole record, under the product's name.
+            None => Self {
+                sections: Section::ALL.to_vec(),
+                titled: true,
+                requested: None,
+            },
+
+            // Supplement facts *are* the active ingredients, and a supplement
+            // label reads them above the inactive ones. So asking for
+            // ingredients on their own asks for both, and that is a fact about
+            // the request rather than about how it is drawn: it belongs in the
+            // resolved section list, where every rendering sees it, and not in
+            // an `if` inside one of them.
+            //
+            // It does not apply to the whole record, where Nutrition already
+            // has its own place in the running order.
+            Some(Section::Ingredients) => Self {
+                sections: vec![Section::Nutrition, Section::Ingredients],
+                titled: false,
+                requested: Some(Section::Ingredients),
+            },
+
+            Some(s) => Self {
+                sections: vec![s],
+                titled: false,
+                requested: Some(s),
+            },
+        }
+    }
+
+    /// The whole record. What an invocation with no `--section` shows.
+    pub fn everything() -> Self {
+        Self::for_section(None)
+    }
+
+    /// The sections to show, in order.
+    pub fn sections(&self) -> &[Section] {
+        &self.sections
+    }
+
+    /// The section the caller named, if they named one. Only for saying which
+    /// one had no data.
+    pub fn requested(&self) -> Option<Section> {
+        self.requested
+    }
+}
+
+pub fn format_product_detail(product: &ProductDetail, view: &ProductView) -> String {
     let mut out = String::new();
 
-    let sections: &[Section] = match section {
-        Some(s) => &[s],
-        None => Section::ALL,
-    };
-
-    if section.is_none() {
+    if view.titled {
         out.push_str(&format!("# {}\n\n", product.name));
     }
 
-    for sec in sections {
+    for sec in view.sections() {
         match sec {
             Section::Overview => format_overview(product, &mut out),
             Section::Description => format_description(product, &mut out),
             Section::Nutrition => format_nutrition(product, &mut out),
-            Section::Ingredients => {
-                // When explicitly requesting ingredients, show supplement facts
-                // first (active ingredients) then other ingredients — matching
-                // how supplement labels read and what users expect from "what's in it?"
-                if section.is_some() {
-                    format_nutrition(product, &mut out);
-                }
-                format_ingredients(product, &mut out);
-            }
+            Section::Ingredients => format_ingredients(product, &mut out),
             Section::SuggestedUse => format_suggested_use(product, &mut out),
             Section::Warnings => format_warnings(product, &mut out),
             Section::Reviews => format_reviews(product, &mut out),
@@ -119,7 +182,7 @@ pub fn format_product_detail(product: &ProductDetail, section: Option<Section>) 
     }
 
     if out.is_empty() {
-        if let Some(sec) = section {
+        if let Some(sec) = view.requested() {
             out.push_str(&format!(
                 "No {} data available for this product.\n",
                 sec.label()
@@ -382,64 +445,101 @@ fn format_price(price: f64, original: Option<&f64>, currency: Option<&str>) -> S
 }
 
 pub fn format_cached_at(cached_at: SystemTime) -> String {
-    let duration = cached_at
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = duration.as_secs() as i64;
-
-    // Simple date formatting without extra dependencies
-    let days = secs / 86400;
-    let remaining = secs % 86400;
-    let hours = remaining / 3600;
-    let minutes = (remaining % 3600) / 60;
-
-    // Calculate year/month/day from epoch days
-    let mut y = 1970i64;
-    let mut d = days;
-    loop {
-        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
-            366
-        } else {
-            365
-        };
-        if d < days_in_year {
-            break;
-        }
-        d -= days_in_year;
-        y += 1;
-    }
-    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let month_days = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut m = 0usize;
-    for (i, &md) in month_days.iter().enumerate() {
-        if d < md {
-            m = i;
-            break;
-        }
-        d -= md;
-    }
-
+    let t = Utc::from(cached_at);
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02} UTC",
-        y,
-        m + 1,
-        d + 1,
-        hours,
-        minutes
+        t.year, t.month, t.day, t.hour, t.minute
     )
+}
+
+/// The same instant as RFC 3339 in UTC, e.g. `2026-08-31T09:14:22Z`.
+///
+/// What `--json`'s envelope carries (#44). The human line above rounds to the
+/// minute, which is the right resolution to read and the wrong one to store: a
+/// consumer comparing two records needs the seconds, and needs a format it can
+/// parse rather than one it has to recognise.
+pub fn format_rfc3339(at: SystemTime) -> String {
+    let t = Utc::from(at);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        t.year, t.month, t.day, t.hour, t.minute, t.second
+    )
+}
+
+/// A civil date and time in UTC, broken out of a [`SystemTime`].
+///
+/// Hand-rolled rather than pulled from a date crate, which is the choice this
+/// file already made; it is factored out here only because there are now two
+/// renderings of one instant and they must not disagree about which day it is.
+struct Utc {
+    year: i64,
+    month: usize,
+    day: i64,
+    hour: i64,
+    minute: i64,
+    second: i64,
+}
+
+impl From<SystemTime> for Utc {
+    fn from(at: SystemTime) -> Self {
+        let secs = at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let days = secs / 86400;
+        let remaining = secs % 86400;
+        let hour = remaining / 3600;
+        let minute = (remaining % 3600) / 60;
+        let second = remaining % 60;
+
+        // Calculate year/month/day from epoch days
+        let mut y = 1970i64;
+        let mut d = days;
+        loop {
+            let days_in_year = if is_leap(y) { 366 } else { 365 };
+            if d < days_in_year {
+                break;
+            }
+            d -= days_in_year;
+            y += 1;
+        }
+        let month_days = [
+            31,
+            if is_leap(y) { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        let mut m = 0usize;
+        for (i, &md) in month_days.iter().enumerate() {
+            if d < md {
+                m = i;
+                break;
+            }
+            d -= md;
+        }
+
+        Utc {
+            year: y,
+            month: m + 1,
+            day: d + 1,
+            hour,
+            minute,
+            second,
+        }
+    }
+}
+
+fn is_leap(year: i64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
 fn format_number(n: u32) -> String {
@@ -534,4 +634,313 @@ pub fn format_extraction_health(health: &ExtractionHealth) -> String {
     out.push('\n');
 
     out
+}
+
+// ---------------------------------------------------------------------------
+// `--json`: the versioned envelope (#44) and the two payloads inside it (#9).
+// ---------------------------------------------------------------------------
+
+/// The version of the `data` shape inside the envelope (#44).
+///
+/// Bumped **only** on a breaking change to `data`: a field removed, a field
+/// re-typed, or a field whose meaning changes. Adding a field is not breaking
+/// and does not bump it — a consumer that ignores unknown keys keeps working,
+/// and a version that moves for every addition tells nobody anything.
+///
+/// The README carries the history and the policy. Adding to it is part of
+/// making the change, not a follow-up: a stored record's only claim about its
+/// own shape is this integer, and there is no way to add one retroactively to
+/// records already on disk.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// Where the data in an envelope came from, and when.
+///
+/// Both halves, because either alone is ambiguous. `fetched_at` on a cache hit
+/// is the mtime of a file written some time ago; on a fresh fetch it is a
+/// moment ago. Nothing in the timestamp says which, and a price read three
+/// weeks ago is not stale, it is wrong (#25).
+#[derive(Debug, Clone, Copy)]
+pub struct Provenance {
+    /// When the *page* was read.
+    pub fetched_at: SystemTime,
+    /// Whether that reading came off the local cache rather than off iHerb.
+    pub from_cache: bool,
+}
+
+impl<T> From<&crate::fetch::Fetched<T>> for Provenance {
+    fn from(fetched: &crate::fetch::Fetched<T>) -> Self {
+        Provenance {
+            fetched_at: fetched.retrieved_at,
+            from_cache: fetched.from_cache,
+        }
+    }
+}
+
+/// The invocation a JSON document came out of, carried with it.
+///
+/// Once the document leaves the process the invocation is gone, and a price
+/// with no storefront, currency or timestamp attached is not interpretable —
+/// only plausible (#44). Every field here is what the run *resolved* to after
+/// `--flag` → env → config file, not what was typed: a record produced with no
+/// flags at all still says which storefront it came from.
+///
+/// Three fields are `Option` and each `null` means something specific rather
+/// than "missing":
+///
+///  - `fetched_at` / `from_cache` are `null` when no page was read at all, which
+///    is every failure that happens before or instead of a fetch.
+///  - `country` / `currency` / `storefront` are `null` when the failure happened
+///    before the configuration was resolved — an unparseable command line has no
+///    effective storefront, and inventing one would be a claim about a run that
+///    never started.
+///  - `currency` is also `null` on a perfectly good run that did not pass
+///    `--currency`, because then the run asked the storefront for nothing in
+///    particular. **This names the currency the run requested, not the one a
+///    price is in**: that lives on the record itself, as `data.currency`, with
+///    its provenance in `data.extraction`. Conflating the two is exactly the
+///    fabrication #5 removed.
+#[derive(Debug, Clone, Serialize)]
+pub struct Meta {
+    pub tool_version: &'static str,
+    pub fetched_at: Option<String>,
+    pub emitted_at: String,
+    pub from_cache: Option<bool>,
+    pub country: Option<String>,
+    pub currency: Option<String>,
+    pub storefront: Option<String>,
+}
+
+impl Meta {
+    /// The meta block for a run whose configuration resolved.
+    ///
+    /// `emitted_at` is passed in rather than read from the clock here so that
+    /// what this renders is a function of its arguments — a test can hand it
+    /// two instants and assert on the two strings, which is the only way the
+    /// cached-versus-fresh distinction is checkable at all.
+    pub fn new(config: &AppConfig, provenance: Option<Provenance>, emitted_at: SystemTime) -> Self {
+        Self {
+            country: Some(config.country.clone()),
+            currency: config.currency.clone(),
+            storefront: Some(config.base_url()),
+            ..Self::unconfigured(provenance, emitted_at)
+        }
+    }
+
+    /// The meta block for a failure that happened before the configuration was
+    /// resolved: an unparseable command line, or a config file that would not
+    /// load.
+    pub fn unconfigured(provenance: Option<Provenance>, emitted_at: SystemTime) -> Self {
+        Self {
+            tool_version: env!("CARGO_PKG_VERSION"),
+            fetched_at: provenance.map(|p| format_rfc3339(p.fetched_at)),
+            emitted_at: format_rfc3339(emitted_at),
+            from_cache: provenance.map(|p| p.from_cache),
+            country: None,
+            currency: None,
+            storefront: None,
+        }
+    }
+}
+
+/// One `--json` document: the same shape on success and on failure.
+///
+/// `data` is present exactly when `ok` is true, and `error_type`/`message`
+/// exactly when it is false. `ok`, `schema_version` and `meta` are always
+/// there, so a consumer can read the version and the provenance off a document
+/// before it knows whether the run succeeded.
+#[derive(Debug, Clone, Serialize)]
+pub struct Envelope {
+    pub ok: bool,
+    pub schema_version: u32,
+    pub meta: Meta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+    /// The stable taxonomy string a caller branches on (#9). See
+    /// [`crate::error::ErrorKind`] for the table and the exit codes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl Envelope {
+    pub fn success(meta: Meta, data: Value) -> Self {
+        Self {
+            ok: true,
+            schema_version: SCHEMA_VERSION,
+            meta,
+            data: Some(data),
+            error_type: None,
+            message: None,
+        }
+    }
+
+    pub fn failure(meta: Meta, kind: ErrorKind, message: String) -> Self {
+        Self {
+            ok: false,
+            schema_version: SCHEMA_VERSION,
+            meta,
+            data: None,
+            error_type: Some(kind.error_type()),
+            message: Some(message),
+        }
+    }
+
+    /// The document, ready to write to stdout, newline-terminated.
+    ///
+    /// Infallible on purpose: this is the last thing that runs on the failure
+    /// path, and a renderer that can itself fail there has no way left to say
+    /// so. Only [`Meta`] and two `serde_json::Value`s are serialized here, and
+    /// neither can fail — but if serialization ever did, a hand-written
+    /// envelope reporting that is still one JSON document on stdout, which is
+    /// the contract.
+    pub fn render(&self) -> String {
+        match serde_json::to_string_pretty(self) {
+            Ok(json) => format!("{}\n", json),
+            Err(e) => format!(
+                "{{\n  \"ok\": false,\n  \"schema_version\": {},\n  \"error_type\": \"json_error\",\n  \"message\": {}\n}}\n",
+                SCHEMA_VERSION,
+                Value::String(e.to_string())
+            ),
+        }
+    }
+}
+
+/// The record fields a section presents.
+///
+/// The other half of [`ProductView`]'s job: markdown renders a section by
+/// printing these, `--json` renders it by keeping them. Declared once here so
+/// the two cannot disagree about what `--section nutrition` means.
+///
+/// Every field of [`ProductDetail`] appears in exactly one section, or in
+/// [`ALWAYS_RENDERED`] — pinned by a test, so a field added to the model
+/// without being placed here is a failure rather than a field that silently
+/// vanishes from every projection.
+fn section_fields(section: Section) -> &'static [&'static str] {
+    match section {
+        Section::Overview => &[
+            "brand",
+            "price",
+            "original_price",
+            "currency",
+            "rating",
+            "review_count",
+            "in_stock",
+            "product_code",
+            "upc",
+            "shipping_weight",
+            "category_breadcrumb",
+        ],
+        Section::Description => &["description"],
+        Section::Nutrition => &["supplement_facts"],
+        Section::Ingredients => &["ingredients"],
+        Section::SuggestedUse => &["suggested_use"],
+        Section::Warnings => &["warnings"],
+        Section::Reviews => &["rating", "review_count", "review_distribution"],
+    }
+}
+
+/// The fields every `--json` product document carries, whatever `--section`
+/// asked for: what the record *is*, and where it came from.
+///
+/// `extraction` is on this list rather than in a section because provenance is
+/// not a section — a projection that could drop it would let a caller hold a
+/// record with no way to tell a value nobody read from one the page published,
+/// which is the conflation #28 exists to prevent.
+pub const ALWAYS_RENDERED: &[&str] = &["name", "product_id", "product_url", "extraction"];
+
+/// A product record as `--json` renders it.
+///
+/// Two things happen here and nothing else does.
+///
+/// **`extraction` is replaced by the record's `health()`, verbatim.** The
+/// serialized `ProductDetail` carries the raw [`crate::model::Extraction`] —
+/// the strategy and the source map — and what a consumer needs is the derived
+/// report: the same map plus the absent, defaulted and malformed lists and the
+/// `degraded` flag. `serde_json::to_value(product.health())` is that report and
+/// this adds nothing to it and computes nothing from it (#28).
+///
+/// **The keys are narrowed to what `view` asks for.** With no `--section` that
+/// is everything. With one it is that section's fields plus
+/// [`ALWAYS_RENDERED`] — because a flag that changes what markdown shows and is
+/// silently ignored under `--json` is worse than a flag that does nothing.
+pub fn format_product_json(
+    product: &ProductDetail,
+    view: &ProductView,
+) -> Result<Value, serde_json::Error> {
+    let mut value = serde_json::to_value(product)?;
+    let object = value
+        .as_object_mut()
+        .expect("a ProductDetail serializes as a JSON object");
+
+    object.insert(
+        "extraction".to_string(),
+        serde_json::to_value(product.health())?,
+    );
+
+    if view.requested().is_some() {
+        let kept = kept_fields(view);
+        object.retain(|key, _| kept.contains(&key.as_str()));
+    }
+
+    Ok(value)
+}
+
+/// The key names a projected product document keeps.
+fn kept_fields(view: &ProductView) -> Vec<&'static str> {
+    let mut kept: Vec<&'static str> = ALWAYS_RENDERED.to_vec();
+    for section in view.sections() {
+        kept.extend_from_slice(section_fields(*section));
+    }
+    kept
+}
+
+/// A search result as `--json` renders it.
+///
+/// Each card's `extraction` is replaced by that card's `health()`, exactly as
+/// [`format_product_json`] does for a product — which is the whole point of
+/// #49 reaching here: one provenance shape across both commands, rather than
+/// provenance on products and silence on search.
+///
+/// `--section` does not apply, so nothing is projected away. `total_results`
+/// and `fetch` are carried through as the model holds them: `fetch.exhausted`
+/// is what tells a caller whether a short result is iHerb running out or the
+/// walk stopping (#6), and it is not derivable from the product count.
+pub fn format_search_json(result: &SearchResult) -> Result<Value, serde_json::Error> {
+    let mut value = serde_json::to_value(result)?;
+
+    if let Some(cards) = value.get_mut("products").and_then(Value::as_array_mut) {
+        for (slot, summary) in cards.iter_mut().zip(&result.products) {
+            if let Some(object) = slot.as_object_mut() {
+                object.insert(
+                    "extraction".to_string(),
+                    serde_json::to_value(summary.health())?,
+                );
+            }
+        }
+    }
+
+    Ok(value)
+}
+
+/// Every key a full (unprojected) product document carries. Test support for
+/// the claim [`section_fields`] makes about itself.
+pub fn product_json_keys(product: &ProductDetail) -> Result<Vec<String>, serde_json::Error> {
+    let value = format_product_json(product, &ProductView::everything())?;
+    let object: &Map<String, Value> = value
+        .as_object()
+        .expect("a ProductDetail serializes as a JSON object");
+    Ok(object.keys().cloned().collect())
+}
+
+/// The keys [`section_fields`] and [`ALWAYS_RENDERED`] account for between
+/// them. Test support, as above.
+pub fn accounted_json_keys() -> Vec<&'static str> {
+    let mut all = ALWAYS_RENDERED.to_vec();
+    for section in Section::ALL {
+        all.extend_from_slice(section_fields(*section));
+    }
+    all.sort_unstable();
+    all.dedup();
+    all
 }

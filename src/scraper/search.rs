@@ -40,7 +40,7 @@ impl CategoryId {
             return Ok(Self((*id).to_string()));
         }
 
-        anyhow::bail!(
+        Err(IherbError::InvalidInput(format!(
             "Unknown --category {:?}. Use a numeric iHerb category id, or one of: {}",
             input,
             CATEGORY_ALIASES
@@ -48,7 +48,8 @@ impl CategoryId {
                 .map(|(slug, _)| *slug)
                 .collect::<Vec<_>>()
                 .join(", ")
-        )
+        ))
+        .into())
     }
 
     pub fn as_str(&self) -> &str {

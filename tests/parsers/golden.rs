@@ -15,7 +15,9 @@
 
 use iherb_cli::cli::Section;
 use iherb_cli::model::SearchFetch;
-use iherb_cli::output::{format_product_detail, format_search_results, format_search_shortfall};
+use iherb_cli::output::{
+    format_product_detail, format_search_results, format_search_shortfall, ProductView,
+};
 use iherb_cli::scraper::product::{enrich_from_html, parse_from_json_ld};
 use iherb_cli::scraper::search::parse_search_from_html;
 
@@ -39,7 +41,7 @@ fn product_renders_every_section() {
     let product = as_production_would(TWO_A_DAY);
     assert_golden(
         "product-104996-full",
-        &format_product_detail(&product, None),
+        &format_product_detail(&product, &ProductView::everything()),
     );
 }
 
@@ -52,7 +54,7 @@ fn product_renders_what_a_sparse_page_has() {
     let product = as_production_would(OLLY_GUMMIES);
     assert_golden(
         "product-119174-full",
-        &format_product_detail(&product, None),
+        &format_product_detail(&product, &ProductView::everything()),
     );
 }
 
@@ -76,7 +78,7 @@ fn product_renders_a_page_that_is_not_a_supplement() {
     let product = as_production_would(DENTALCIDIN_TUBE);
     assert_golden(
         "product-143499-full",
-        &format_product_detail(&product, None),
+        &format_product_detail(&product, &ProductView::everything()),
     );
 }
 
@@ -85,11 +87,14 @@ fn a_requested_section_renders_alone() {
     let product = as_production_would(TWO_A_DAY);
     assert_golden(
         "product-104996-nutrition",
-        &format_product_detail(&product, Some(Section::Nutrition)),
+        &format_product_detail(
+            &product,
+            &ProductView::for_section(Some(Section::Nutrition)),
+        ),
     );
     assert_golden(
         "product-104996-overview",
-        &format_product_detail(&product, Some(Section::Overview)),
+        &format_product_detail(&product, &ProductView::for_section(Some(Section::Overview))),
     );
 }
 
@@ -99,11 +104,11 @@ fn a_requested_section_renders_alone() {
 fn an_absent_section_says_so() {
     let product = as_production_would(OLLY_GUMMIES);
     assert_eq!(
-        format_product_detail(&product, Some(Section::Warnings)),
+        format_product_detail(&product, &ProductView::for_section(Some(Section::Warnings))),
         "No warnings data available for this product.\n"
     );
     assert_eq!(
-        format_product_detail(&product, Some(Section::Reviews)),
+        format_product_detail(&product, &ProductView::for_section(Some(Section::Reviews))),
         "No review data available for this product.\n"
     );
 }
@@ -194,7 +199,8 @@ fn the_degraded_line_names_an_absent_expected_field() {
         }
     }
 
-    let rendered = format_product_detail(&product, Some(Section::Overview));
+    let rendered =
+        format_product_detail(&product, &ProductView::for_section(Some(Section::Overview)));
     assert!(
         rendered.contains("- **Data quality:** degraded — no strategy produced currency."),
         "the line must name the field, not print an empty list: {:?}",
@@ -223,7 +229,8 @@ fn the_degraded_line_names_a_defaulted_field() {
     assert!(health.fields_defaulted.contains(&"currency".to_string()));
     assert!(!health.fields_absent.contains(&"currency".to_string()));
 
-    let rendered = format_product_detail(&product, Some(Section::Overview));
+    let rendered =
+        format_product_detail(&product, &ProductView::for_section(Some(Section::Overview)));
     assert!(
         rendered.contains("- **Data quality:** degraded — no strategy produced currency."),
         "a defaulted field is named exactly as an absent one is: {:?}",
@@ -245,7 +252,8 @@ fn a_price_with_no_currency_says_so_instead_of_borrowing_one() {
     let product = a_product_with_no_currency();
     assert_eq!(product.currency, None);
 
-    let rendered = format_product_detail(&product, Some(Section::Overview));
+    let rendered =
+        format_product_detail(&product, &ProductView::for_section(Some(Section::Overview)));
     assert!(
         rendered.contains("- **Price:** 9.60 (currency unknown: the page published none)"),
         "{:?}",
@@ -280,7 +288,8 @@ fn a_price_with_no_currency_says_so_instead_of_borrowing_one() {
 fn a_price_with_a_currency_still_prints_it() {
     let product = as_production_would(TWO_A_DAY);
     assert_eq!(product.currency.as_deref(), Some("USD"));
-    let rendered = format_product_detail(&product, Some(Section::Overview));
+    let rendered =
+        format_product_detail(&product, &ProductView::for_section(Some(Section::Overview)));
     assert!(rendered.contains("- **Price:** $12.38"), "{:?}", rendered);
     assert!(!rendered.contains("currency unknown"));
 }
@@ -328,7 +337,7 @@ fn the_degraded_line_names_only_what_caused_the_degradation() {
         );
     }
 
-    let line = format_product_detail(&product, Some(Section::Overview));
+    let line = format_product_detail(&product, &ProductView::for_section(Some(Section::Overview)));
     assert!(
         line.contains("degraded — no strategy produced product_code."),
         "the line must name the culprit and only the culprit: {:?}",
@@ -368,7 +377,10 @@ fn a_truncated_description_says_it_is_truncated() {
         desc
     );
 
-    let rendered = format_product_detail(&via_dom, Some(Section::Description));
+    let rendered = format_product_detail(
+        &via_dom,
+        &ProductView::for_section(Some(Section::Description)),
+    );
     assert!(rendered.contains(&desc), "the text itself is unchanged");
     assert!(
         rendered.contains("may stop mid-sentence"),
@@ -383,7 +395,10 @@ fn a_truncated_description_says_it_is_truncated() {
         via_json_ld.source_of("description"),
         iherb_cli::model::Source::JsonLd
     );
-    let rendered = format_product_detail(&via_json_ld, Some(Section::Description));
+    let rendered = format_product_detail(
+        &via_json_ld,
+        &ProductView::for_section(Some(Section::Description)),
+    );
     assert!(
         !rendered.contains("may stop mid-sentence"),
         "{:?}",
@@ -436,7 +451,8 @@ fn a_malformed_field_is_rendered_as_unreadable_not_as_missing() {
     let mut product = parse_from_json_ld(&OLLY_GUMMIES.json_ld(), "119174", BASE_URL).unwrap();
     enrich_from_html(&grafted, &mut product);
 
-    let overview = format_product_detail(&product, Some(Section::Overview));
+    let overview =
+        format_product_detail(&product, &ProductView::for_section(Some(Section::Overview)));
     assert!(
         overview.contains("degraded — review_distribution was on the page and could not be read."),
         "the line must name the field and say what went wrong: {:?}",
@@ -464,5 +480,8 @@ fn a_malformed_field_is_rendered_as_unreadable_not_as_missing() {
     // `Data quality` line stays absent entirely.
     let intact = as_production_would(OLLY_GUMMIES);
     assert!(!intact.health().degraded);
-    assert!(!format_product_detail(&intact, Some(Section::Overview)).contains("Data quality"));
+    assert!(
+        !format_product_detail(&intact, &ProductView::for_section(Some(Section::Overview)))
+            .contains("Data quality")
+    );
 }

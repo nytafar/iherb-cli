@@ -47,8 +47,70 @@ Output: Full Markdown with overview, supplement facts table, ingredients, sugges
 
 - `--country <code>`: localized storefront (e.g., `ch`, `de`, `jp`). Default: `us`
 - `--currency <code>`: ask the storefront to price in this currency (e.g., `CHF`, `EUR`) and verify what came back. It does **not** convert — a storefront that prices in something else is an error, not a relabelling. Pass it whenever the currency matters: it is also what stops iHerb's IP geolocation overriding `--country`. Default: unset, which takes whatever iHerb serves
+- `--json`: emit one JSON document on stdout instead of Markdown — see below
 - `--no-cache`: bypass cache
 - `--debug`: show browser window
+
+## `--json`: reading this tool programmatically
+
+Prefer `--json` over parsing the Markdown. stdout carries exactly one JSON
+document, success or failure, and nothing else — logging goes to stderr.
+
+```json
+{ "ok": true, "schema_version": 1,
+  "meta": { "tool_version": "0.1.1",
+            "fetched_at": "2026-08-31T09:14:22Z", "emitted_at": "2026-08-31T11:02:05Z",
+            "from_cache": true, "country": "no", "currency": "NOK",
+            "storefront": "https://no.iherb.com" },
+  "data": { } }
+```
+
+A failure has `"ok": false` and carries `error_type` and `message` where `data`
+would be, in the same envelope.
+
+Four things to know before acting on the output.
+
+1. **`meta` is the record's provenance and it travels with it.** `fetched_at` is
+   when the page was read, `emitted_at` is when the command ran; when
+   `from_cache` is true they differ, and a price read weeks ago is not stale, it
+   is wrong. `country`, `currency` and `storefront` are what the run resolved
+   to, so a stored document is still interpretable on its own. Never compare two
+   prices without comparing their `meta.storefront`.
+2. **`meta.currency` is what the run *asked* for, not what a price is in.** The
+   currency of a price is `data.currency`, and `null` there means the page
+   published none. Do not substitute one for the other.
+3. **`data.extraction` says whether to trust the record.** Same block on a
+   product and on every search card. `degraded: true` means a field every
+   product page publishes was not read, or a field the page carried could not be
+   read — treat the numbers as suspect and say so. `fields_absent` is the page
+   having nothing; `fields_defaulted` is a value nobody read off the page;
+   `fields_malformed` is our parser failing on markup that was there.
+4. **`null` is an answer.** `in_stock: null` means nothing on the page said
+   either way — report that, do not report "in stock". `supplement_facts: null`
+   means the product has no panel, which is normal for a non-supplement.
+
+`--section` narrows the JSON exactly as it narrows the Markdown; `name`,
+`product_id`, `product_url` and `extraction` are always present.
+
+### Exit codes
+
+Branch on the exit code rather than on the message text.
+
+| exit | `error_type` | what to do |
+|---|---|---|
+| 0 | — | succeeded |
+| 2 | `invalid_input` | fix the arguments — empty query, `--limit 0`, unknown `--category` or `--country`, an unusable product id, or a `--currency` this storefront does not price in |
+| 10 / 11 | `browser_launch_failed`, `chrome_download_failed` | the environment is broken; tell the user, do not retry |
+| 20 / 21 | `navigation_timeout`, `navigation_failed` | retry `20`; `21` usually means the URL is wrong |
+| 22 | `cloudflare_blocked` | back off and retry later; do not hammer |
+| 23 | `product_not_found` | the id is gone — stop asking about it |
+| 24 | `empty_page_or_catalog_end` | the search matched nothing; try a different query |
+| 30 / 31 / 32 / 40 | `network_error`, `io_error`, `cache_error`, `json_error` | local or transient; retry once, then report |
+| 41 | `parse_failed` | **the page loaded and the scraper could not read it.** The site changed shape. Report it to the user as a tool bug, do not retry the same id in a loop |
+| 70 | `internal_error` | a bug in the tool; report it with the message |
+| 130 | — | interrupted |
+
+`--help` and `--version` still print normally and exit `0` under `--json`.
 
 ## Workflows
 

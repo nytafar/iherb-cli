@@ -42,6 +42,18 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub delay: Option<u64>,
 
+    /// Emit one JSON document on stdout instead of Markdown.
+    ///
+    /// Success or failure, exactly one document and nothing else: logging goes
+    /// to stderr, and a failure is an envelope with `ok: false`, a stable
+    /// `error_type` and a stable exit code (#9). Every document carries a
+    /// `schema_version` and a `meta` block naming the storefront, currency and
+    /// both timestamps, so a stored record is still interpretable months later
+    /// (#44). `iherb-cli --help` documents the exit codes; the README carries
+    /// the schema history.
+    #[arg(long, global = true, verbatim_doc_comment)]
+    pub json: bool,
+
     /// Show a real browser window and log at debug level.
     ///
     /// Both, and the window is the half that used to be missing (#47): this

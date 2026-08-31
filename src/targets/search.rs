@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use crate::cache::CacheKey;
 use crate::cli::SortOrder;
 use crate::config::AppConfig;
+use crate::error::IherbError;
 use crate::fetch::{FetchTarget, Paging};
 use crate::model::{ProductSummary, SearchFetch, SearchResult};
 use crate::scraper;
@@ -68,10 +69,12 @@ impl SearchTarget {
         category: Option<&str>,
     ) -> Result<Self> {
         if query.trim().is_empty() {
-            anyhow::bail!("Search query cannot be empty");
+            return Err(
+                IherbError::InvalidInput("Search query cannot be empty".to_string()).into(),
+            );
         }
         if limit == 0 {
-            anyhow::bail!("Limit must be at least 1");
+            return Err(IherbError::InvalidInput("Limit must be at least 1".to_string()).into());
         }
 
         // Resolved here rather than at the URL builder so an unusable
@@ -230,7 +233,11 @@ impl FetchTarget for SearchTarget {
 
     fn validate(&self, result: &Self::Output) -> Result<()> {
         if result.products.is_empty() {
-            anyhow::bail!("No search results found for: {}", self.query);
+            return Err(IherbError::EmptyPageOrCatalogEnd(format!(
+                "No search results found for: {}",
+                self.query
+            ))
+            .into());
         }
         self.currency_holds(result)?;
         Ok(())

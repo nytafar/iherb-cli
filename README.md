@@ -124,6 +124,7 @@ Take 1 capsule daily with or without food.
 | `--currency <code>` | Ask the storefront to price in this currency (e.g., `USD`, `CHF`, `EUR`), and check what came back. Does **not** convert — see below | none |
 | `--no-cache` | Bypass local cache and fetch fresh data | — |
 | `--delay <ms>` | Delay between requests in milliseconds | `2000` |
+| `--json` | Emit one JSON document on stdout instead of Markdown — see below | — |
 | `--debug` | Run the browser headed (a visible window), log at debug level, and print the provenance table | — |
 
 ```bash
@@ -169,6 +170,145 @@ A price whose currency the page did not publish is reported as
 currency you asked for. A number captioned with the wrong currency is worse than
 a number with none: an agent comparing `CHF 9.60` against `CHF 12.00` from a
 real Swiss storefront produces a confidently wrong recommendation.
+
+## JSON output
+
+`--json` replaces the Markdown with exactly one JSON document on stdout. Success
+or failure, cached or fresh, it is always one document and it is always the only
+thing on stdout — logging goes to stderr.
+
+```bash
+iherb-cli product 12949 --country no --currency NOK --json
+```
+
+```json
+{
+  "ok": true,
+  "schema_version": 1,
+  "meta": {
+    "tool_version": "0.1.1",
+    "fetched_at": "2026-08-31T09:14:22Z",
+    "emitted_at": "2026-08-31T11:02:05Z",
+    "from_cache": true,
+    "country": "no",
+    "currency": "NOK",
+    "storefront": "https://no.iherb.com"
+  },
+  "data": {
+    "name": "Nordic Naturals, Ultimate Omega",
+    "price": 880.63,
+    "currency": "NOK",
+    "in_stock": null,
+    "supplement_facts": { },
+    "extraction": {
+      "strategy": "json_ld",
+      "enriched": true,
+      "sources": { "name": "json_ld", "in_stock": "absent", "currency": "json_ld" },
+      "fields_absent": ["in_stock"],
+      "fields_defaulted": [],
+      "fields_malformed": ["review_distribution"],
+      "degraded": true
+    }
+  }
+}
+```
+
+A failure wears the same envelope, with `error_type` and `message` where `data`
+would be:
+
+```json
+{
+  "ok": false,
+  "schema_version": 1,
+  "meta": { "tool_version": "0.1.1", "fetched_at": null, "emitted_at": "2026-08-31T11:02:05Z",
+            "from_cache": null, "country": "no", "currency": "NOK",
+            "storefront": "https://no.iherb.com" },
+  "error_type": "cloudflare_blocked",
+  "message": "Cloudflare challenge could not be solved after 3 attempts"
+}
+```
+
+### What `meta` means
+
+- **`fetched_at`** is when the *page* was read; **`emitted_at`** is when the
+  command ran. On a fresh fetch they are the same instant. On a cache hit they
+  are not, and the difference is the whole point: a price read three weeks ago
+  is not stale, it is wrong.
+- **`from_cache`** says which of those two you are looking at.
+- **`country`, `currency`, `storefront`** are the values the run *resolved* to
+  after flag → env → config file — not the flags as typed. A record produced by
+  an unattended run with no flags at all still says which storefront it came
+  from.
+- `fetched_at` and `from_cache` are `null` when no page was read, which is every
+  failure. `country`, `currency` and `storefront` are `null` when the run failed
+  before its configuration resolved — an unparseable command line has no
+  effective storefront, and naming one would be a claim about a run that never
+  started.
+- **`meta.currency` is the currency the run asked the storefront for**, and is
+  `null` when it asked for nothing in particular. The currency a *price* is in
+  is `data.currency`, and whether anybody read it off the page is in
+  `data.extraction.sources.currency`. These are deliberately two different
+  fields: see [what `--currency` does](#what---currency-does).
+
+### `data.extraction`
+
+Every record — a product, and every card in a search result — carries the same
+provenance block: which strategy produced it, where each field came from, and
+whether the record looks degraded. `absent` means the page published nothing;
+`defaulted` means there is a value nobody read off the page; `malformed` means
+the page carried the field and the parser could not read it. `degraded` is the
+"our selectors may have rotted" signal, and a caller acting on price data should
+check it.
+
+`null` is a value in this output, not an omission. `in_stock: null` means no
+signal on the page said either way, which is a different answer from `false`;
+`supplement_facts: null` means the product has no Supplement Facts panel, which
+plenty of them genuinely do not.
+
+`--section` narrows the document the same way it narrows the Markdown. The
+record's identity (`name`, `product_id`, `product_url`) and its `extraction`
+block are always present, whatever section was asked for.
+
+### Schema versions
+
+`schema_version` is bumped only on a **breaking** change to `data`: a field
+removed, a field re-typed, or a field whose meaning changes. Purely additive
+fields do not bump it, so a consumer that ignores unknown keys keeps working
+across additions.
+
+| version | what changed |
+|---|---|
+| 1 | Initial `--json` output: the `ok` / `schema_version` / `meta` / `data` envelope, product and search payloads, and the `extraction` provenance block on both. |
+
+### Exit codes
+
+`--json` or not, a failure exits on a stable code naming what went wrong. `0` is
+success and `130` is an interrupt (Ctrl+C).
+
+| exit | `error_type` | what it means | produced by |
+|---|---|---|---|
+| 2 | `invalid_input` | The arguments cannot produce a request. Fix them. | an empty query, `--limit 0`, an unknown `--category`, an identifier that is neither an id nor a URL, an unknown `--country`, and a `--currency` the storefront does not price in |
+| 10 | `browser_launch_failed` | Chrome would not start. The environment needs attention. | browser launch |
+| 11 | `chrome_download_failed` | Chrome could not be downloaded. | the first-run browser download |
+| 20 | `navigation_timeout` | The page did not load in time. Worth retrying. | a navigation failure whose cause names a timeout |
+| 21 | `navigation_failed` | The page did not load, and not because of the clock. | any other navigation failure |
+| 22 | `cloudflare_blocked` | Cloudflare would not let us through. Retry later, from elsewhere. | the challenge loop giving up |
+| 23 | `product_not_found` | iHerb says the product is gone. Stop asking about this id. | a 404 or not-found page |
+| 24 | `empty_page_or_catalog_end` | The listing carried nothing. Not a fault. | a search whose result set is empty |
+| 30 | `network_error` | The network failed under us. | the Chrome download's HTTP client |
+| 31 | `io_error` | The filesystem failed under us. | file reads and writes |
+| 32 | `cache_error` | The cache could not be read or written. | the cache directory |
+| 40 | `json_error` | JSON we produced or consumed would not round-trip. | cache serialization |
+| 41 | `parse_failed` | **The page loaded and we could not read it.** The scraper is broken and a human should look. | a product page from which no strategy produced a name or a price |
+| 70 | `internal_error` | This tool hit something it cannot name about itself. A bug. | anything unclassified |
+
+`parse_failed` and `internal_error` are deliberately separate. `parse_failed` is
+the one code in this table worth alerting on — it means the site changed shape
+under us — and it is worthless the moment every unrecognised error is filed
+under it.
+
+`--help` and `--version` are not command output: they print as usual and exit
+`0`, `--json` or not.
 
 ## Configuration
 

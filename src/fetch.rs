@@ -46,6 +46,18 @@ pub enum Paging {
 pub struct Fetched<T> {
     pub data: T,
     pub retrieved_at: SystemTime,
+    /// Whether `retrieved_at` is a cache file's mtime rather than this run's
+    /// clock — i.e. whether this data was read from disk or from iHerb.
+    ///
+    /// The one bit `--json`'s envelope cannot derive (#44). `retrieved_at` on
+    /// its own is only a timestamp: a fresh fetch and a cache hit written a
+    /// second ago look identical, and the distinction between "when the page
+    /// was read" and "when this command ran" is the entire point of the two
+    /// fields once a record outlives the process.
+    ///
+    /// Kept to a bool deliberately. #7 moves freshness into the model proper;
+    /// this is only enough to say which of the two the envelope is reporting.
+    pub from_cache: bool,
 }
 
 /// One thing the pipeline knows how to fetch.
@@ -164,6 +176,7 @@ pub fn cached<T: FetchTarget>(target: &T, config: &AppConfig) -> Option<Fetched<
     Some(Fetched {
         data: hit.data,
         retrieved_at: hit.cached_at,
+        from_cache: true,
     })
 }
 
@@ -257,6 +270,7 @@ async fn read_target<T: FetchTarget>(
     Ok(Fetched {
         data: out,
         retrieved_at: SystemTime::now(),
+        from_cache: false,
     })
 }
 

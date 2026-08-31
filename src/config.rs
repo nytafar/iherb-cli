@@ -102,7 +102,7 @@ impl AppConfig {
             "ar", "za", "eg", "ng", "ke", "cn",
         ];
         if !KNOWN_COUNTRIES.contains(&country) {
-            return Err(IherbError::Navigation(format!(
+            return Err(IherbError::InvalidInput(format!(
                 "Unknown country code '{}'. iHerb may not support this subdomain. Known codes include: us, ca, de, fr, ch, au, jp, kr, etc.",
                 country
             )));

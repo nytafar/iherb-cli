@@ -183,8 +183,9 @@ pub fn parse_product_identifier(input: &str) -> Result<String> {
         }
     }
 
-    anyhow::bail!(
+    Err(IherbError::InvalidInput(format!(
         "Invalid product identifier: {}. Use a numeric ID or full iHerb URL",
         input
-    );
+    ))
+    .into())
 }
