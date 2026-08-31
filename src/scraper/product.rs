@@ -440,7 +440,7 @@ fn assign_section_by_heading(heading: &str, content: String, product: &mut Produ
 }
 
 /// Extract a value from #product-specs-list by label prefix.
-fn extract_spec(doc: &Html, label: &str) -> Option<String> {
+pub fn extract_spec(doc: &Html, label: &str) -> Option<String> {
     if let Ok(sel) = Selector::parse("#product-specs-list li") {
         for li in doc.select(&sel) {
             let text: String = li.text().collect::<Vec<_>>().join("").trim().to_string();
@@ -708,7 +708,7 @@ fn extract_rating_from_stars(doc: &Html) -> Option<f64> {
     title.split('/').next()?.trim().parse::<f64>().ok()
 }
 
-fn parse_supplement_facts_html(doc: &Html) -> Option<SupplementFacts> {
+pub fn parse_supplement_facts_html(doc: &Html) -> Option<SupplementFacts> {
     let table_sel =
         Selector::parse(".supplement-facts-container table, table.supplement-facts-table").ok()?;
     let table = doc.select(&table_sel).next()?;
@@ -772,7 +772,7 @@ fn parse_supplement_facts_html(doc: &Html) -> Option<SupplementFacts> {
     })
 }
 
-fn parse_review_distribution_html(doc: &Html) -> Option<ReviewDistribution> {
+pub fn parse_review_distribution_html(doc: &Html) -> Option<ReviewDistribution> {
     // iHerb uses a <ugc-review-progress-bar> custom element containing
     // a <button class="item"> for each star level (5 down to 1).
     // Each button has:
