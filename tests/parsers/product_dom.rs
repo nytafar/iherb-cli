@@ -11,8 +11,9 @@ use iherb_cli::scraper::product::{
 };
 
 use crate::fixture::{
-    self, BASE_URL, B_COMPLEX, GOLD_C_POWDER, OLLY_GUMMIES, TWO_A_DAY, ULTIMATE_OMEGA,
-    ULTIMATE_OMEGA_NOK,
+    self, BASE_URL, BUTYRATE_TWO_CAP_SERVING, B_COMPLEX, DENTALCIDIN_TUBE, FIBERAID_POWDER,
+    GOLD_C_POWDER, LITHIUM_MICRO_TABLETS, OLLY_GUMMIES, R_LIPOIC_TINY_ID, SUPREME_C_TABLETS,
+    TART_CHERRY_LIQUID, TWO_A_DAY, ULTIMATE_OMEGA, ULTIMATE_OMEGA_NOK,
 };
 
 // ---------------------------------------------------------------------------
@@ -575,15 +576,157 @@ fn extract_spec_returns_none_for_a_label_that_is_not_there() {
 // parse_supplement_facts_html
 // ---------------------------------------------------------------------------
 
+/// Every product page that carries a Supplement Facts panel parses it, and what
+/// parses always has nutrients and a serving size.
+///
+/// This sweep used to run over `products()` unconditionally and to require
+/// `servings_per_container` as well. Both claims were true of the eight pages
+/// it could see, and both were false about iHerb: all eight were swallowable
+/// US dietary supplements, so "every product page has a facts panel" and "every
+/// panel states servings per container" were assertions with no available
+/// counterexample. #8's Norwegian corpus supplied five on its first run — see
+/// the two tests below, which is where each dropped claim went.
 #[test]
-fn supplement_facts_parse_on_every_product_page() {
+fn supplement_facts_parse_wherever_a_page_carries_them() {
     for f in fixture::products() {
+        // The one page with no panel at all has its own test, immediately below.
+        if f.slug() == DENTALCIDIN_TUBE.slug() {
+            continue;
+        }
         let facts = parse_supplement_facts_html(&f.doc())
             .unwrap_or_else(|| panic!("{}: no supplement facts", f.slug()));
         assert!(!facts.nutrients.is_empty(), "{}", f.slug());
         assert!(facts.serving_size.is_some(), "{}", f.slug());
-        assert!(facts.servings_per_container.is_some(), "{}", f.slug());
     }
+}
+
+/// Exactly one product page has no Supplement Facts panel, and `None` is the
+/// correct reading of it rather than a parse failure: Dentalcidin is a
+/// toothpaste. It is a product iHerb sells and this tool must describe, and it
+/// has no serving, no daily values and nothing to state them about.
+///
+/// Asserted as a set rather than as a single `is_none()` so it also fails the
+/// other way — if any *other* page stops producing a panel, this is what says
+/// which one.
+#[test]
+fn one_product_page_carries_no_supplement_facts_and_it_is_the_toothpaste() {
+    let without: Vec<&str> = fixture::products()
+        .filter(|f| parse_supplement_facts_html(&f.doc()).is_none())
+        .map(|f| f.slug())
+        .collect();
+
+    assert_eq!(
+        without,
+        vec![DENTALCIDIN_TUBE.slug()],
+        "the set of product pages with no Supplement Facts panel changed"
+    );
+}
+
+/// `servings_per_container` is optional, and four of #8's twelve captures prove
+/// it — for two different reasons, only one of which is the page's own doing.
+///
+/// This is the assertion the old sweep made that could not have failed: eight
+/// pages, all of which happened to state the row, all of which happened to
+/// spell it the one way the parser matches.
+#[test]
+fn servings_per_container_is_absent_on_four_pages_for_two_different_reasons() {
+    let without: Vec<&str> = fixture::products()
+        .filter_map(|f| parse_supplement_facts_html(&f.doc()).map(|facts| (f, facts)))
+        .filter(|(_, facts)| facts.servings_per_container.is_none())
+        .map(|(f, _)| f.slug())
+        .collect();
+
+    assert_eq!(
+        without,
+        vec![
+            LITHIUM_MICRO_TABLETS.slug(),
+            SUPREME_C_TABLETS.slug(),
+            BUTYRATE_TWO_CAP_SERVING.slug(),
+            R_LIPOIC_TINY_ID.slug(),
+        ],
+        "the set of pages without a servings-per-container reading changed; if \
+         the parser was taught the singular spelling, the last two rows are the \
+         ones that should have left"
+    );
+
+    // Reason one: the page never says it. Neither of these two pages contains
+    // the phrase in any spelling, so `None` is the whole truth about them.
+    for f in [LITHIUM_MICRO_TABLETS, SUPREME_C_TABLETS] {
+        assert!(
+            !f.html().to_lowercase().contains("per container"),
+            "{} does state a per-container count after all",
+            f.slug()
+        );
+    }
+
+    // Reason two, and the one that is ours: these two pages *do* state it, and
+    // spell it "Serving Per Container" — singular. `parse_supplement_facts_html`
+    // matches `"servings per"`, so it reads past them and answers `None` for a
+    // page that gave an answer.
+    //
+    // Not fixed here. This commit adds fixtures; the gap it exposes is parser
+    // work, and a production change buried in a fixture commit is a change
+    // nobody reviews. Filed as #54, and this test is what will go red when it
+    // is fixed.
+    for f in [BUTYRATE_TWO_CAP_SERVING, R_LIPOIC_TINY_ID] {
+        assert!(
+            f.html().contains("Serving Per Container"),
+            "{} was supposed to be a singular-spelling page",
+            f.slug()
+        );
+    }
+}
+
+/// `Package quantity` is not a count, and #15 has to know that before it
+/// designs a quantity type.
+///
+/// The eight pages this suite had before #8 offered two shapes — `"<n> count"`
+/// on seven and `"8.81 oz"` on the powder — so "a number and a unit noun" was
+/// an unfalsifiable reading of the field. The current corpus carries five
+/// shapes, including a **bare number with no unit at all** and the suite's
+/// first **volume**.
+#[test]
+fn package_quantity_takes_five_shapes_and_only_one_of_them_is_a_count() {
+    let quantity = |f: fixture::Fixture| extract_spec(&f.doc(), "Package quantity");
+
+    // A count of units. What every US capture but one says, and what a
+    // quantity model built on this corpus alone would have assumed.
+    assert_eq!(quantity(TWO_A_DAY).as_deref(), Some("60 count"));
+
+    // Imperial mass.
+    assert_eq!(quantity(GOLD_C_POWDER).as_deref(), Some("8.81 oz"));
+
+    // Metric mass — and note it disagrees with the *volume* the tube is sold
+    // by. The registry buys this as a 90 ml tube; iHerb's package quantity
+    // calls it 85 g. Neither is wrong and they are not convertible without a
+    // density, which is the kind of thing #15 has to decide rather than paper
+    // over.
+    assert_eq!(quantity(DENTALCIDIN_TUBE).as_deref(), Some("85 g"));
+
+    // Volume. The corpus had none before #8.
+    assert_eq!(quantity(TART_CHERRY_LIQUID).as_deref(), Some("946 ml"));
+
+    // A bare number. No unit, no noun — the page states `250` for a product
+    // sold as 250 grams of powder, and nothing on the field says which.
+    assert_eq!(quantity(FIBERAID_POWDER).as_deref(), Some("250"));
+}
+
+/// `Dimensions` is published in the storefront's own unit system, and the two
+/// systems are not distinguishable by shape alone — both are three numbers, an
+/// `x` separator and a mass.
+///
+/// Held constant against the product: this is the same Nordic Naturals bottle
+/// on two storefronts, so the only thing that differs is who is describing it.
+#[test]
+fn dimensions_carry_the_storefronts_units_not_one_systems() {
+    assert_eq!(
+        extract_spec(&ULTIMATE_OMEGA.doc(), "Dimensions").as_deref(),
+        Some("5.85 x 3.2 x 3.15 in, 0.72 lb")
+    );
+    assert_eq!(
+        extract_spec(&ULTIMATE_OMEGA_NOK.doc(), "Dimensions").as_deref(),
+        Some("14.9 x 8.1 x 8 cm, 0.33 kg")
+    );
 }
 
 /// Three shapes the table takes: a 29-row multivitamin, a single-nutrient

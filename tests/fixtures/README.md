@@ -3,10 +3,49 @@
 Real iHerb pages, used by the parser tests in `tests/parsers/`. Each
 `*.html.gz` is the page exactly as served, gzipped and renamed to an ASCII
 slug — nothing is trimmed, because a trim would quietly discard the markup some
-later bug turns out to be about. 23.4 MB of HTML compresses to 3.2 MB here.
+later bug turns out to be about.
 
-Seven came from an upstream fork; the eighth this repository captured itself.
-The two provenance stories are different and are kept apart below.
+There are **two corpora here, and they are not interchangeable.**
+
+| | legacy regression corpus | current corpus |
+|---|---|---|
+| what | seven pages inherited from an upstream fork | thirteen pages this repository captured |
+| storefront | US, all seven | Norway, all thirteen |
+| currency | USD | NOK |
+| siteVersion | 1.0.19891 – 1.0.20071 | 1.0.22698 |
+| captured | 2026-05-29 – 2026-06-05 (commit dates; capture dates unrecorded) | 2026-08-31 and 2026-09-01 |
+| forms | veggie caps, gummies, softgels, one 250 g powder | capsules, softgels, tablets, micro tablets, delayed-release veggie caps, powder by the gram, liquid by the millilitre |
+| products in common | **none** | |
+
+Twenty files, 55.6 MB of HTML, 7.7 MB gzipped.
+
+**New parser work should be designed against the current corpus.** It is the
+site as it is served today, in the storefront this tool is actually pointed at,
+for the products it is actually used for.
+
+**The legacy corpus is kept and must not be deleted.** Characterization tests
+are pinned to those pages, and deleting them erases what those tests encode.
+They are also the only record here of the older markup, which is the only thing
+that can tell a parser change from a site change.
+
+### Why the split is worth writing down
+
+The legacy corpus was a monoculture, and a monoculture makes assertions that
+cannot fail. Two bugs are already on record:
+
+- **#51** (`shipping_weight` returns its whole info tooltip) was invisible to
+  all seven pages and appeared the instant a current page was captured.
+- **#52** (a bare `$` read as USD) and four currency sweeps that "could never
+  have failed" were both consequences of every page being priced in one
+  currency.
+
+#8's captures broke a third on their first run, in
+`product_dom::supplement_facts_parse_on_every_product_page`: it required *every*
+product page to carry a Supplement Facts panel and to state servings per
+container. Both held for eight pages that were all swallowable US supplements;
+five of the twelve new pages contradict them. What replaced that sweep is in
+`tests/parsers/product_dom.rs`, and the parser gap it uncovered on the way —
+`Serving Per Container` in the singular, read past — is **#54**.
 
 ## Where the seven upstream pages came from
 
@@ -43,11 +82,17 @@ elements and `class="hydrated"` markers are present in the HTML.
 
 Upstream names contain spaces, commas and `®`; the slugs are the ASCII renames.
 
-## Where the eighth page came from
+## The current corpus
 
-`product-12949-nordic-ultimate-omega-nok` is **not** from the fork. This
-repository captured it, and it is the first fixture here that anything in this
-repository produced.
+Thirteen pages, all from `no.iherb.com`, all priced in NOK, all at siteVersion
+`1.0.22698`. None came from the fork; this repository captured every one of
+them, with the command each row records.
+
+### The first of them, and what it proves on its own
+
+`product-12949-nordic-ultimate-omega-nok` (#5) came first and is documented
+separately because its provenance argument is different from the rest: it is the
+*same product* as a legacy page, which is what lets it isolate the storefront.
 
 | | |
 |---|---|
@@ -86,6 +131,55 @@ same product:
 The first row is the control: it is what this address gets when nothing is
 asked for, which is why the other two are evidence rather than coincidence.
 
+### The twelve that followed (#8)
+
+Captured **2026-09-01**, all thirteen at siteVersion `1.0.22698`, all
+`COUNTRY_CODE = "NO"` and `CURRENCY_CODE = "NOK"`, all the whole page as served
+after hydration with nothing trimmed.
+
+These are not a sample of iHerb. They are the products the tool's user actually
+buys, resolved from a supplement registry that records a brand and a form and
+**never an iHerb id** — the join is in `registry-map.md`, along with the four
+rows it could not settle. #43 `resolve` is what will eventually automate it.
+
+They were chosen to span **forms** rather than the alphabet, because #15 is the
+programme's gate issue and decides the structured-quantity and container model
+that #16 and #17 build on. The registry's real derived units are kr/cap, kr/g,
+kr/softgel and kr/tablet, and it contains a 90 ml liquid and a 250 g powder;
+designing that model against the gummies and veggie capsules of the legacy
+corpus is how it gets rewritten later.
+
+| slug | product id | blob id | price on the page | registry note |
+|---|---|---|---|---|
+| `product-118148-swanson-fiberaid-arabinogalactan-nok` | `118148` | `eeeddcc009b6f7beef2db9ee7c7973efeda91395` | NOK 277.99 | `arabinogalactan` |
+| `product-143499-biocidin-dentalcidin-toothpaste-nok` | `143499` | `3479f1f19d402b1efdedfef78f9ba1934d37b498` | NOK 300.55 | `dentalcidin` |
+| `product-35060-arg-butyren-tributyrin-nok` | `35060` | `2923e8d457cc29cfd244a1b8dcc62d3b38a5dd01` | NOK 285.78 | `tributyrin` |
+| `product-78419-kal-lithium-orotate-nok` | `78419` | `e95e27ec8f5eb043564335a8cbe071f88865894c` | NOK 98.19 | `lithium-orotate` |
+| `product-117699-swanson-supreme-c-complex-nok` | `117699` | `cacc52f53d8e6c98b085e4de962a764284dcee64` | NOK 305.03 | `vitamin-c-complex` |
+| `product-124094-nutricost-k2-mk7-nok` | `124094` | `c3517cf8b6db196e02d68e30c757051bdd201b57` | NOK 198.90 | `vitamin-k2` |
+| `product-16790-enzymedica-digest-gold-nok` | `16790` | `658e2cc2d66508c643cb2849aa6329e9bfc3273c` | NOK 1079.10 | `digestive-enzymes` |
+| `product-105890-bodybio-calcium-magnesium-butyrate-nok` | `105890` | `6ade1a27d54a4aa98d0cf3c2d3d3090fbb831a5e` | NOK 650.08 | `calcium-magnesium-butyrate` |
+| `product-12081-country-life-coenzyme-b-complex-nok` | `12081` | `b1c3ca56f7793ca28310b6e418362ee4c8d1640d` | NOK 520.19 | `b-complex` |
+| `product-75722-dynamic-health-tart-cherry-nok` | `75722` | `512a6e16988b2f01d25951028db31992ef793287` | NOK 408.53 | `tart-cherry-concentrate` |
+| `product-4-doctors-best-r-lipoic-acid-nok` | `4` | `0a26ad3b26db4115b2e14967c454c358c2463f32` | NOK 259.56 | `r-lipoic-acid` |
+| `product-132364-humanx-gasseri-reuteri-nok` | `132364` | `4296de3c4570eaa1d90707cedf032f9f42d74f00` | NOK 303.48 | `lactobacillus-gasseri-reuteri` |
+
+Every one was captured the same way, which is the way `#5` established:
+
+```sh
+iherb-cli product <id> --country no --currency NOK --no-cache --debug
+gzip -9 -n /tmp/iherb_product_<id>.html > product-<id>-<slug>-nok.html.gz
+```
+
+Serially, one at a time, at the default 2000 ms delay. **iHerb never presented a
+Cloudflare challenge** across the 28 resolution searches and 12 captures this
+took — consistent with every prior wave, and still an observation rather than a
+guarantee. Nothing in this repository has yet measured what happens when one
+appears.
+
+The blob ids are the identity of the *uncompressed* bytes and are checked the
+same way as the upstream ones, below.
+
 ### Verifying a file against its blob id
 
 The blob id is the identity of the *uncompressed* bytes, so it can be checked
@@ -105,6 +199,10 @@ git cat-file blob <blob id> | gzip -9 -n > <slug>.html.gz
 
 ## Why each page is here
 
+The legacy corpus first, in the order it was inherited, then the current one.
+Every row says what that page uniquely exercises; a page that exercises nothing
+another page does not is not worth 400 KB, and should be argued for or dropped.
+
 | slug | why |
 |---|---|
 | `product-104996-cgn-two-a-day` | JSON-LD prices as a `priceSpecification` array with a strikethrough entry; a 29-row supplement table; **the only page with a populated review histogram**, which is what makes it the evidence for #32 |
@@ -115,6 +213,26 @@ git cat-file blob <blob id> | gzip -9 -n > <slug>.html.gz
 | `product-12949-nordic-ultimate-omega-nok` | the only non-USD page, and the only one captured by this repository: the same product as the row above, priced by the Norwegian storefront. It is what stops a currency sweep from passing by assuming one storefront, and it is where the `shipping_weight` tooltip rot on the current site is pinned |
 | `search-vitamin-c` | 48 cards, 11,952 results, and the sort dropdown and category facets that #3 and #4 are about |
 | `category-supplements` | nothing parses it yet; kept for the catalog command in #21 |
+
+And the twelve from #8. What each one is *for* is a form or a field shape the
+legacy corpus could not produce; the price and the currency they also carry are
+covered by all thirteen NOK pages together and are nobody's individual reason
+for being here.
+
+| slug | why |
+|---|---|
+| `product-143499-biocidin-dentalcidin-toothpaste-nok` | **the corpus's only non-supplement, and its only page with no Supplement Facts panel.** A toothpaste sold by volume: no serving, no daily values, nothing to state them about. It is what broke `supplement_facts_parse_on_every_product_page`, and `golden/product-143499-full.md` is the only golden that shows the formatter omitting `## Nutrition` because the page has none rather than because something failed |
+| `product-75722-dynamic-health-tart-cherry-nok` | **the only ingestible liquid.** `Package quantity` is `946 ml` — the corpus's only volume — and the serving size is `2 Tablespoons (30 ml)`, the only one measured in anything but units or grams |
+| `product-118148-swanson-fiberaid-arabinogalactan-nok` | a powder sold by the gram, whose derived unit is kr/g. Its `Package quantity` is the bare string `250` — **no unit, no noun** — which is the counterexample to reading that field as "a number and a unit" |
+| `product-16790-enzymedica-digest-gold-nok` | eleven enzymes dosed in **activity units** — DU, HUT, AGU, CU, FIP, ALU, GalU, SU, BGU, XU, HCU — and not one of them a mass. Anything that assumes a supplement-facts amount is `<number> <mass unit>` meets its counterexample here |
+| `product-105890-bodybio-calcium-magnesium-butyrate-nok` | 250 capsules, **125 servings**: container count and serving count are different numbers on the same page, which #15 has to model as two things. It is also one of the two pages that spell the row `Serving Per Container`, singular |
+| `product-4-doctors-best-r-lipoic-acid-nok` | product id **`4`** — one digit, against five and six everywhere else, so an id-shaped assumption is falsifiable for the first time. The other singular-spelling page, and the largest review count in the corpus at 8,555 |
+| `product-78419-kal-lithium-orotate-nok` | **micro tablets** — a third unit noun, neither capsule nor tablet — and a flavour ("Lemon Lime") inside the product title. States no servings-per-container at all, in any spelling |
+| `product-117699-swanson-supreme-c-complex-nok` | the corpus's first **tablet**, carrying a six-ingredient blend. Also states no servings-per-container in any spelling |
+| `product-35060-arg-butyren-tributyrin-nok` | **delayed-release** veggie caps: the release mechanism is part of the form and the form string is where it is stated. Its serving size reads `1 Capsules` — the site's own plural-after-one, which is real markup and not a parse artefact |
+| `product-12081-country-life-coenzyme-b-complex-nok` | a twelve-nutrient blend mixing mg, mcg and **mcg DFE** in one panel. Its servings-per-container is `120` for a 240-capsule bottle, because the serving is two capsules — the same container-vs-serving split as BodyBio, but here the page states both numbers |
+| `product-132364-humanx-gasseri-reuteri-nok` | dosed in **CFU** — a count of live organisms, not a quantity of anything weighable |
+| `product-124094-nutricost-k2-mk7-nok` | the **single-nutrient** page for contrast with the blends, dosed in micrograms. It is the weakest of the twelve on its own: what it uniquely holds is the contrast, not a shape no other page has. Kept because a corpus of edge cases with no ordinary member cannot say which is which |
 
 ## The JSON side-fixture
 
@@ -134,6 +252,11 @@ guard that says the absence still holds.
 
 Rendered Markdown, regenerated with `UPDATE_GOLDEN=1 cargo test` — exactly `1`,
 any other value still asserts. Read the diff before committing a change to one.
+
+`product-143499-full` is the first golden of a Norwegian page and the first of a
+product that is not a dietary supplement. The `Shipping Weight` line in it
+carries #51's tooltip text: that is characterized, not endorsed, and when #51
+lands this golden changes and the diff is the proof.
 
 **The goldens cover Markdown only.** #9 (`--json` output with a typed error
 taxonomy) changes what callers consume and is not protected by anything here;

@@ -19,11 +19,16 @@ use iherb_cli::output::{format_product_detail, format_search_results, format_sea
 use iherb_cli::scraper::product::{enrich_from_html, parse_from_json_ld};
 use iherb_cli::scraper::search::parse_search_from_html;
 
-use crate::fixture::{assert_golden, BASE_URL, OLLY_GUMMIES, SEARCH_VITAMIN_C, TWO_A_DAY};
+use crate::fixture::{
+    assert_golden, BASE_URL, DENTALCIDIN_TUBE, OLLY_GUMMIES, SEARCH_VITAMIN_C, TWO_A_DAY,
+};
 
 /// The path production takes for a product page: JSON-LD, then DOM enrichment.
 fn as_production_would(f: crate::fixture::Fixture) -> iherb_cli::model::ProductDetail {
-    let mut product = parse_from_json_ld(&f.json_ld(), f.product_id(), BASE_URL)
+    // `f.base_url()`, not the `BASE_URL` constant: since #8 the corpus renders
+    // Norwegian pages too, and a US literal here would put `www.iherb.com`
+    // links under a page that was served from `no.iherb.com`.
+    let mut product = parse_from_json_ld(&f.json_ld(), f.product_id(), f.base_url())
         .unwrap_or_else(|| panic!("{}: no JSON-LD", f.slug()));
     enrich_from_html(f.html(), &mut product);
     product
@@ -47,6 +52,30 @@ fn product_renders_what_a_sparse_page_has() {
     let product = as_production_would(OLLY_GUMMIES);
     assert_golden(
         "product-119174-full",
+        &format_product_detail(&product, None),
+    );
+}
+
+/// The first golden of a page that is **not** a dietary supplement, and the
+/// first of a page the Norwegian storefront served (#8).
+///
+/// Dentalcidin is a toothpaste, so there is no `## Nutrition` section to
+/// render — not because anything failed to parse, but because a tube of
+/// toothpaste has no Supplement Facts panel. Nothing else in the corpus
+/// distinguishes "the formatter dropped the section" from "the page has none",
+/// and a golden is the only place that distinction is visible end to end.
+///
+/// It also renders NOK prices and a metric package quantity through a formatter
+/// whose every other golden is US and imperial.
+///
+/// The `Shipping Weight` line in here carries #51's tooltip text, which is
+/// filed and not this commit's to fix. It is characterized, not endorsed: when
+/// #51 lands, this golden changes and that change is the proof.
+#[test]
+fn product_renders_a_page_that_is_not_a_supplement() {
+    let product = as_production_would(DENTALCIDIN_TUBE);
+    assert_golden(
+        "product-143499-full",
         &format_product_detail(&product, None),
     );
 }

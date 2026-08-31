@@ -1,6 +1,6 @@
 //! The fixture loader.
 //!
-//! Eight real iHerb pages live gzipped under `tests/fixtures/`. This module
+//! Twenty real iHerb pages live gzipped under `tests/fixtures/`. This module
 //! inflates them once per test binary and hands each parser the shape it wants,
 //! because the parsers do not agree on one:
 //!
@@ -22,6 +22,13 @@
 //! literal in a sweep is a claim about every page rather than about the one it
 //! is looking at. [`Fixture::currency`] and [`Fixture::base_url`] are what the
 //! sweeps ask instead.
+//!
+//! The registry is in two halves, and `tests/fixtures/README.md` is where the
+//! difference is argued. The first eight rows are the **legacy regression
+//! corpus**: a US snapshot from an upstream fork, kept because tests are pinned
+//! to it. The rest are the **current corpus**, captured by this repository from
+//! the Norwegian storefront for the products this tool is actually used for,
+//! and they are what new parser work should be designed against.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -110,6 +117,78 @@ registry! {
     /// `/c/supplements`, a category listing. Not parsed by anything yet; kept
     /// for the catalog command in #21.
     CATEGORY_SUPPLEMENTS = "category-supplements", "", "USD", US_STOREFRONT;
+
+    // -----------------------------------------------------------------------
+    // The current corpus (#8): the Norwegian storefront, and the products this
+    // tool is actually used for. Twelve pages captured 2026-09-01 at
+    // siteVersion 1.0.22698 — roughly 2,600 builds newer than the seven above,
+    // which are a US snapshot from another fork.
+    //
+    // Chosen to span *forms*, because that is what #15's structured-quantity
+    // and container model has to be designed against, and the eight pages above
+    // offer veggie caps, gummies, softgels and one 250 g powder — no tablet, no
+    // micro tablet, no delayed-release cap, no liquid, and nothing dosed in
+    // anything but milligrams.
+    // -----------------------------------------------------------------------
+
+    /// Swanson FiberAid larch arabinogalactan, 250 g. A **powder sold by the
+    /// gram**, whose derived unit is kr/g rather than kr/capsule.
+    FIBERAID_POWDER = "product-118148-swanson-fiberaid-arabinogalactan-nok", "118148", "NOK", NO_STOREFRONT;
+
+    /// Biocidin Dentalcidin toothpaste, 90 ml tube. The corpus's first
+    /// **liquid measured in millilitres**, and the first page for a product
+    /// that is not swallowed at all: no serving size, no capsule count, and a
+    /// supplement-facts panel that a toothpaste has no reason to carry.
+    DENTALCIDIN_TUBE = "product-143499-biocidin-dentalcidin-toothpaste-nok", "143499", "NOK", NO_STOREFRONT;
+
+    /// Allergy Research Group ButyrEn, 100 **delayed-release** vegetarian
+    /// capsules. The release mechanism is part of the form, and the form string
+    /// is where it is stated.
+    BUTYREN_DELAYED = "product-35060-arg-butyren-tributyrin-nok", "35060", "NOK", NO_STOREFRONT;
+
+    /// KAL Lithium Orotate, 90 **micro tablets**. Neither "tablet" nor
+    /// "capsule": a third unit noun, on a page that also carries a flavour
+    /// ("Lemon Lime") in the product title.
+    LITHIUM_MICRO_TABLETS = "product-78419-kal-lithium-orotate-nok", "78419", "NOK", NO_STOREFRONT;
+
+    /// Swanson Supreme C-Complex, 250 **tablets**. A six-ingredient blend on
+    /// the corpus's first tablet page.
+    SUPREME_C_TABLETS = "product-117699-swanson-supreme-c-complex-nok", "117699", "NOK", NO_STOREFRONT;
+
+    /// Nutricost Vitamin K2 MK-7, 240 softgels. A **single-nutrient** page for
+    /// contrast with the blends, and one dosed in micrograms.
+    K2_SOFTGELS = "product-124094-nutricost-k2-mk7-nok", "124094", "NOK", NO_STOREFRONT;
+
+    /// Enzymedica Digest Gold, 240 capsules. Eleven enzymes dosed in **activity
+    /// units** — DU, HUT, AGU, CU, FIP, ALU, GalU, SU, BGU, XU, HCU — and not
+    /// one of them a mass. Anything that assumes a supplement-facts amount
+    /// parses as `<number> <mass unit>` meets its counterexample here.
+    DIGEST_GOLD_UNITS = "product-16790-enzymedica-digest-gold-nok", "16790", "NOK", NO_STOREFRONT;
+
+    /// BodyBio Calcium/Magnesium Butyrate, 250 capsules — **125 servings**.
+    /// The serving is two capsules, so the container count and the serving
+    /// count are different numbers on the same page. #15 has to model both.
+    BUTYRATE_TWO_CAP_SERVING = "product-105890-bodybio-calcium-magnesium-butyrate-nok", "105890", "NOK", NO_STOREFRONT;
+
+    /// Country Life Coenzyme B-Complex, 240 vegan capsules. A twelve-nutrient
+    /// blend mixing mg, mcg and mcg DFE in one facts panel.
+    COENZYME_B_COMPLEX = "product-12081-country-life-coenzyme-b-complex-nok", "12081", "NOK", NO_STOREFRONT;
+
+    /// Dynamic Health Tart Cherry Concentrate, 946 ml. The second liquid, and
+    /// the **ingestible** one: a volume dosed by the tablespoon, with the size
+    /// stated in both fl oz and ml.
+    TART_CHERRY_LIQUID = "product-75722-dynamic-health-tart-cherry-nok", "75722", "NOK", NO_STOREFRONT;
+
+    /// Doctor's Best Stabilized R-Lipoic Acid, 60 veggie caps. Product id
+    /// **`4`** — one digit. Every other id in this suite is five or six, and an
+    /// id-shaped assumption that has only ever seen those is unfalsifiable
+    /// without this page. It also carries 8,555 reviews, the largest count here.
+    R_LIPOIC_TINY_ID = "product-4-doctors-best-r-lipoic-acid-nok", "4", "NOK", NO_STOREFRONT;
+
+    /// Humanx Lactobacillus Gasseri & Reuteri+, 30 veggie capsules. Dosed in
+    /// **CFU**, which is a count of organisms and not a quantity of anything
+    /// weighable.
+    GASSERI_REUTERI_CFU = "product-132364-humanx-gasseri-reuteri-nok", "132364", "NOK", NO_STOREFRONT;
 }
 
 /// Every page the suite can load, for tests that sweep all of them.
