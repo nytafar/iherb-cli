@@ -4,6 +4,10 @@ version = "0.1.1"
 edition = "2021"
 description = "CLI tool for querying iHerb product data"
 
+[lib]
+name = "iherb_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "iherb-cli"
 path = "src/main.rs"
