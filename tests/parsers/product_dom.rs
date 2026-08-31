@@ -68,18 +68,77 @@ fn dom_fallback_loses_product_code_and_shipping_weight() {
     }
 }
 
-/// CHARACTERIZATION, NOT DESIRED: pins #31. The gummies page is out of stock —
-/// JSON-LD says `OutOfStock` and `json_ld_reads_out_of_stock` asserts it — but the DOM
-/// fallback reports it in stock. `#stock-status .stock-status-content strong`
-/// finds nothing, and the fallback is `!html.contains("Out of Stock")`, which
-/// the page satisfies because it never uses that exact string.
+/// #31, flipped. This was `dom_fallback_reports_the_gummies_as_in_stock`.
 ///
-/// This is #31. It flips this to `assert!(!product.in_stock)`.
+/// The gummies page is out of stock and says so four separate ways. The DOM
+/// fallback used to report it in stock, because `#stock-status` is absent on
+/// that page and the default was `!html.contains("Out of Stock")` — which the
+/// page satisfies only because it writes "Out of stock" with a lower-case s.
+///
+/// JSON-LD is not consulted anywhere in this test: `parse_from_html` is the DOM
+/// path on its own, which is the point. The DOM has to reach the same answer
+/// JSON-LD does, or the fallback is not a fallback.
 #[test]
-fn dom_fallback_reports_the_gummies_as_in_stock() {
+fn dom_fallback_reads_the_gummies_as_out_of_stock() {
     let product = parse_from_html(OLLY_GUMMIES.html(), "119174", BASE_URL, "USD").unwrap();
-    assert_eq!(product.in_stock, Some(true));
+    assert_eq!(product.in_stock, Some(false));
+
+    // The exact-case substring the old default relied on is still not there.
+    // That is what made the bug invisible, and it is still true, so this test
+    // is not passing because the page changed.
     assert!(!OLLY_GUMMIES.html().contains("Out of Stock"));
+}
+
+/// The four signals the gummies page carries, read straight from the capture.
+/// If a re-capture drops one, this test says which — and
+/// `dom_fallback_reads_the_gummies_as_out_of_stock` above says whether the
+/// remaining ones are still enough.
+#[test]
+fn the_gummies_page_says_out_of_stock_four_ways() {
+    let html = OLLY_GUMMIES.html();
+    assert!(html.contains(r#""availability":"https://schema.org/OutOfStock""#));
+    assert!(html.contains(r#"data-stock-status="Out of stock""#));
+    assert!(html.contains(r#"data-is-out-of-stock="True""#));
+    assert!(html.contains(r#"stckInd: "OutOfStock""#));
+
+    // And the product-level numeric code, which is `0` on all four in-stock
+    // captures.
+    assert!(html.contains(r#"data-stock-status="3""#));
+}
+
+/// The DOM path agrees with JSON-LD about availability on every capture. This
+/// is the assertion that would have caught #31 the day it was written: the two
+/// paths disagreed on the gummies and nothing said so.
+#[test]
+fn dom_and_json_ld_agree_about_availability() {
+    for f in fixture::products() {
+        let dom = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD").unwrap();
+        let ld = parse_from_json_ld(&f.json_ld(), f.product_id(), BASE_URL).unwrap();
+        assert_eq!(dom.in_stock, ld.in_stock, "{}", f.slug());
+        assert!(dom.in_stock.is_some(), "{}", f.slug());
+    }
+}
+
+/// The variant signal is scoped to this product's own id on purpose. The
+/// B-Complex page is in stock and carries `data-is-out-of-stock="True"` — on
+/// the 30-count variant, product 108265, which is a different product. A
+/// page-wide substring search would report the page out of stock.
+#[test]
+fn an_out_of_stock_sibling_variant_does_not_condemn_the_page() {
+    let html = B_COMPLEX.html();
+    assert!(html.contains(r#"data-is-out-of-stock="True""#));
+
+    let product = parse_from_html(html, "108255", BASE_URL, "USD").unwrap();
+    assert_eq!(product.in_stock, Some(true));
+}
+
+/// A page with none of the signals is unknown, not in stock. This is the case
+/// #28 is about: absent and broken must not both look like an answer.
+#[test]
+fn a_page_with_no_stock_signal_answers_unknown() {
+    let bare = r#"<html><body><h1 id="name">Some Product</h1></body></html>"#;
+    let product = parse_from_html(bare, "1", BASE_URL, "USD").unwrap();
+    assert_eq!(product.in_stock, None);
 }
 
 /// CHARACTERIZATION, NOT DESIRED: pins #5 from the parser side. The `currency`

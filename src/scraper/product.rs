@@ -394,11 +394,10 @@ pub fn enrich_from_html(html: &str, product: &mut ProductDetail) {
     enrich_rating_and_reviews(&doc, product);
 
     // Gap-fill only. A strategy that already read an availability signal has a
-    // better one than this heading: JSON-LD says `OutOfStock` on the gummies
-    // page, which carries no `#stock-status` element at all.
+    // better one than the DOM: JSON-LD says `OutOfStock` on the gummies page,
+    // which carries no `#stock-status` element at all.
     if product.in_stock.is_none() {
-        product.in_stock = extract_text(&doc, "#stock-status .stock-status-content strong")
-            .and_then(|text| read_stock_text(&text));
+        product.in_stock = read_stock_from_dom(&doc, &product.product_id);
     }
 
     enrich_product_specs(&doc, product);
@@ -557,6 +556,63 @@ pub fn extract_spec(doc: &Html, label: &str) -> Option<String> {
     None
 }
 
+/// Read availability out of the DOM, in preference order, or `None` when the
+/// page carries no signal this understands.
+///
+/// The gummies capture is out of stock and says so four separate ways, and the
+/// old code — `!html.contains("Out of Stock")` — ignored every one of them,
+/// because the page writes "Out of stock" with a lower-case s (#31).
+///
+/// The order below is by how specific the signal is to *this* product, which
+/// matters more than it looks. `data-is-out-of-stock="True"` appears on the
+/// B-Complex page too, on the 30-count variant of an in-stock product; a
+/// page-wide substring search for it would report that page out of stock.
+/// Every signal here is therefore scoped to an element, and the variant one is
+/// scoped to this product's own id.
+///
+///  1. `#stock-status .stock-status-content strong` — the sentence shown to a
+///     human. Present on all four in-stock captures, absent on the gummies.
+///  2. `[data-pid="<id>"][data-is-out-of-stock]` — the selected size option.
+///     Present on all five captures, and always agrees with JSON-LD.
+///  3. `input#modelProperties[data-stock-status]` — a numeric code, `0` on all
+///     four in-stock captures and `3` on the gummies. A live fetch of the
+///     gummies on 2026-08-31 returned `5` alongside `stckInd: "OutOfStockETA"`.
+///     So `0` is in stock and any other value is not; that is an inference from
+///     six observations rather than from documentation, which is why it ranks
+///     last.
+fn read_stock_from_dom(doc: &Html, product_id: &str) -> Option<bool> {
+    if let Some(answer) = extract_text(doc, "#stock-status .stock-status-content strong")
+        .and_then(|t| read_stock_text(&t))
+    {
+        return Some(answer);
+    }
+
+    let selected_variant = format!("[data-pid=\"{}\"][data-is-out-of-stock]", product_id);
+    if let Ok(sel) = Selector::parse(&selected_variant) {
+        for el in doc.select(&sel) {
+            match el.value().attr("data-is-out-of-stock") {
+                Some(v) if v.eq_ignore_ascii_case("true") => return Some(false),
+                Some(v) if v.eq_ignore_ascii_case("false") => return Some(true),
+                _ => {}
+            }
+        }
+    }
+
+    if let Ok(sel) = Selector::parse("input#modelProperties[data-stock-status]") {
+        if let Some(code) = doc
+            .select(&sel)
+            .next()
+            .and_then(|el| el.value().attr("data-stock-status"))
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            return Some(code == "0");
+        }
+    }
+
+    None
+}
+
 /// Fallback: Parse product detail from HTML using CSS selectors.
 pub fn parse_from_html(
     html: &str,
@@ -602,11 +658,7 @@ pub fn parse_from_html(
     let review_count =
         extract_text(&doc, "a.rating-count span").and_then(|s| parse_review_count(&s));
 
-    // Availability
-    let in_stock = extract_text(&doc, "#stock-status .stock-status-content strong")
-        .map(|s| s.to_lowercase().contains("in stock"))
-        .unwrap_or(!html.contains("Out of Stock"));
-    let in_stock = Some(in_stock);
+    let in_stock = read_stock_from_dom(&doc, product_id);
 
     let product_code = extract_spec(&doc, "Product Code");
     let upc = extract_spec(&doc, "UPC");
