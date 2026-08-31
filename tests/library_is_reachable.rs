@@ -11,7 +11,7 @@ use iherb_cli::fetch::fetch_on;
 use iherb_cli::fetch::FetchTarget;
 use iherb_cli::model::{ProductDetail, ProductSummary, SearchResult, Source, Strategy};
 use iherb_cli::output::format_search_results;
-use iherb_cli::scraper::search::{build_search_url, pages_needed};
+use iherb_cli::scraper::search::{build_search_url, page_budget};
 use iherb_cli::targets::product::parse_product_identifier;
 use iherb_cli::targets::{ProductTarget, SearchTarget};
 
@@ -34,8 +34,8 @@ fn config_validates_country_codes() {
 
 #[test]
 fn search_urls_and_paging_are_derived_from_the_limit() {
-    assert_eq!(pages_needed(1), 1);
-    assert!(pages_needed(100) > 1);
+    assert!(page_budget(1) >= 1);
+    assert!(page_budget(100) > 1);
 
     let url = build_search_url(
         "https://www.iherb.com",
@@ -65,6 +65,7 @@ fn search_results_render_as_markdown() {
             product_id: "1".to_string(),
             in_stock: true,
         }],
+        fetch: Default::default(),
     };
 
     let rendered = format_search_results(&result);

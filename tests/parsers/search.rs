@@ -7,15 +7,17 @@
 
 use std::collections::BTreeMap;
 
+use iherb_cli::cache::Cache;
 use iherb_cli::cli::SortOrder;
-use iherb_cli::fetch::{FetchTarget, Paging};
+use iherb_cli::fetch::{cached, FetchTarget, Paging};
 use iherb_cli::scraper::search::{
-    build_search_url, pages_needed, parse_search_from_html, CategoryId, CATEGORY_ALIASES,
+    build_search_url, page_budget, parse_search_from_html, CategoryId, CATEGORY_ALIASES,
 };
 use iherb_cli::targets::search::SearchPages;
 use iherb_cli::targets::SearchTarget;
 use scraper::Selector;
 
+use crate::fixture::TempDir;
 use crate::fixture::{BASE_URL, CATEGORY_SUPPLEMENTS, SEARCH_VITAMIN_C};
 
 // ---------------------------------------------------------------------------
@@ -205,6 +207,140 @@ fn a_page_with_no_cards_is_an_empty_result_not_an_error() {
 }
 
 // ---------------------------------------------------------------------------
+// #6 — a cached search that is short of --limit
+// ---------------------------------------------------------------------------
+
+/// #6, landed, at the layer that decides it.
+///
+/// A `--limit 10` run caches the products one page yielded. The later
+/// `--limit 200` run used to read that entry, be handed 45, and print a header
+/// still quoting "of 11,952" — silently short, with a plausible timestamp and
+/// no way for the caller to tell except by counting.
+///
+/// The entry now records what its walk did, and the search path asks whether
+/// what is stored answers the request. It does not, so this reads as a miss and
+/// the pipeline refetches. `cached` is the real production path: `fetch` is
+/// this plus a browser launch on `None`.
+#[test]
+fn a_cached_search_short_of_the_limit_is_refetched() {
+    let dir = TempDir::new("limit-refetch");
+    let config = cache_config(dir.path());
+    let cache = Cache::new(dir.path(), false);
+
+    let narrow = SearchTarget::new(&config, "vitamin c", 10, SortOrder::Relevance, None).unwrap();
+    cache
+        .set(&narrow.cache_key(), &one_page_walked())
+        .expect("write the narrow entry");
+
+    // The run that wrote it asked for 10 and got 45, so it is answered.
+    let hit = cached(&narrow, &config).expect("45 products answer a request for 10");
+    assert_eq!(hit.data.products.len(), 45);
+
+    // A wider request is not: 45 is short of 200, and the entry says the walk
+    // stopped with iHerb nowhere near out of results.
+    let wide = SearchTarget::new(&config, "vitamin c", 200, SortOrder::Relevance, None).unwrap();
+    assert!(
+        cached(&wide, &config).is_none(),
+        "a request for 200 must not be answered out of a 45-product entry"
+    );
+
+    // The entry is still on disk and still the same one: this is a refetch
+    // decision, not a second cache file (#1 is what changes the key).
+    assert_eq!(dir.file_count(), 1);
+    assert_eq!(narrow.cache_key().file_name(), wide.cache_key().file_name());
+}
+
+/// The shortfall that is not a bug: iHerb genuinely has no more. A walk that
+/// ended because the results ran out answers any limit, however large — asking
+/// again would fetch the same pages and find the same products.
+#[test]
+fn a_cached_search_that_exhausted_the_results_answers_any_limit() {
+    let dir = TempDir::new("limit-exhausted");
+    let config = cache_config(dir.path());
+    let cache = Cache::new(dir.path(), false);
+
+    let mut all_there_is = one_page_walked();
+    all_there_is.total_results = Some(45);
+    all_there_is.fetch.exhausted = Some(true);
+
+    let target =
+        SearchTarget::new(&config, "vitamin c", 1_000, SortOrder::Relevance, None).unwrap();
+    cache.set(&target.cache_key(), &all_there_is).unwrap();
+
+    let hit = cached(&target, &config).expect("there is no more to fetch");
+    assert_eq!(hit.data.products.len(), 45);
+}
+
+/// An entry written before #6 says nothing about its walk. Nothing is not
+/// "complete": treating it as complete is exactly the assumption that made #6
+/// silent, so a short one is refetched.
+#[test]
+fn an_entry_that_does_not_say_how_it_was_fetched_is_not_assumed_complete() {
+    let dir = TempDir::new("limit-unrecorded");
+    let config = cache_config(dir.path());
+    let cache = Cache::new(dir.path(), false);
+
+    let mut old_entry = one_page_walked();
+    old_entry.fetch = Default::default();
+    assert_eq!(old_entry.fetch.pages_fetched, None);
+    assert_eq!(old_entry.fetch.exhausted, None);
+
+    let target = SearchTarget::new(&config, "vitamin c", 200, SortOrder::Relevance, None).unwrap();
+    cache.set(&target.cache_key(), &old_entry).unwrap();
+
+    assert!(cached(&target, &config).is_none());
+}
+
+/// A walk records the pages it took and whether it reached the end, so what is
+/// cached carries the facts the decision above is made from.
+#[test]
+fn a_walk_records_what_it_did() {
+    let config = search_config();
+    let target = SearchTarget::new(&config, "vitamin c", 200, SortOrder::Relevance, None).unwrap();
+
+    // Two pages of results, then a page with nothing on it: iHerb ran out.
+    let mut acc = SearchPages::default();
+    assert_eq!(target.absorb(one_captured_page(), &mut acc), Paging::More);
+    assert_eq!(target.absorb(one_captured_page(), &mut acc), Paging::More);
+    assert_eq!(target.absorb(an_empty_page(), &mut acc), Paging::Done);
+
+    let result = target.finish(acc).unwrap();
+    assert_eq!(result.fetch.pages_fetched, Some(3));
+    assert_eq!(result.fetch.exhausted, Some(true));
+
+    // A walk that stops with products still coming says so.
+    let mut acc = SearchPages::default();
+    target.absorb(one_captured_page(), &mut acc);
+    let result = target.finish(acc).unwrap();
+    assert_eq!(result.fetch.pages_fetched, Some(1));
+    assert_eq!(result.fetch.exhausted, Some(false));
+}
+
+/// The captured page, with a walk recorded on it as `SearchTarget::finish`
+/// would: one page, and iHerb nowhere near out of results.
+fn one_page_walked() -> iherb_cli::model::SearchResult {
+    let mut result = one_captured_page();
+    result.fetch = iherb_cli::model::SearchFetch {
+        pages_fetched: Some(1),
+        exhausted: Some(false),
+    };
+    result
+}
+
+/// What the parser returns for a results page past the end of the results.
+fn an_empty_page() -> iherb_cli::model::SearchResult {
+    parse_search_from_html("<html><body></body></html>", "vitamin c", BASE_URL, "USD").unwrap()
+}
+
+/// A config pointed at a scratch cache directory, for the round-trips above.
+fn cache_config(cache_dir: std::path::PathBuf) -> iherb_cli::config::AppConfig {
+    iherb_cli::config::AppConfig {
+        cache_dir,
+        ..search_config()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // build_search_url and SortOrder
 // ---------------------------------------------------------------------------
 
@@ -220,10 +356,12 @@ fn search_urls_encode_the_query_and_the_page() {
     // on from the site itself.
     assert!(!first.contains("&p="));
 
-    assert_eq!(pages_needed(1), 1);
-    assert_eq!(pages_needed(48), 1);
-    assert_eq!(pages_needed(49), 2);
-    assert_eq!(pages_needed(200), 5);
+    // A page of 48 cards is fewer than 48 products, so the budget carries one
+    // page of slack; `has_enough` is what actually stops the walk (#6, #33).
+    assert_eq!(page_budget(1), 2);
+    assert_eq!(page_budget(48), 2);
+    assert_eq!(page_budget(49), 3);
+    assert_eq!(page_budget(200), 6);
 }
 
 /// The sort options iHerb's own dropdown offers, read out of the captured

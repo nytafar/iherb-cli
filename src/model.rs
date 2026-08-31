@@ -364,4 +364,37 @@ pub struct SearchResult {
     pub query: String,
     pub total_results: Option<u32>,
     pub products: Vec<ProductSummary>,
+    /// What the walk that produced `products` actually did.
+    ///
+    /// `#[serde(default)]` so a cache entry written before this existed still
+    /// deserializes; it comes back saying nothing, which is the truth about
+    /// such a file, and a request it cannot satisfy is refetched rather than
+    /// assumed to be complete.
+    #[serde(default)]
+    pub fetch: SearchFetch,
+}
+
+/// What a search walk did, recorded on its result (#6).
+///
+/// A search entry holds however many products the run that wrote it happened to
+/// fetch, and the cache key cannot say how many that was — two runs differing
+/// only in `--limit` share one entry on purpose, because the entry holds
+/// everything either of them fetched. So a later, wider run reading that entry
+/// was handed the narrow run's results and had no way to tell it had been
+/// short-changed. These two fields are what it reads to tell.
+///
+/// Both are `Option` because "this record does not say" is a real state: an
+/// entry written before this existed. Zero pages and "not exhausted" would be
+/// claims about a fetch nobody watched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchFetch {
+    /// Result pages walked.
+    pub pages_fetched: Option<usize>,
+    /// Whether the walk stopped because iHerb ran out of results, rather than
+    /// because it had gathered what it was asked for or hit its page budget.
+    ///
+    /// `Some(true)` is what makes a short record complete: 45 products is every
+    /// product there is, not the first page of thousands. Anything else leaves
+    /// a short record short, which is the case #6 is about.
+    pub exhausted: Option<bool>,
 }

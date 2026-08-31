@@ -13,7 +13,7 @@ use iherb_cli::cache::{Cache, CacheKey};
 use iherb_cli::cli::SortOrder;
 use iherb_cli::config::AppConfig;
 use iherb_cli::fetch::FetchTarget;
-use iherb_cli::model::{ProductDetail, ProductSummary, SearchResult};
+use iherb_cli::model::{ProductDetail, ProductSummary, SearchFetch, SearchResult};
 use iherb_cli::targets::{ProductTarget, SearchTarget};
 
 use crate::fixture::TempDir;
@@ -193,15 +193,21 @@ fn two_storefronts_share_one_search_cache_file() {
 // #6 — the limit collision
 // ---------------------------------------------------------------------------
 
-/// CHARACTERIZATION, NOT DESIRED: pins the storage half of #6. Two searches
-/// that differ only in `--limit` plan a different number of page fetches and
-/// still land on the same entry.
+/// Two searches that differ only in `--limit` share one entry, and after #6
+/// they still do — deliberately, not by oversight.
 ///
-/// #6 flips this **if** it takes the key-based resolution ("treat it as a
-/// miss and refetch"): the two names diverge and this becomes `assert_ne!`.
-/// If instead it records the fetched page count inside the entry and merges on
-/// read, the key stays shared on purpose and this test is replaced by the
-/// round-trip below — which fails under either resolution.
+/// #6 offered two resolutions. Under the key-based one this would have become
+/// `assert_ne!`. It took the other: the entry records what its walk did, and
+/// the search path decides whether what is stored answers the request. Keeping
+/// the key shared is the point of that resolution — one entry holds everything
+/// either run fetched, so a narrow run can be served out of a wide run's work
+/// instead of fetching the same pages again under a second name.
+///
+/// The behaviour that used to be missing is not here. It cannot be: this file
+/// tests the cache layer, and the cache layer is still dumb — it hands back the
+/// entry it was asked for, which is what `a_widened_search_still_finds_the_narrow_entry`
+/// below shows. What changed lives in the search path, in
+/// `search::a_cached_search_short_of_the_limit_is_refetched`.
 #[test]
 fn two_limits_share_one_search_cache_file() {
     let dir = TempDir::new("limit-key");
@@ -211,9 +217,9 @@ fn two_limits_share_one_search_cache_file() {
     let two_hundred =
         SearchTarget::new(&cfg, "magnesium", 200, SortOrder::Relevance, None).unwrap();
 
-    // A different amount of work is planned...
-    assert_eq!(ten.page_count(), 1);
-    assert_eq!(two_hundred.page_count(), 5);
+    // A different amount of work is budgeted...
+    assert_eq!(ten.page_count(), 2);
+    assert_eq!(two_hundred.page_count(), 6);
 
     // ...for the same entry.
     assert_eq!(
@@ -222,17 +228,18 @@ fn two_limits_share_one_search_cache_file() {
     );
 }
 
-/// CHARACTERIZATION, NOT DESIRED: #6 as the user hits it. A `--limit 10` run
-/// caches the 48 products one page yielded; the later `--limit 200` run reads
-/// that entry and is handed 48, with nothing in the value recording that only
-/// one page was ever fetched.
+/// The cache layer after #6: it still hands back the entry it was asked for,
+/// short or not, because deciding whether an entry answers a request is not its
+/// job. What the entry now carries is a record of the walk that wrote it —
+/// `pages_fetched` and `exhausted` — which is what lets the layer above tell a
+/// record that is short because iHerb has no more from one that is short
+/// because the run that wrote it did not ask for more.
 ///
-/// #6 flips this under either resolution: a key that includes the limit turns
-/// the read into a miss, and an entry that records its page count adds a field
-/// to what is stored, which breaks the literal below. Fix the test when #6
-/// lands; do not widen the cache to satisfy it.
+/// The behavioural half of #6 is `search::a_cached_search_short_of_the_limit_is_refetched`.
+/// It has to live there: this file cannot express it, since under the
+/// resolution #6 took the cache read is *supposed* to succeed here.
 #[test]
-fn a_widened_search_is_served_the_narrow_runs_results() {
+fn a_widened_search_still_finds_the_narrow_entry() {
     let dir = TempDir::new("limit-roundtrip");
     let cfg = config("us", "USD", dir.path());
     let cache = Cache::new(dir.path(), false);
@@ -255,6 +262,12 @@ fn a_widened_search_is_served_the_narrow_runs_results() {
                 in_stock: true,
             })
             .collect(),
+        // What a `--limit 10` run leaves behind: one page walked, and iHerb
+        // nowhere near out of results.
+        fetch: SearchFetch {
+            pages_fetched: Some(1),
+            exhausted: Some(false),
+        },
     };
 
     let narrow = SearchTarget::new(&cfg, "magnesium", 10, SortOrder::Relevance, None).unwrap();
@@ -269,9 +282,13 @@ fn a_widened_search_is_served_the_narrow_runs_results() {
         .data;
 
     assert_eq!(wide.limit(), 200);
-    assert_eq!(served.products.len(), 48, "asked for 200, cache holds 48");
-    // ...and the header will still say "of 12,008", so the shortfall is
-    // invisible to the caller.
+    assert_eq!(served.products.len(), 48, "asked for 200, entry holds 48");
     assert_eq!(served.total_results, Some(12_008));
     assert_eq!(dir.file_count(), 1);
+
+    // The entry says how it came to hold only 48, which is what the search path
+    // reads. Before #6 there was nothing here to read, so a short entry and a
+    // complete one were the same value.
+    assert_eq!(served.fetch.pages_fetched, Some(1));
+    assert_eq!(served.fetch.exhausted, Some(false));
 }

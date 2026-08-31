@@ -45,6 +45,42 @@ pub fn format_search_results(result: &SearchResult) -> String {
     out
 }
 
+/// One line when a search returned fewer distinct products than `--limit`
+/// asked for, saying which kind of shortfall it is. `None` when there is none.
+///
+/// `--limit` counts distinct products, not cards: iHerb places some products
+/// twice on a results page and #33 returns each of them once. So a short result
+/// is normal and needs explaining rather than hiding — and the two reasons for
+/// it call for opposite responses. If iHerb ran out, there is nothing to do. If
+/// the walk stopped at its page budget, there are more products behind this
+/// one and asking again with a larger `--limit` reaches them.
+///
+/// A record that says nothing about its walk — an entry written before #6 — is
+/// reported as unknown rather than as either.
+pub fn format_search_shortfall(result: &SearchResult, limit: usize) -> Option<String> {
+    if result.products.len() >= limit {
+        return None;
+    }
+    let short = format!(
+        "- **Fewer than --limit:** asked for {}, returning {} distinct products",
+        limit,
+        result.products.len()
+    );
+    Some(match result.fetch.exhausted {
+        Some(true) => format!("{} — iHerb had no more to give.\n", short),
+        Some(false) => format!(
+            "{} — the walk stopped at its page budget, not at the end of the \
+             results, so there are more behind these.\n",
+            short
+        ),
+        None => format!(
+            "{}. This record does not say whether the results ran out or the \
+             walk did.\n",
+            short
+        ),
+    })
+}
+
 pub fn format_product_detail(product: &ProductDetail, section: Option<Section>) -> String {
     let mut out = String::new();
 

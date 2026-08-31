@@ -9,7 +9,7 @@ use crate::cache::CacheKey;
 use crate::cli::SortOrder;
 use crate::config::AppConfig;
 use crate::fetch::{FetchTarget, Paging};
-use crate::model::{ProductSummary, SearchResult};
+use crate::model::{ProductSummary, SearchFetch, SearchResult};
 use crate::scraper;
 use crate::scraper::search::CategoryId;
 
@@ -141,7 +141,7 @@ impl FetchTarget for SearchTarget {
     }
 
     fn page_count(&self) -> usize {
-        scraper::search::pages_needed(self.limit)
+        scraper::search::page_budget(self.limit)
     }
 
     fn navigation_context(&self) -> String {
@@ -178,7 +178,26 @@ impl FetchTarget for SearchTarget {
             query: self.query.clone(),
             total_results: acc.total_results,
             products: acc.products,
+            // What this walk did, so a later, wider request reading it back can
+            // tell a record that is short because iHerb has no more from one
+            // that is short because this run did not ask for more (#6).
+            fetch: SearchFetch {
+                pages_fetched: Some(acc.pages_fetched),
+                exhausted: Some(acc.exhausted),
+            },
         })
+    }
+
+    /// A cached result set answers this request when it holds as many distinct
+    /// products as `--limit` asked for, or when the run that wrote it walked to
+    /// the end of iHerb's results and there are no more to be had.
+    ///
+    /// A record that says nothing about its walk — one written before that was
+    /// recorded — is not treated as complete. Assuming it was is how #6 read to
+    /// a caller: silently fewer results than asked for, with a plausible
+    /// timestamp and a header still quoting the full total.
+    fn cache_is_sufficient(&self, cached: &Self::Output) -> bool {
+        cached.products.len() >= self.limit || cached.fetch.exhausted == Some(true)
     }
 
     fn validate(&self, result: &Self::Output) -> Result<()> {

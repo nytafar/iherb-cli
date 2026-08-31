@@ -1,6 +1,6 @@
 use crate::cli::SortOrder;
 use crate::error::IherbError;
-use crate::model::{ProductSummary, SearchResult};
+use crate::model::{ProductSummary, SearchFetch, SearchResult};
 use chromiumoxide::Page;
 use scraper::{Html, Selector};
 use std::collections::HashSet;
@@ -218,6 +218,10 @@ pub fn parse_search_from_html(
         query: query.to_string(),
         total_results,
         products,
+        // One parsed page is not a walk. What a walk did — how many pages it
+        // took and whether it reached the end — is recorded by the target that
+        // drives it, in `SearchTarget::finish`.
+        fetch: SearchFetch::default(),
     })
 }
 
@@ -350,9 +354,19 @@ pub fn retain_first_seen(
         .collect()
 }
 
-/// Calculate how many pages needed for the desired limit.
-pub fn pages_needed(limit: usize) -> usize {
-    limit.div_ceil(RESULTS_PER_PAGE)
+/// The most result pages a search for `limit` distinct products may walk.
+///
+/// A budget, not a plan. The pipeline checks `has_enough` before every
+/// navigation, so a walk that reaches `limit` on page one stops there and the
+/// rest of the budget costs nothing — the budget only decides when to give up.
+///
+/// It is one page more than `limit` cards would need, because a page of 48
+/// cards is fewer than 48 products: iHerb places some of them twice and #33
+/// drops the repeats. Without the slack, `--limit 48` would ask for exactly one
+/// page, get 45 distinct products from it, and stop three short of what it was
+/// asked for — dedup turning one silent shortfall into another.
+pub fn page_budget(limit: usize) -> usize {
+    limit.div_ceil(RESULTS_PER_PAGE) + 1
 }
 
 fn extract_card_attr(el: &scraper::ElementRef, selector: &str, attr: &str) -> Option<String> {

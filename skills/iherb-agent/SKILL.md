@@ -15,7 +15,9 @@ Use the `iherb-cli` binary to query iHerb product data. It uses a headless brows
 iherb-cli search "<query>" [--limit <n>] [--sort <method>] [--category <slug>]
 ```
 
-- `--limit`: max results (default 20)
+- `--limit`: max distinct products (default 20). iHerb repeats some products in a
+  results grid; each is returned once, so N results means N different products.
+  A run that comes up short says whether iHerb ran out of results or the walk did.
 - `--sort`: `relevance` (default), `featured`, `best-selling`, `rating`, `most-rated`,
   `price-asc`, `price-desc`, `newest`, `highest-discount`. `relevance` is iHerb's
   ranking for the query; `featured` is its merchandised order, which is what the
