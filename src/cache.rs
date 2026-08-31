@@ -5,6 +5,56 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+/// Where a fetched artefact lives in the cache.
+///
+/// One value per kind of cacheable thing, so a new command declares its cache
+/// identity instead of adding another pair of `get_x`/`set_x` methods.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheKey {
+    Product {
+        product_id: String,
+    },
+    Search {
+        query: String,
+        sort: SortOrder,
+        category: Option<String>,
+    },
+}
+
+impl CacheKey {
+    /// The cache file name. The derivation is fixed: changing it orphans every
+    /// entry users already have on disk.
+    fn file_name(&self) -> String {
+        match self {
+            CacheKey::Product { product_id } => format!("product_{}.json", product_id),
+            CacheKey::Search {
+                query,
+                sort,
+                category,
+            } => {
+                let mut hasher = Sha256::new();
+                hasher.update(query.as_bytes());
+                hasher.update(b"\0");
+                hasher.update(sort.as_cache_key().as_bytes());
+                hasher.update(b"\0");
+                if let Some(cat) = category {
+                    hasher.update(cat.as_bytes());
+                }
+                let result = hasher.finalize();
+                format!("search_{}.json", hex::encode(&result[..8])) // 16 hex chars
+            }
+        }
+    }
+
+    /// How this kind of entry is described in log messages.
+    pub fn label(&self) -> &'static str {
+        match self {
+            CacheKey::Product { .. } => "product data",
+            CacheKey::Search { .. } => "search results",
+        }
+    }
+}
+
 pub struct Cache {
     dir: PathBuf,
     read_enabled: bool,
@@ -27,56 +77,21 @@ impl Cache {
         }
     }
 
-    pub fn get_product<T: DeserializeOwned>(&self, product_id: &str) -> Option<CacheHit<T>> {
+    /// Read an entry, or `None` if it is missing, stale, unreadable, or reads
+    /// are disabled by `--no-cache`.
+    pub fn get<T: DeserializeOwned>(&self, key: &CacheKey) -> Option<CacheHit<T>> {
         if !self.read_enabled {
             return None;
         }
-        let path = self.dir.join(format!("product_{}.json", product_id));
+        let path = self.dir.join(key.file_name());
         self.read_cached(&path, CACHE_TTL)
     }
 
-    pub fn set_product<T: Serialize>(&self, product_id: &str, data: &T) -> Result<(), IherbError> {
-        let path = self.dir.join(format!("product_{}.json", product_id));
+    /// Write an entry. Writes happen even under `--no-cache`, which only
+    /// suppresses reads.
+    pub fn set<T: Serialize>(&self, key: &CacheKey, data: &T) -> Result<(), IherbError> {
+        let path = self.dir.join(key.file_name());
         self.write_cached(&path, data)
-    }
-
-    pub fn get_search<T: DeserializeOwned>(
-        &self,
-        query: &str,
-        sort: SortOrder,
-        category: Option<&str>,
-    ) -> Option<CacheHit<T>> {
-        if !self.read_enabled {
-            return None;
-        }
-        let key = self.search_key(query, sort, category);
-        let path = self.dir.join(format!("search_{}.json", key));
-        self.read_cached(&path, CACHE_TTL)
-    }
-
-    pub fn set_search<T: Serialize>(
-        &self,
-        query: &str,
-        sort: SortOrder,
-        category: Option<&str>,
-        data: &T,
-    ) -> Result<(), IherbError> {
-        let key = self.search_key(query, sort, category);
-        let path = self.dir.join(format!("search_{}.json", key));
-        self.write_cached(&path, data)
-    }
-
-    fn search_key(&self, query: &str, sort: SortOrder, category: Option<&str>) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(query.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(sort.as_cache_key().as_bytes());
-        hasher.update(b"\0");
-        if let Some(cat) = category {
-            hasher.update(cat.as_bytes());
-        }
-        let result = hasher.finalize();
-        hex::encode(&result[..8]) // 16 hex chars
     }
 
     fn read_cached<T: DeserializeOwned>(&self, path: &Path, ttl: Duration) -> Option<CacheHit<T>> {

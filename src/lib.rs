@@ -10,9 +10,11 @@ pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod fetch;
 pub mod model;
 pub mod output;
 pub mod scraper;
+pub mod targets;
 
 pub use app::run;
 pub use config::AppConfig;

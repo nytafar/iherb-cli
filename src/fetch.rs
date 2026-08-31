@@ -1,0 +1,195 @@
+//! The fetch pipeline.
+//!
+//! `search` and `product` used to be the same procedure written twice: validate
+//! input, look in the cache, launch a browser, open a page, navigate with retry,
+//! extract, validate, store. That block now lives here exactly once, and a
+//! command is a [`FetchTarget`] descriptor rather than another copy of it.
+
+use anyhow::{Context, Result};
+use chromiumoxide::Page;
+use serde::{de::DeserializeOwned, Serialize};
+use std::future::Future;
+use std::time::SystemTime;
+
+use crate::browser::session::BrowserSession;
+use crate::cache::{Cache, CacheKey};
+use crate::config::AppConfig;
+use crate::scraper::navigation::Navigator;
+
+/// Navigation attempts after the first, per page.
+const NAVIGATION_RETRIES: u32 = 2;
+
+/// What the pipeline waits for before reading a page's HTML.
+///
+/// Every target waits the same way today: [`Navigator`] sleeps for the
+/// configured delay, then polls `document.readyState`. #11 replaces that with a
+/// per-target readiness probe, and this is the seam it plugs into. Until then
+/// there is one variant and behaviour is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadinessTarget {
+    /// Wait for `document.readyState === "complete"`.
+    DocumentComplete,
+}
+
+/// Whether the pipeline should walk another page of a paginated target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Paging {
+    /// The last page said there is nothing after it.
+    Done,
+    /// There may be more; fetch the next page if the target has one.
+    More,
+}
+
+/// A fetched artefact and the instant its data was obtained: the cache file's
+/// mtime on a hit, the wall clock on a fresh fetch. Commands print it as the
+/// "Data from" line.
+pub struct Fetched<T> {
+    pub data: T,
+    pub retrieved_at: SystemTime,
+}
+
+/// One thing the pipeline knows how to fetch.
+///
+/// A target says where its data lives in the cache, which URLs to visit, how to
+/// read a visited page, and what counts as a usable result. It never launches a
+/// browser, navigates, retries or touches the cache — [`fetch`] does all of that.
+pub trait FetchTarget {
+    /// The value that gets cached and returned.
+    type Output: Serialize + DeserializeOwned;
+
+    /// State gathered across pages before it becomes an [`Self::Output`].
+    /// Single-page targets typically use `Option<T>`.
+    type Accumulator: Default;
+
+    /// Where this target's data lives in the cache.
+    fn cache_key(&self) -> CacheKey;
+
+    /// The URL for a given 1-based page number.
+    fn url(&self, page_num: usize) -> String;
+
+    /// Upper bound on pages walked. The target can stop earlier by returning
+    /// [`Paging::Done`] from [`Self::extract`] or `true` from [`Self::has_enough`].
+    fn page_count(&self) -> usize {
+        1
+    }
+
+    /// What the pipeline waits for before reading each page. See #11.
+    fn readiness(&self) -> ReadinessTarget {
+        ReadinessTarget::DocumentComplete
+    }
+
+    /// Context added to a navigation failure, e.g. "Failed to navigate to the
+    /// product page".
+    fn navigation_context(&self) -> String;
+
+    /// Whether enough has already been gathered to skip the next navigation.
+    fn has_enough(&self, _acc: &Self::Accumulator) -> bool {
+        false
+    }
+
+    /// Read one navigated page into `acc` and say whether to keep paging.
+    ///
+    /// Returned as an explicit `impl Future` rather than an `async fn` so the
+    /// `Send` bound is visible — #10 needs to drive these concurrently.
+    fn extract<'a>(
+        &'a self,
+        page: &'a Page,
+        html: &'a str,
+        acc: &'a mut Self::Accumulator,
+    ) -> impl Future<Output = Result<Paging>> + Send + 'a;
+
+    /// Assemble what was gathered into the value to cache and return.
+    fn finish(&self, acc: Self::Accumulator) -> Result<Self::Output>;
+
+    /// Reject an output that extraction produced but that is not real data.
+    /// Runs before the cache store, so a rejected result is never cached.
+    fn validate(&self, out: &Self::Output) -> Result<()>;
+}
+
+/// Fetch a target: cache lookup, lazy browser launch, navigation with retry,
+/// extraction and cache store.
+///
+/// The browser is launched only if the cache misses, and `browser_session` is
+/// reused across calls so a batch shares one browser.
+pub async fn fetch<T: FetchTarget>(
+    target: &T,
+    config: &AppConfig,
+    browser_session: &mut Option<BrowserSession>,
+) -> Result<Fetched<T::Output>> {
+    let cache = Cache::new(config.cache_dir.clone(), config.no_cache);
+    let key = target.cache_key();
+
+    // The cache lookup comes first and nothing above the launch below touches
+    // the browser: a cache hit must never start Chrome.
+    if let Some(hit) = cache.get::<T::Output>(&key) {
+        return Ok(Fetched {
+            data: hit.data,
+            retrieved_at: hit.cached_at,
+        });
+    }
+
+    let session = get_or_launch_browser(config, browser_session).await?;
+    let page = session.new_page().await?;
+    let navigator = Navigator::new(config.delay_ms);
+
+    // Exhaustive so that #11 has to decide what a new variant means here.
+    // `Navigator` already implements DocumentComplete.
+    match target.readiness() {
+        ReadinessTarget::DocumentComplete => {}
+    }
+
+    let page_count = target.page_count();
+    let mut acc = T::Accumulator::default();
+
+    for page_num in 1..=page_count {
+        if target.has_enough(&acc) {
+            break;
+        }
+
+        let url = target.url(page_num);
+        let html = navigator
+            .navigate_with_retry(&page, &url, NAVIGATION_RETRIES)
+            .await
+            .context(target.navigation_context())?;
+
+        if target.extract(&page, &html, &mut acc).await? == Paging::Done {
+            break;
+        }
+
+        if page_num < page_count {
+            navigator.rate_limit_delay().await;
+        }
+    }
+
+    let out = target.finish(acc)?;
+    target.validate(&out)?;
+
+    if let Err(e) = cache.set(&key, &out) {
+        tracing::debug!("Failed to cache {}: {}", key.label(), e);
+    }
+
+    Ok(Fetched {
+        data: out,
+        retrieved_at: SystemTime::now(),
+    })
+}
+
+/// Launch the browser on first use and reuse it afterwards.
+pub async fn get_or_launch_browser<'a>(
+    config: &AppConfig,
+    session: &'a mut Option<BrowserSession>,
+) -> Result<&'a BrowserSession> {
+    if session.is_none() {
+        let chrome_path =
+            crate::browser::resolve::resolve_chrome(config.browser_path.as_ref(), &config.data_dir)
+                .await
+                .context("Failed to resolve Chrome browser")?;
+
+        let launched = BrowserSession::launch(chrome_path, config)
+            .await
+            .context("Failed to launch browser")?;
+
+        *session = Some(launched);
+    }
+    Ok(session.as_ref().unwrap())
+}
