@@ -38,7 +38,9 @@ use iherb_cli::fetch::{fetch_on, FetchTarget, Paging};
 fn test_config(scratch: &Path, debug: bool) -> AppConfig {
     AppConfig {
         country: "us".to_string(),
-        currency: "USD".to_string(),
+        // #5 made this Option<String>; None is the new default and asserts nothing,
+        // which is what a browser-lifecycle test wants.
+        currency: None,
         no_cache: true,
         delay_ms: 0,
         debug,
