@@ -238,3 +238,75 @@ fn a_truncated_description_says_it_is_truncated() {
         "the structured-data description is the longer one"
     );
 }
+
+/// What a reader is told when the page carried a field extraction could not
+/// read (#32 round 2).
+///
+/// **The input is synthetic, and deliberately so.** No captured page has a
+/// malformed histogram — the one hydrated widget parses — so there is nothing
+/// to characterize here and no golden covers this rendering. Rather than leave
+/// it unprotected, the gummies page (which carries no widget of its own) is
+/// grafted with a two-bar widget whose bars both claim five stars. That is the
+/// same honesty the `next-data-*-synthetic` fixtures were labelled with in #8:
+/// hand-written input, named as such, testing a path the captures cannot reach.
+///
+/// Three things this pins, all of which were wrong the moment `Source::Malformed`
+/// existed and before `output.rs` caught up:
+///
+///  1. The `Data quality` line names the malformed field. It used to print
+///     `no strategy produced .` — an empty list and a dangling full stop —
+///     because it named only `EXPECTED_FIELDS`, and `review_distribution` is
+///     deliberately not one.
+///  2. It says the field *was on the page*, not that nothing produced it. Those
+///     are different problems with different culprits.
+///  3. `format_extraction_health` lists it under `Malformed`, beside the
+///     existing `Absent` and `Defaulted` lines, and its `Degraded:` sentence no
+///     longer claims a fact that is false here — every field every product page
+///     publishes *was* read off this one.
+#[test]
+fn a_malformed_field_is_rendered_as_unreadable_not_as_missing() {
+    // SYNTHETIC: hand-written widget grafted onto a real capture. See above.
+    const BROKEN_WIDGET: &str = r#"<ugc-review-progress-bar>
+          <button class="item"><span>5 stars</span>
+            <div class="percent-wrap"><span class="block" style="width: 84%;"></span></div></button>
+          <button class="item"><span>5 stars</span>
+            <div class="percent-wrap"><span class="block" style="width: 1%;"></span></div></button>
+        </ugc-review-progress-bar><ul id="product-specs-list""#;
+    let grafted = OLLY_GUMMIES
+        .html()
+        .replace(r#"<ul id="product-specs-list""#, BROKEN_WIDGET);
+    assert_ne!(grafted, OLLY_GUMMIES.html(), "the graft must have taken");
+
+    let mut product = parse_from_json_ld(&OLLY_GUMMIES.json_ld(), "119174", BASE_URL).unwrap();
+    enrich_from_html(&grafted, &mut product);
+
+    let overview = format_product_detail(&product, Some(Section::Overview));
+    assert!(
+        overview.contains("degraded — review_distribution was on the page and could not be read."),
+        "the line must name the field and say what went wrong: {:?}",
+        overview
+    );
+    assert!(
+        !overview.contains("no strategy produced ."),
+        "the empty-list, dangling-period sentence must not come back: {:?}",
+        overview
+    );
+
+    let health = iherb_cli::output::format_extraction_health(&product.health());
+    assert!(
+        health.contains("- **Malformed (on the page, unreadable):** review_distribution"),
+        "{:?}",
+        health
+    );
+    assert!(
+        health.contains("a field the page carried could not be read"),
+        "the Degraded sentence must cover this cause, not just the other one: {:?}",
+        health
+    );
+
+    // The same page untouched says none of it: no widget, no complaint, and the
+    // `Data quality` line stays absent entirely.
+    let intact = as_production_would(OLLY_GUMMIES);
+    assert!(!intact.health().degraded);
+    assert!(!format_product_detail(&intact, Some(Section::Overview)).contains("Data quality"));
+}

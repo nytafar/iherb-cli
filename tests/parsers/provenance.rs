@@ -348,10 +348,15 @@ fn health_serializes_to_the_block_issue_9_renders() {
     assert_eq!(json["sources"]["product_url"], "defaulted");
     assert!(json["fields_absent"].is_array());
     assert!(json["fields_defaulted"].is_array());
+    // Added this round (#32). #9 renders `health()` verbatim, so a new key in
+    // the block is a contract change and is pinned here rather than discovered.
+    assert!(json["fields_malformed"].is_array());
+    assert_eq!(json["fields_malformed"].as_array().unwrap().len(), 0);
 
     let via_globals = serde_json::json!(Strategy::JsGlobals);
     assert_eq!(via_globals, "js_globals");
     assert_eq!(serde_json::json!(Source::Defaulted), "defaulted");
+    assert_eq!(serde_json::json!(Source::Malformed), "malformed");
     assert_eq!(serde_json::json!(Strategy::Unrecorded), "unrecorded");
 }
 
@@ -435,6 +440,10 @@ fn a_defaulted_expected_field_makes_the_record_degraded() {
 fn defaulted_is_not_absent() {
     assert!(!Source::Defaulted.is_attested());
     assert!(!Source::Absent.is_attested());
+    // Malformed is not attested either: nothing was read. It is nonetheless a
+    // third answer, and `a_malformed_histogram_degrades_the_record` in
+    // `product_dom` is where the three are held apart.
+    assert!(!Source::Malformed.is_attested());
     assert!(Source::JsonLd.is_attested());
     assert!(Source::JsGlobals.is_attested());
     assert!(Source::Dom.is_attested());

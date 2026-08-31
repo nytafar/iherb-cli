@@ -85,13 +85,35 @@ pub enum Source {
     /// `currency` is the live case (#5): every path falls back to `"USD"` or to
     /// the `--currency` label when the page publishes no currency marker.
     Defaulted,
+    /// **The page carried this field and we could not read it.** There is no
+    /// value, and that is our fault rather than the page's.
+    ///
+    /// The third state the `Option`-shaped world could not express. `Absent`
+    /// says the page published nothing; this says it published something in a
+    /// shape our selectors no longer understand — which is rot, and rot that
+    /// reports itself as ordinary absence is invisible until someone happens to
+    /// re-fetch the page and notice.
+    ///
+    /// `review_distribution` is the live case (#32). The histogram widget draws
+    /// its bars with no semantic marker of which star level each stands for, so
+    /// the level is inferred from how the star glyphs are drawn. A hydrated
+    /// widget whose bars yield nothing, and a widget whose bars resolve to the
+    /// same level twice, are both this — never [`Source::Absent`], which is
+    /// what an unhydrated shell or a page with no widget earns.
+    ///
+    /// Deliberately **not** [`Source::Defaulted`]. Defaulted means there is a
+    /// value and it should not be trusted; this means there is no value at all.
+    /// Filing it as `Defaulted` would put a field with nothing in it on the
+    /// "looks like data" list, which is the opposite of what a reader needs.
+    Malformed,
     /// Every strategy ran and none produced this field.
     Absent,
 }
 
 impl Source {
     /// Whether this source means a strategy actually read the value off the
-    /// page. [`Source::Defaulted`] and [`Source::Absent`] do not.
+    /// page. [`Source::Defaulted`], [`Source::Malformed`] and
+    /// [`Source::Absent`] do not.
     pub fn is_attested(self) -> bool {
         matches!(self, Source::JsonLd | Source::JsGlobals | Source::Dom)
     }
@@ -183,9 +205,24 @@ pub struct ExtractionHealth {
     /// caller can ignore an absent field, but a defaulted one will silently
     /// look like data.
     pub fields_defaulted: Vec<String>,
-    /// True when a field [`ProductDetail::EXPECTED_FIELDS`] says every product
-    /// page publishes was not actually read off the page — absent, or present
-    /// only as a default.
+    /// The tracked fields the page carried and extraction could not read, in
+    /// declaration order. See [`Source::Malformed`].
+    ///
+    /// Separate from `fields_absent` for the same reason `fields_defaulted` is:
+    /// an absent field is the page's answer, and a malformed one is ours. Any
+    /// entry here means a selector has rotted, whatever the field.
+    pub fields_malformed: Vec<String>,
+    /// True when extraction looks broken rather than merely thin.
+    ///
+    /// Two ways to earn it:
+    ///
+    ///  1. A field [`ProductDetail::EXPECTED_FIELDS`] says every product page
+    ///     publishes was not actually read off the page — absent, or present
+    ///     only as a default.
+    ///  2. **Any** field is [`Source::Malformed`], expected or not. A malformed
+    ///     field is a page that carried data we could not read, which is rot by
+    ///     definition; it does not need to be on a list of fields every page has
+    ///     to prove the selectors have drifted.
     ///
     /// This is the "our selectors rotted" signal, and it is deliberately
     /// distinct from "this product has no supplement facts because it is a
@@ -307,13 +344,15 @@ impl ProductDetail {
         let mut sources = BTreeMap::new();
         let mut fields_absent = Vec::new();
         let mut fields_defaulted = Vec::new();
+        let mut fields_malformed = Vec::new();
 
         for (field, _) in self.field_presence() {
             let source = self.extraction.source_of(field);
             match source {
                 Source::Absent => fields_absent.push(field.to_string()),
                 Source::Defaulted => fields_defaulted.push(field.to_string()),
-                _ => {}
+                Source::Malformed => fields_malformed.push(field.to_string()),
+                Source::JsonLd | Source::JsGlobals | Source::Dom => {}
             }
             sources.insert(field.to_string(), source);
         }
@@ -321,9 +360,15 @@ impl ProductDetail {
         // Not `== Absent`: a field that carries a hardcoded constant was not
         // produced either, and treating it as if it had been makes its slot in
         // EXPECTED_FIELDS a rot-detector that can never fire.
-        let degraded = Self::EXPECTED_FIELDS
+        let expected_unread = Self::EXPECTED_FIELDS
             .iter()
             .any(|f| !self.extraction.source_of(f).is_attested());
+
+        // A malformed field degrades the record wherever it is. EXPECTED_FIELDS
+        // answers "should this page have had one?", which only matters when the
+        // field is missing; a malformed field was *there* and we could not read
+        // it, and there is no page for which that is fine.
+        let degraded = expected_unread || !fields_malformed.is_empty();
 
         ExtractionHealth {
             strategy: self.extraction.strategy,
@@ -331,6 +376,7 @@ impl ProductDetail {
             sources,
             fields_absent,
             fields_defaulted,
+            fields_malformed,
             degraded,
         }
     }
@@ -350,7 +396,7 @@ pub struct Nutrient {
     pub daily_value: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReviewDistribution {
     pub five_star: Option<f64>,
     pub four_star: Option<f64>,

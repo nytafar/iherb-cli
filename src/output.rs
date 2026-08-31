@@ -130,12 +130,53 @@ fn format_overview(product: &ProductDetail, out: &mut String) {
     let health = product.health();
     if health.degraded {
         out.push_str(&format!(
-            "- **Data quality:** degraded — no strategy produced {}. Run with --debug for the full provenance table.\n",
-            unread_expected_fields(&health).join(", ")
+            "- **Data quality:** degraded — {}. Run with --debug for the full provenance table.\n",
+            degradation_reason(&health)
         ));
     }
 
     out.push('\n');
+}
+
+/// Why this record is degraded, as a clause the caller can read.
+///
+/// Degradation has two causes and they need different words. A field nobody
+/// produced is "no strategy produced X"; a field the page carried and we could
+/// not read is "X was on the page and could not be read" — the caller's next
+/// move differs, and so does whose fault it is.
+///
+/// The malformed clause is not optional garnish. `degraded` fires on any
+/// malformed field, expected or not, and `review_distribution` — the live case
+/// (#32) — is deliberately not in `EXPECTED_FIELDS`. Naming only the expected
+/// fields printed an empty list and a dangling full stop for exactly that
+/// record.
+fn degradation_reason(health: &ExtractionHealth) -> String {
+    let mut clauses = Vec::new();
+
+    let unread = unread_expected_fields(health);
+    if !unread.is_empty() {
+        clauses.push(format!("no strategy produced {}", unread.join(", ")));
+    }
+    if !health.fields_malformed.is_empty() {
+        clauses.push(format!(
+            "{} {} on the page and could not be read",
+            health.fields_malformed.join(", "),
+            if health.fields_malformed.len() == 1 {
+                "was"
+            } else {
+                "were"
+            }
+        ));
+    }
+
+    // `degraded` is true and neither list is populated: unreachable through
+    // `health()`, which derives all three from the same sources, but a caller
+    // can hand-build an `ExtractionHealth`. Say something true rather than
+    // trail off mid-sentence, which is what this function exists to stop.
+    if clauses.is_empty() {
+        return "extraction reported itself unhealthy".to_string();
+    }
+    clauses.join("; and ")
 }
 
 /// The expected fields no strategy read, absent and defaulted together.
@@ -377,15 +418,23 @@ fn format_number(n: u32) -> String {
 ///                "product_url": "defaulted", ... },
 ///   "fields_absent": ["warnings", "..."],
 ///   "fields_defaulted": ["product_url", "..."],
+///   "fields_malformed": ["review_distribution", "..."],
 ///   "degraded": false
 /// }
 /// ```
 ///
-/// `defaulted` is the one that needs a word of explanation to a consumer: the
-/// field has a value and nobody read it off the page — a hardcoded constant, or
-/// a label passed on the command line. It is not `absent`, because absent means
-/// there is nothing there; it is the more dangerous of the two, because a
-/// defaulted value looks exactly like data.
+/// Two of the source values need a word of explanation to a consumer.
+///
+/// `defaulted`: the field has a value and nobody read it off the page — a
+/// hardcoded constant, or a label passed on the command line. It is not
+/// `absent`, because absent means there is nothing there; it is the more
+/// dangerous of the two, because a defaulted value looks exactly like data.
+///
+/// `malformed`: the page carried the field and extraction could not read it.
+/// There is no value, and unlike `absent` that is our fault rather than the
+/// page's. Any field in `fields_malformed` sets `degraded`, whether or not it
+/// is one of the fields every product page publishes — `review_distribution` is
+/// the live case (#32) and is deliberately not on that list.
 ///
 /// `serde_json::to_value(product.health())` produces exactly that. #9 needs to
 /// add no fields and compute nothing; it needs to place the block and map
@@ -398,8 +447,9 @@ pub fn format_extraction_health(health: &ExtractionHealth) -> String {
     out.push_str(&format!(
         "- **Degraded:** {}\n",
         if health.degraded {
-            "yes — a field every product page publishes was not read off it, \
-             so the selectors may have rotted"
+            "yes — a field every product page publishes was not read off it, or \
+             a field the page carried could not be read, so the selectors may \
+             have rotted"
         } else {
             "no"
         }
@@ -415,6 +465,12 @@ pub fn format_extraction_health(health: &ExtractionHealth) -> String {
         out.push_str(&format!(
             "- **Defaulted (a value nobody read):** {}\n",
             health.fields_defaulted.join(", ")
+        ));
+    }
+    if !health.fields_malformed.is_empty() {
+        out.push_str(&format!(
+            "- **Malformed (on the page, unreadable):** {}\n",
+            health.fields_malformed.join(", ")
         ));
     }
 

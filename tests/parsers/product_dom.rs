@@ -3,10 +3,11 @@
 //! `parse_review_distribution_html`.
 
 use iherb_cli::error::IherbError;
+use iherb_cli::model::ReviewDistribution;
 use iherb_cli::scraper::helpers::is_not_found_page;
 use iherb_cli::scraper::product::{
     enrich_from_html, extract_spec, parse_from_html, parse_from_json_ld, parse_product_specs,
-    parse_review_distribution_html, parse_supplement_facts_html,
+    parse_review_distribution_html, parse_supplement_facts_html, HistogramFault, HistogramRead,
 };
 
 use crate::fixture::{
@@ -521,19 +522,24 @@ fn populated_bars(f: crate::fixture::Fixture) -> usize {
     doc.select(&sel).count()
 }
 
-/// #32, flipped. This was `review_distribution_is_never_found_on_a_real_page`.
+fn read_histogram(html: &str) -> HistogramRead {
+    parse_review_distribution_html(&scraper::Html::parse_document(html))
+}
+
+/// **State 3 of 4: hydrated, and read.** #32, flipped. This was
+/// `review_distribution_is_never_found_on_a_real_page`.
 ///
 /// The five captures fall into three groups, and only the first was ever
 /// evidence of the bug:
 ///
 /// - **product-104996 alone** carries a populated `<ugc-review-progress-bar>`:
 ///   five `button.item` bars, five `each-count` spans, five `width: N%` values.
-///   The parser returned `None` on it, and that was #32.
+///   The parser returned nothing on it, and that was #32.
 /// - **product-108255 and product-59561** carry the element as an empty
 ///   68-byte shell with no buttons at all — the widget had not filled in when
-///   the page was captured. `None` is the correct answer there.
+///   the page was captured. `NotHydrated` is the answer there.
 /// - **product-119174 and product-12949** have no such element anywhere.
-///   `None` is correct there too.
+///   `Absent` is the answer there.
 ///
 /// So one page, not three, ever proved the bug, and one page is what this
 /// asserts. The parser identified a bar's star level by looking for the words
@@ -544,26 +550,22 @@ fn populated_bars(f: crate::fixture::Fixture) -> usize {
 /// fills in the two empty shells, this test says so rather than letting the
 /// one-page claim quietly widen into a five-page one.
 #[test]
-fn review_distribution_is_found_on_the_one_page_that_has_one() {
-    let two_a_day =
-        parse_review_distribution_html(&TWO_A_DAY.doc()).expect("104996 has a hydrated widget");
-    assert_eq!(two_a_day.five_star, Some(79.0));
-    assert_eq!(two_a_day.four_star, Some(14.0));
-    assert_eq!(two_a_day.three_star, Some(5.0));
-    assert_eq!(two_a_day.two_star, Some(1.0));
-    assert_eq!(two_a_day.one_star, Some(1.0));
+fn review_distribution_is_read_on_the_one_page_that_has_one() {
+    assert_eq!(
+        parse_review_distribution_html(&TWO_A_DAY.doc()),
+        HistogramRead::Read(ReviewDistribution {
+            five_star: Some(79.0),
+            four_star: Some(14.0),
+            three_star: Some(5.0),
+            two_star: Some(1.0),
+            one_star: Some(1.0),
+        })
+    );
 
     // The bars are read as percentages, and the widget's own `each-count`
     // spans say what they are percentages of: 10,434 + 1,865 + 645 + 138 + 113
     // is 13,195, the page's review count. That the level came from the right
     // bar is not an assumption about DOM order — the arithmetic agrees.
-    for f in [B_COMPLEX, GOLD_C_POWDER, OLLY_GUMMIES, ULTIMATE_OMEGA] {
-        assert!(
-            parse_review_distribution_html(&f.doc()).is_none(),
-            "{} has no bars to read, so it must not yield a distribution",
-            f.slug()
-        );
-    }
 
     for (f, bars) in [
         (TWO_A_DAY, 5),
@@ -574,32 +576,212 @@ fn review_distribution_is_found_on_the_one_page_that_has_one() {
     ] {
         assert_eq!(populated_bars(f), bars, "{}", f.slug());
     }
-
-    // The distinction the groups turn on: an empty shell is present-but-blank,
-    // and the gummies page has no element at all.
-    assert!(B_COMPLEX.html().contains("<ugc-review-progress-bar"));
-    assert!(!OLLY_GUMMIES.html().contains("<ugc-review-progress-bar"));
 }
 
-/// The star level a hydrated bar stands for is drawn, not written: an
-/// `<li class="ugc-star-item">` is gold when its SVG carries a `#FAC627` path.
+/// **States 1 and 2 of 4: no widget, and an unhydrated shell.**
 ///
-/// This is the reading #32 turns on, so it is asserted directly rather than
-/// only through the distribution above. Five buttons, five, four, three, two
-/// and one gold star.
+/// Both are the page having no histogram, and both must stay clear of
+/// `Malformed`: neither is a failure of ours. They are still two different
+/// answers, and the parser keeps them apart.
 #[test]
-fn a_hydrated_bar_names_its_star_level_in_gold_stars() {
+fn an_absent_widget_and_an_empty_shell_are_two_different_absences() {
+    for f in [OLLY_GUMMIES, ULTIMATE_OMEGA] {
+        assert_eq!(
+            parse_review_distribution_html(&f.doc()),
+            HistogramRead::Absent,
+            "{} has no widget element at all",
+            f.slug()
+        );
+        assert!(
+            !f.html().contains("<ugc-review-progress-bar"),
+            "{}",
+            f.slug()
+        );
+    }
+
+    for f in [B_COMPLEX, GOLD_C_POWDER] {
+        assert_eq!(
+            parse_review_distribution_html(&f.doc()),
+            HistogramRead::NotHydrated,
+            "{} carries the widget as an empty shell",
+            f.slug()
+        );
+        assert!(
+            f.html().contains("<ugc-review-progress-bar"),
+            "{}",
+            f.slug()
+        );
+    }
+
+    assert_eq!(
+        parse_review_distribution_html(&fixture::empty_doc()),
+        HistogramRead::Absent
+    );
+    assert_eq!(
+        read_histogram("<ugc-review-progress-bar></ugc-review-progress-bar>"),
+        HistogramRead::NotHydrated
+    );
+}
+
+/// **State 4 of 4: hydrated, and unreadable.** The state that did not exist
+/// before this round, and the reason the return type is no longer an `Option`.
+///
+/// Every marker the parser reads is drawn rather than declared — iHerb gives
+/// the buttons no aria label, no data attribute and no per-level class — so
+/// every marker can rot. When one does, the bars are still *there*, and saying
+/// "this product has no histogram" would be a lie told quietly. All three
+/// shapes of that failure report themselves.
+#[test]
+fn a_hydrated_widget_it_cannot_read_is_malformed_not_absent() {
+    // The glyph reading rots: stars redrawn so none of them reads as filled.
+    // Every button lands on no level at all.
+    assert_eq!(
+        read_histogram(
+            r#"<ugc-review-progress-bar>
+                 <button class="item"><ugc-star><ul>
+                   <li class="ugc-star-item"><svg><path fill="white"></path></svg></li>
+                 </ul></ugc-star>
+                 <div class="percent-wrap"><span class="block" style="width: 84%;"></span></div>
+                 </button>
+               </ugc-review-progress-bar>"#
+        ),
+        HistogramRead::Malformed(HistogramFault::NoBarNamesItsLevel)
+    );
+
+    // The glyph reading rots the other way: every star reads as filled, so
+    // every button claims five stars. This is the guard round 1 added, and the
+    // point of this round is that it no longer reports plain absence.
+    assert_eq!(
+        read_histogram(
+            r#"<ugc-review-progress-bar>
+                 <button class="item"><span>5 stars</span>
+                   <div class="percent-wrap"><span class="block" style="width: 84%;"></span></div>
+                 </button>
+                 <button class="item"><span>5 stars</span>
+                   <div class="percent-wrap"><span class="block" style="width: 1%;"></span></div>
+                 </button>
+               </ugc-review-progress-bar>"#
+        ),
+        HistogramRead::Malformed(HistogramFault::DuplicateLevel)
+    );
+
+    // The bar markup rots instead of the glyph: levels resolve, widths do not.
+    assert_eq!(
+        read_histogram(
+            r#"<ugc-review-progress-bar>
+                 <button class="item"><span>5 stars</span>
+                   <div class="bar-wrap"><i data-width="84"></i></div></button>
+                 <button class="item"><span>4 stars</span>
+                   <div class="bar-wrap"><i data-width="10"></i></div></button>
+               </ugc-review-progress-bar>"#
+        ),
+        HistogramRead::Malformed(HistogramFault::NoBarCarriesAWidth)
+    );
+}
+
+/// A malformed histogram reaches `ExtractionHealth`, which is the half of this
+/// that a caller can act on.
+///
+/// The record carries no distribution — there is nothing to carry, and
+/// inventing a bar is the bug this codebase exists to prevent — but
+/// `review_distribution` is `Malformed`, it is listed in `fields_malformed`,
+/// and `degraded` is true even though `review_distribution` is deliberately not
+/// in `EXPECTED_FIELDS`.
+#[test]
+fn a_malformed_histogram_degrades_the_record() {
+    // The gummies page, given a histogram whose bars cannot be told apart.
+    // The page carries no widget of its own, which is what makes it the right
+    // page to graft a broken one onto: the only difference from the intact run
+    // below is the widget.
+    const BROKEN_WIDGET: &str = r#"<ugc-review-progress-bar>
+          <button class="item"><span>5 stars</span>
+            <div class="percent-wrap"><span class="block" style="width: 84%;"></span></div></button>
+          <button class="item"><span>5 stars</span>
+            <div class="percent-wrap"><span class="block" style="width: 1%;"></span></div></button>
+        </ugc-review-progress-bar><ul id="product-specs-list""#;
+    let broken = OLLY_GUMMIES
+        .html()
+        .replace(r#"<ul id="product-specs-list""#, BROKEN_WIDGET);
+    assert_ne!(broken, OLLY_GUMMIES.html(), "the graft must have taken");
+    let mut product = parse_from_json_ld(&OLLY_GUMMIES.json_ld(), "119174", BASE_URL).unwrap();
+    enrich_from_html(&broken, &mut product);
+    let health = product.health();
+
+    assert_eq!(product.review_distribution, None, "nothing may be invented");
+    assert_eq!(
+        product.source_of("review_distribution"),
+        iherb_cli::model::Source::Malformed
+    );
+    assert!(health
+        .fields_malformed
+        .contains(&"review_distribution".to_string()));
+    assert!(
+        !health
+            .fields_absent
+            .contains(&"review_distribution".to_string()),
+        "malformed is not absent — that conflation is the whole bug"
+    );
+    assert!(
+        !iherb_cli::model::ProductDetail::EXPECTED_FIELDS.contains(&"review_distribution"),
+        "the point is that a malformed field degrades without being expected"
+    );
+    assert!(health.degraded, "a widget we could not read is rot");
+
+    // And the same page untouched is not degraded: no widget, no complaint.
+    let mut intact = parse_from_json_ld(&OLLY_GUMMIES.json_ld(), "119174", BASE_URL).unwrap();
+    enrich_from_html(OLLY_GUMMIES.html(), &mut intact);
+    assert_eq!(
+        intact.source_of("review_distribution"),
+        iherb_cli::model::Source::Absent
+    );
+    assert!(!intact.health().degraded);
+}
+
+/// The star level a hydrated bar stands for is drawn, not written, and what is
+/// read off the drawing is now its *structure* rather than its colour.
+///
+/// iHerb draws an empty star as a ground layer plus an outline and a filled one
+/// by inserting a fill layer between them, so a filled star carries two painted
+/// `<path>`s and an empty one carries one. Keying on `#FAC627` instead — which
+/// is what #32 shipped — meant a re-theme would silently empty the histogram,
+/// and the fixed fixtures would not notice until someone re-captured.
+///
+/// This asserts the reading directly rather than only through the distribution,
+/// and asserts that the two readings agree on this page: colour and structure
+/// both say five, four, three, two, one.
+#[test]
+fn a_hydrated_bar_names_its_star_level_in_filled_glyphs() {
     let doc = TWO_A_DAY.doc();
     let button_sel = scraper::Selector::parse("ugc-review-progress-bar button.item").unwrap();
+    let star_sel = scraper::Selector::parse("li.ugc-star-item").unwrap();
+    let painted_sel = scraper::Selector::parse("path[fill]").unwrap();
     let gold_sel = scraper::Selector::parse(r##"li.ugc-star-item path[fill="#FAC627"]"##).unwrap();
 
-    let levels: Vec<usize> = doc
+    let by_structure: Vec<usize> = doc
+        .select(&button_sel)
+        .map(|b| {
+            b.select(&star_sel)
+                .filter(|star| {
+                    star.select(&painted_sel)
+                        .filter(|p| p.value().attr("fill") != Some("none"))
+                        .count()
+                        >= 2
+                })
+                .count()
+        })
+        .collect();
+    assert_eq!(by_structure, [5, 4, 3, 2, 1]);
+
+    // The colour the old reading used says the same thing on this page, which
+    // is why swapping to structure changed no value — only what can rot.
+    let by_colour: Vec<usize> = doc
         .select(&button_sel)
         .map(|b| b.select(&gold_sel).count())
         .collect();
-    assert_eq!(levels, [5, 4, 3, 2, 1]);
+    assert_eq!(by_colour, by_structure);
 
-    // And no bar says so in words, which is what the old parser looked for.
+    // And no bar says so in words, which is what the parser looked for before
+    // #32 and still looks for first.
     for button in doc.select(&button_sel) {
         let text: String = button.text().collect();
         assert!(
@@ -610,32 +792,30 @@ fn a_hydrated_bar_names_its_star_level_in_gold_stars() {
     }
 }
 
-/// Bars that cannot be told apart are not a distribution.
+/// A re-theme of the star colour must not empty the histogram.
 ///
-/// If the star reading fails and every button lands on the same level, the
-/// honest answer is `None`. Letting the last bar win would report a product
-/// whose reviews are 1% five-star as if that were the whole histogram — an
-/// invented number with a real number's shape.
+/// This is Finding 1 stated as a test: the same capture with every `#FAC627`
+/// repainted still reads five, four, three, two, one, because the structure the
+/// parser reads did not move. Against the colour-keyed version this page came
+/// back as five buttons claiming no level at all.
 #[test]
-fn review_distribution_refuses_bars_it_cannot_tell_apart() {
-    let html = r#"
-        <ugc-review-progress-bar>
-          <button class="item"><span>5 stars</span>
-            <div class="percent-wrap"><span class="block" style="width: 84%;"></span></div></button>
-          <button class="item"><span>5 stars</span>
-            <div class="percent-wrap"><span class="block" style="width: 1%;"></span></div></button>
-        </ugc-review-progress-bar>
-    "#;
-    assert!(parse_review_distribution_html(&scraper::Html::parse_document(html)).is_none());
+fn a_restyled_star_colour_does_not_empty_the_histogram() {
+    let retheme = TWO_A_DAY.html().replace("#FAC627", "#00B67A");
+    assert_eq!(
+        read_histogram(&retheme),
+        parse_review_distribution_html(&TWO_A_DAY.doc()),
+        "the histogram must not depend on the brand's gold"
+    );
+    assert!(matches!(read_histogram(&retheme), HistogramRead::Read(_)));
 }
 
 /// The other shape the parser reads: a `<span>` naming the star level in words,
 /// and a bar whose width carries the percentage.
 ///
 /// No capture renders this, so it is asserted against hand-written markup. It
-/// is kept rather than replaced by the gold-star reading because only one
-/// captured page is hydrated, and one sample is not enough to declare the
-/// written form gone from every live page.
+/// is kept rather than replaced by the glyph reading because only one captured
+/// page is hydrated, and one sample is not enough to declare the written form
+/// gone from every live page.
 #[test]
 fn review_distribution_parses_the_shape_the_parser_documents() {
     let html = r#"
@@ -653,20 +833,41 @@ fn review_distribution_parses_the_shape_the_parser_documents() {
             <div class="percent-wrap"><span class="block" style="width: 1%;"></span></div></button>
         </ugc-review-progress-bar>
     "#;
-    let dist = parse_review_distribution_html(&scraper::Html::parse_document(html))
-        .expect("the documented shape must parse");
-
-    assert_eq!(dist.five_star, Some(84.0));
-    assert_eq!(dist.four_star, Some(10.0));
-    assert_eq!(dist.three_star, Some(3.0));
-    assert_eq!(dist.two_star, Some(2.0));
-    assert_eq!(dist.one_star, Some(1.0));
+    assert_eq!(
+        read_histogram(html),
+        HistogramRead::Read(ReviewDistribution {
+            five_star: Some(84.0),
+            four_star: Some(10.0),
+            three_star: Some(3.0),
+            two_star: Some(2.0),
+            one_star: Some(1.0),
+        })
+    );
 }
 
+/// A widget that yields *some* bars is a read, not a failure.
+///
+/// A star level with no reviews may legitimately have no bar, and `None` in a
+/// bucket already means "unknown". Calling a three-bar widget malformed would
+/// trade the silence this round is fixing for a false alarm.
 #[test]
-fn review_distribution_is_none_without_the_widget() {
-    assert!(parse_review_distribution_html(&fixture::empty_doc()).is_none());
-    let empty_widget =
-        scraper::Html::parse_document("<ugc-review-progress-bar></ugc-review-progress-bar>");
-    assert!(parse_review_distribution_html(&empty_widget).is_none());
+fn a_partly_filled_widget_is_read_with_the_rest_unknown() {
+    let html = r#"
+        <ugc-review-progress-bar>
+          <button class="item"><span>5 stars</span>
+            <div class="percent-wrap"><span class="block" style="width: 90%;"></span></div></button>
+          <button class="item"><span>4 stars</span>
+            <div class="percent-wrap"><span class="block" style="width: 10%;"></span></div></button>
+        </ugc-review-progress-bar>
+    "#;
+    assert_eq!(
+        read_histogram(html),
+        HistogramRead::Read(ReviewDistribution {
+            five_star: Some(90.0),
+            four_star: Some(10.0),
+            three_star: None,
+            two_star: None,
+            one_star: None,
+        })
+    );
 }

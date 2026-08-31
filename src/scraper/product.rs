@@ -462,7 +462,7 @@ pub fn enrich_from_html(html: &str, product: &mut ProductDetail) {
         product.supplement_facts = parse_supplement_facts_html(&doc);
     }
     if product.review_distribution.is_none() {
-        product.review_distribution = parse_review_distribution_html(&doc);
+        record_review_distribution(parse_review_distribution_html(&doc), product);
     }
 
     product.claim_unattributed(Source::Dom);
@@ -836,7 +836,6 @@ pub fn parse_from_html(
     let shipping_weight = extract_spec(&doc, "Shipping Weight");
 
     let supplement_facts = parse_supplement_facts_html(&doc);
-    let review_distribution = parse_review_distribution_html(&doc);
 
     // Detect actual currency from the page, falling back to config currency
     let read_currency = detect_currency_from_html(&doc);
@@ -866,7 +865,11 @@ pub fn parse_from_html(
         warnings: None,
         shipping_weight,
         category_breadcrumb: None,
-        review_distribution,
+        // Left to the `enrich_from_html` call at the end of this function,
+        // which every path makes. Reading it here too would mean two places
+        // deciding whether a hydrated-but-unreadable widget is `Malformed`, and
+        // the enrichment pass is the one that also records the provenance.
+        review_distribution: None,
         extraction: Extraction::new(Strategy::Dom),
     };
 
@@ -982,8 +985,84 @@ pub fn parse_supplement_facts_html(doc: &Html) -> Option<SupplementFacts> {
     })
 }
 
-/// Read the review histogram out of iHerb's `<ugc-review-progress-bar>`, or
-/// `None` when the page carries no histogram this can read.
+/// File a histogram read onto the record: the value if there was one, and the
+/// provenance either way.
+///
+/// [`HistogramRead::Malformed`] is the whole point. It leaves
+/// `review_distribution` empty — there is genuinely nothing to put there, and
+/// inventing a bar would be the bug this codebase exists to prevent — but it
+/// claims the field as [`Source::Malformed`], so `health()` reports rot rather
+/// than the absence it is otherwise indistinguishable from (#28, #32).
+///
+/// `Absent` and `NotHydrated` claim nothing, which leaves the field
+/// [`Source::Absent`]: both are the page having no histogram, which is a real
+/// answer about a product and not a failure of ours.
+fn record_review_distribution(read: HistogramRead, product: &mut ProductDetail) {
+    match read {
+        HistogramRead::Read(dist) => product.review_distribution = Some(dist),
+        HistogramRead::Malformed(fault) => {
+            tracing::warn!(
+                "review histogram for product {} is hydrated but unreadable: {}",
+                product.product_id,
+                fault
+            );
+            product
+                .extraction
+                .claim("review_distribution", Source::Malformed);
+        }
+        HistogramRead::Absent | HistogramRead::NotHydrated => {}
+    }
+}
+
+/// What reading the review histogram found. Four outcomes, because three of
+/// them used to be `None` and a caller could not tell them apart (#28, #32).
+///
+/// The one that matters is [`HistogramRead::Malformed`]. "The widget was there
+/// and we could not read it" is rot; "the page has no widget" is a page with no
+/// reviews. Reporting both as absence is how a broken selector stays invisible
+/// until someone happens to re-fetch a page and notice the section missing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HistogramRead {
+    /// No `<ugc-review-progress-bar>` anywhere on the page. Two captures.
+    Absent,
+    /// The element is present and holds no bars — the 68-byte shell two
+    /// captures carry, where the widget had not filled in before capture.
+    /// Absence of data, not a failure to read it.
+    NotHydrated,
+    /// Bars were present and were read.
+    Read(ReviewDistribution),
+    /// Bars were present and could not be read. Rot.
+    Malformed(HistogramFault),
+}
+
+/// Why a hydrated histogram could not be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistogramFault {
+    /// Bars are there and not one of them names a star level in either of the
+    /// two ways this understands. The likeliest cause is the star glyph being
+    /// redrawn: see [`star_level_from_glyphs`].
+    NoBarNamesItsLevel,
+    /// Two bars resolved to the same star level. Whichever reading produced
+    /// that is wrong, and there is no way to tell which bar is which — so no
+    /// bar from this widget can be trusted, not just the colliding pair.
+    DuplicateLevel,
+    /// Bars name their levels and not one carries a width to read. The bar's
+    /// markup has changed even though the star glyph has not.
+    NoBarCarriesAWidth,
+}
+
+impl std::fmt::Display for HistogramFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self {
+            Self::NoBarNamesItsLevel => "no bar names its star level",
+            Self::DuplicateLevel => "two bars claim the same star level",
+            Self::NoBarCarriesAWidth => "no bar carries a width to read",
+        };
+        f.write_str(reason)
+    }
+}
+
+/// Read the review histogram out of iHerb's `<ugc-review-progress-bar>`.
 ///
 /// The widget is a `<button class="item">` per star level, high to low, each
 /// holding the star level it stands for, a bar whose CSS width is the
@@ -998,54 +1077,67 @@ pub fn parse_supplement_facts_html(doc: &Html) -> Option<SupplementFacts> {
 ///
 ///  1. `"5 stars"` in the button's own text — the shape the widget's markup
 ///     described, and the one a non-JS render would produce.
-///  2. The number of gold stars in the button's `<ugc-star>`. A filled star is
-///     an `<li class="ugc-star-item">` whose SVG carries a `#FAC627` path; an
-///     empty one has the outline paths and not that. On product-104996 the five
-///     buttons hold five, four, three, two and one gold star, which is the
-///     level each stands for.
+///  2. How many of the button's five star glyphs are drawn filled. See
+///     [`star_level_from_glyphs`] for what "filled" is read from, and why it is
+///     no longer the colour.
 ///
 /// # What it refuses to answer
 ///
-/// A page with no widget, and the empty 68-byte shell two captures carry,
-/// both return `None` rather than a distribution of zeroes: absent data and a
-/// broken read have to stay distinguishable (#28).
+/// A page with no widget is [`HistogramRead::Absent`] and an unhydrated shell
+/// is [`HistogramRead::NotHydrated`]; neither is a distribution of zeroes.
 ///
-/// So does a widget whose buttons do not resolve to *distinct* levels. Five
-/// buttons that all read as "5 stars" mean the star reading failed, not that
-/// every review was five stars, and filling `five_star` from the last one to
-/// win would be exactly the invention this codebase exists to avoid.
+/// A hydrated widget this cannot read is [`HistogramRead::Malformed`] — never
+/// absence. That covers a widget whose bars name no level, one whose bars
+/// collide on a level, and one whose bars carry no width. Every marker below is
+/// read off how the widget is *drawn*, because iHerb gives the buttons no aria
+/// label, no data attribute and no per-level class to read instead; so every
+/// marker can rot, and this is what makes the rot say so out loud.
+///
+/// A widget that yields *some* bars is [`HistogramRead::Read`], with `None` in
+/// the buckets no bar filled. That is not a partial failure being swallowed: a
+/// star level with no reviews may legitimately have no bar, and `None` already
+/// means "unknown" in every bucket of [`ReviewDistribution`].
 ///
 /// # How far the evidence goes
 ///
-/// One captured page has a hydrated widget. That the gold-star reading is how
-/// iHerb encodes the level on *every* live page is an inference from that
-/// single sample, not an established fact — which is why the text reading is
-/// kept rather than replaced.
-pub fn parse_review_distribution_html(doc: &Html) -> Option<ReviewDistribution> {
-    let container_sel =
-        Selector::parse("ugc-review-progress-bar, .ugc-review-progress-wrap").ok()?;
-    let container = doc.select(&container_sel).next()?;
+/// One captured page has a hydrated widget. That the glyph reading is how iHerb
+/// encodes the level on *every* live page is an inference from that single
+/// sample, not an established fact — which is why the text reading is kept
+/// rather than replaced.
+pub fn parse_review_distribution_html(doc: &Html) -> HistogramRead {
+    let Ok(container_sel) = Selector::parse("ugc-review-progress-bar, .ugc-review-progress-wrap")
+    else {
+        return HistogramRead::Absent;
+    };
+    let Some(container) = doc.select(&container_sel).next() else {
+        return HistogramRead::Absent;
+    };
 
-    let button_sel = Selector::parse("button.item").ok()?;
-    let gold_star_sel = Selector::parse(r##"li.ugc-star-item path[fill="#FAC627"]"##).ok()?;
-    let bar_sel = Selector::parse(".percent-wrap span, span.block").ok()?;
+    let (Ok(button_sel), Ok(bar_sel)) = (
+        Selector::parse("button.item"),
+        Selector::parse(".percent-wrap span, span.block"),
+    ) else {
+        return HistogramRead::Absent;
+    };
+
+    let buttons: Vec<_> = container.select(&button_sel).collect();
+    if buttons.is_empty() {
+        return HistogramRead::NotHydrated;
+    }
 
     let mut star_pcts: [Option<f64>; 5] = [None; 5]; // index 0 = 5-star, 4 = 1-star
+    let mut named_a_level = false;
 
-    for button in container.select(&button_sel) {
-        let star_level = match read_star_label(&button).or_else(|| {
-            let gold = button.select(&gold_star_sel).count();
-            (1..=5).contains(&gold).then_some(gold)
-        }) {
-            Some(level) => level,
-            None => continue,
+    for button in buttons {
+        let Some(star_level) = read_star_label(&button).or_else(|| star_level_from_glyphs(&button))
+        else {
+            continue;
         };
+        named_a_level = true;
 
         let slot = &mut star_pcts[5 - star_level];
         if slot.is_some() {
-            // Two bars claiming the same level means the level reading is
-            // wrong, and there is no way to tell which bar is which.
-            return None;
+            return HistogramRead::Malformed(HistogramFault::DuplicateLevel);
         }
 
         let Some(pct) = button
@@ -1058,16 +1150,67 @@ pub fn parse_review_distribution_html(doc: &Html) -> Option<ReviewDistribution> 
         *slot = Some(pct);
     }
 
-    star_pcts
-        .iter()
-        .any(|p| p.is_some())
-        .then_some(ReviewDistribution {
-            five_star: star_pcts[0],
-            four_star: star_pcts[1],
-            three_star: star_pcts[2],
-            two_star: star_pcts[3],
-            one_star: star_pcts[4],
+    if !named_a_level {
+        return HistogramRead::Malformed(HistogramFault::NoBarNamesItsLevel);
+    }
+    if star_pcts.iter().all(|p| p.is_none()) {
+        return HistogramRead::Malformed(HistogramFault::NoBarCarriesAWidth);
+    }
+
+    HistogramRead::Read(ReviewDistribution {
+        five_star: star_pcts[0],
+        four_star: star_pcts[1],
+        three_star: star_pcts[2],
+        two_star: star_pcts[3],
+        one_star: star_pcts[4],
+    })
+}
+
+/// The star level a bar stands for, counted off its star glyphs.
+///
+/// Each button holds a `<ugc-star>` of five `<li class="ugc-star-item">`, and
+/// the level is how many of them are drawn filled: the five buttons on
+/// product-104996 hold five, four, three, two and one.
+///
+/// # Why not the colour
+///
+/// This keyed on `path[fill="#FAC627"]` when #32 first landed, and review was
+/// right that a hardcoded brand colour is a rot waiting to happen: a re-theme
+/// would silently empty the histogram.
+///
+/// There is nothing semantic to use instead. Every button on the captured page
+/// is attribute-identical — no `aria-label`, no `data-*`, no per-level class,
+/// and no JSON anywhere on the page carrying the counts (the widget's own
+/// `10,434` appears exactly once in 4 MB of HTML). What does distinguish the
+/// glyphs is *structure*: iHerb draws an empty star as a ground layer plus an
+/// outline, and a filled one by inserting a fill layer between them. So a
+/// filled star carries two painted `<path>`s and an empty one carries a single
+/// one, whatever colours those paths are given.
+///
+/// That is colour-blind — a re-theme of the gold or of the ground keeps the
+/// count at two — but it is still read off how the widget is drawn, so it can
+/// rot too. What makes that safe is the caller: any rot severe enough to break
+/// this reading makes every button resolve to the same level or to none, and
+/// both are reported as [`HistogramRead::Malformed`] rather than as absence.
+fn star_level_from_glyphs(button: &scraper::ElementRef<'_>) -> Option<usize> {
+    let (Ok(star_sel), Ok(painted_sel)) = (
+        Selector::parse("li.ugc-star-item"),
+        Selector::parse("path[fill]"),
+    ) else {
+        return None;
+    };
+
+    let filled = button
+        .select(&star_sel)
+        .filter(|star| {
+            star.select(&painted_sel)
+                .filter(|path| path.value().attr("fill") != Some("none"))
+                .count()
+                >= 2
         })
+        .count();
+
+    (1..=5).contains(&filled).then_some(filled)
 }
 
 /// The star level written out in the button's text, as in `5 stars`.
