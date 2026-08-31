@@ -67,15 +67,15 @@ fn search_cards_carry_brand_rating_and_discount() {
     assert_eq!(discounted.original_price, Some(15.42));
 }
 
-/// CHARACTERIZATION, NOT DESIRED: one page of 48 cards contains only 45
+/// CHARACTERIZATION, NOT DESIRED: pins #33. One page of 48 cards contains only 45
 /// distinct products. Three of them are placed twice — sponsored slots repeated
 /// in the grid — and the parser returns each card as its own result, so a
 /// `--limit 48` search hands the caller three duplicates and three fewer
 /// products than it thinks. An agent ranking these counts the same product
 /// twice.
 ///
-/// Not one of #1-#6, and adjacent to #6's "fewer results than you asked for".
-/// Whoever files it flips this to `ids.len() == products.len()`.
+/// Adjacent to #6's "fewer results than you asked for", but a separate defect.
+/// #33 flips this to `seen.len() == result.products.len()`.
 #[test]
 fn search_cards_repeat_the_same_product() {
     let result =
@@ -193,6 +193,8 @@ fn relevance_actually_asks_for_featured() {
     let options = sort_options_on_the_page();
     assert_eq!(options.get(&0).map(String::as_str), Some("Relevance"));
     assert_eq!(options.get(&13).map(String::as_str), Some("Featured"));
+    // 13 is the option the page marks selected, so an absent `sr` is Featured.
+    assert_eq!(default_sort_on_the_page(), 13);
 
     assert_eq!(SortOrder::Relevance.as_url_param(), "");
     let url = build_search_url(BASE_URL, "vitamin c", SortOrder::Relevance, None, 1);
@@ -221,41 +223,78 @@ fn the_other_sorts_map_to_the_values_the_page_uses() {
     }
 }
 
-/// CHARACTERIZATION, NOT DESIRED: the second half of #3 — most of iHerb's
-/// sorts are unreachable from the CLI. `sr=0` (Relevance) is on this list
-/// because `--sort relevance` emits no `sr` at all, which is the first half of
-/// #3 seen from the other side.
-///
-/// #3 adds `most-rated` (12), `newest` (10) and `highest-discount` (14) and
-/// points `relevance` at 0, at which point this list is down to Heaviest,
-/// Lightest and Featured.
-#[test]
-fn most_of_the_sites_sorts_are_unreachable_from_the_cli() {
-    let options = sort_options_on_the_page();
-    let exposed = [
-        SortOrder::Relevance,
-        SortOrder::PriceAsc,
-        SortOrder::PriceDesc,
-        SortOrder::Rating,
-        SortOrder::BestSelling,
-    ]
-    .map(|s| s.as_url_param().trim_start_matches("&sr=").to_string());
+/// The `sr` value the page treats as the default, i.e. what an absent `sr`
+/// gets you: the dropdown option marked `selected`.
+fn default_sort_on_the_page() -> i32 {
+    let doc = SEARCH_VITAMIN_C.doc();
+    let sel = Selector::parse("#sort-by-listbox div[role='option'][aria-selected='true']").unwrap();
+    doc.select(&sel)
+        .find_map(|el| el.value().attr("data-val")?.parse().ok())
+        .expect("the dropdown marks one option selected")
+}
 
-    let missing: Vec<_> = options
+/// The ordering a `--sort` value actually produces, which is not the same as
+/// the `sr` it emits: emitting nothing produces the page's default.
+fn ordering_produced_by(sort: SortOrder) -> i32 {
+    match sort.as_url_param() {
+        "" => default_sort_on_the_page(),
+        param => param
+            .trim_start_matches("&sr=")
+            .parse()
+            .expect("as_url_param is either empty or &sr=<n>"),
+    }
+}
+
+/// Every `--sort` value the CLI offers.
+const CLI_SORTS: &[SortOrder] = &[
+    SortOrder::Relevance,
+    SortOrder::PriceAsc,
+    SortOrder::PriceDesc,
+    SortOrder::Rating,
+    SortOrder::BestSelling,
+];
+
+/// CHARACTERIZATION, NOT DESIRED: the second half of #3 — six of the eleven
+/// orderings iHerb offers cannot be produced by any `--sort` value.
+///
+/// Featured (13) is deliberately **not** on that list, even though no variant
+/// is named `featured`. `--sort relevance` emits no `sr`, and an absent `sr`
+/// is Featured — that is exactly what `relevance_actually_asks_for_featured`
+/// asserts. The CLI can produce that ordering; it just calls it the wrong
+/// thing. What it cannot produce at all is Relevance itself (0), Heaviest (6),
+/// Lightest (7), Newest (10), Most Rated (12) and Highest Discount (14).
+///
+/// #3 flips this. It points `relevance` at `sr=0` and adds `most-rated` (12),
+/// `newest` (10) and `highest-discount` (14) — and gives 13 an explicit
+/// `featured` variant, so it keeps being reachable under its own name rather
+/// than by accident. What is left after #3 is Heaviest (6) and Lightest (7),
+/// which #3 does not propose exposing. Do not add sort variants to satisfy
+/// this test; fix the test when #3 lands.
+#[test]
+fn six_of_the_sites_orderings_cannot_be_produced_at_all() {
+    let options = sort_options_on_the_page();
+    let reachable: std::collections::BTreeSet<i32> =
+        CLI_SORTS.iter().map(|&s| ordering_produced_by(s)).collect();
+
+    // Five variants, but only five distinct orderings because none collide.
+    assert_eq!(reachable.len(), CLI_SORTS.len());
+    // And Featured is among them, reached by emitting nothing at all.
+    assert!(reachable.contains(&default_sort_on_the_page()));
+
+    let unreachable: Vec<_> = options
         .iter()
-        .filter(|(sr, _)| !exposed.contains(&sr.to_string()))
+        .filter(|(sr, _)| !reachable.contains(sr))
         .map(|(sr, label)| (*sr, label.as_str()))
         .collect();
 
     assert_eq!(
-        missing,
+        unreachable,
         vec![
             (0, "Relevance"),
             (6, "Heaviest"),
             (7, "Lightest"),
             (10, "Newest"),
             (12, "Most Rated"),
-            (13, "Featured"),
             (14, "Highest Discount"),
         ]
     );
@@ -265,15 +304,8 @@ fn most_of_the_sites_sorts_are_unreachable_from_the_cli() {
 /// neither may collide.
 #[test]
 fn every_sort_has_a_distinct_cache_key() {
-    let sorts = [
-        SortOrder::Relevance,
-        SortOrder::PriceAsc,
-        SortOrder::PriceDesc,
-        SortOrder::Rating,
-        SortOrder::BestSelling,
-    ];
-    let keys: std::collections::BTreeSet<_> = sorts.iter().map(|s| s.as_cache_key()).collect();
-    assert_eq!(keys.len(), sorts.len());
+    let keys: std::collections::BTreeSet<_> = CLI_SORTS.iter().map(|s| s.as_cache_key()).collect();
+    assert_eq!(keys.len(), CLI_SORTS.len());
 }
 
 /// CHARACTERIZATION, NOT DESIRED: pins the #4 bug against the page that proves

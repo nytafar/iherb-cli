@@ -1,9 +1,22 @@
 //! Fixture-based parser tests (#8).
 //!
-//! Seven real iHerb pages, captured 2025, live gzipped under `tests/fixtures/`.
+//! Seven real iHerb pages live gzipped under `tests/fixtures/`; see that
+//! directory's README for each one's upstream blob, commit and storefront.
 //! Every parser that turns bytes into a [`iherb_cli::model`] type is exercised
-//! against one of them here. Nothing in this target launches a browser, touches
-//! the network, or writes outside `tests/fixtures/golden/`.
+//! here, all but two of them against a captured page.
+//!
+//! The two exceptions are honest gaps, not oversights. `parse_from_next_data`
+//! and `parse_search_from_next_data` run against **synthetic** JSON, because no
+//! captured page contains a `__NEXT_DATA__` block — iHerb does not serve one,
+//! which is what #34 proposes deleting them over, and
+//! `product_json::next_data_is_absent_from_every_captured_page` pins the
+//! absence. `parse_from_js_globals` runs against JSON transcribed by hand from
+//! a captured page's inline `<script>`, because production obtains those
+//! globals by evaluating JS in the browser rather than by reading the HTML.
+//!
+//! Nothing in this target launches a browser, touches the network, or writes
+//! outside `tests/fixtures/golden/` and a temp directory the cache tests
+//! remove after themselves.
 //!
 //! # These tests pin what the code does today, not what it should do
 //!

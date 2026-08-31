@@ -8,7 +8,9 @@ use iherb_cli::scraper::product::{
     parse_review_distribution_html, parse_supplement_facts_html,
 };
 
-use crate::fixture::{self, BASE_URL, GOLD_C_POWDER, OLLY_GUMMIES, TWO_A_DAY, ULTIMATE_OMEGA};
+use crate::fixture::{
+    self, BASE_URL, B_COMPLEX, GOLD_C_POWDER, OLLY_GUMMIES, TWO_A_DAY, ULTIMATE_OMEGA,
+};
 
 // ---------------------------------------------------------------------------
 // parse_from_html — the last-resort DOM fallback
@@ -16,7 +18,7 @@ use crate::fixture::{self, BASE_URL, GOLD_C_POWDER, OLLY_GUMMIES, TWO_A_DAY, ULT
 
 #[test]
 fn dom_fallback_reads_every_product_page() {
-    for &f in fixture::PRODUCTS {
+    for f in fixture::products() {
         let product = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD")
             .unwrap_or_else(|e| panic!("{}: {}", f.slug(), e));
 
@@ -34,7 +36,7 @@ fn dom_fallback_reads_every_product_page() {
 /// makes it a usable fallback rather than a different answer.
 #[test]
 fn dom_fallback_agrees_with_json_ld_on_price_and_rating() {
-    for &f in fixture::PRODUCTS {
+    for f in fixture::products() {
         let dom = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD").unwrap();
         let ld = parse_from_json_ld(&f.json_ld(), f.product_id(), BASE_URL).unwrap();
 
@@ -58,7 +60,7 @@ fn dom_fallback_agrees_with_json_ld_on_price_and_rating() {
 /// `Some`. Do not "fix" the code to match this test; fix the test when #2 lands.
 #[test]
 fn dom_fallback_loses_product_code_and_shipping_weight() {
-    for &f in fixture::PRODUCTS {
+    for f in fixture::products() {
         let product = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD").unwrap();
         assert_eq!(product.product_code, None, "{}", f.slug());
         assert_eq!(product.shipping_weight, None, "{}", f.slug());
@@ -66,13 +68,13 @@ fn dom_fallback_loses_product_code_and_shipping_weight() {
     }
 }
 
-/// CHARACTERIZATION, NOT DESIRED: the gummies page is out of stock — JSON-LD
-/// says `OutOfStock` and `json_ld_reads_out_of_stock` asserts it — but the DOM
+/// CHARACTERIZATION, NOT DESIRED: pins #31. The gummies page is out of stock —
+/// JSON-LD says `OutOfStock` and `json_ld_reads_out_of_stock` asserts it — but the DOM
 /// fallback reports it in stock. `#stock-status .stock-status-content strong`
 /// finds nothing, and the fallback is `!html.contains("Out of Stock")`, which
 /// the page satisfies because it never uses that exact string.
 ///
-/// Not one of #1-#6. Whoever files it flips this to `assert!(!in_stock)`.
+/// This is #31. It flips this to `assert!(!product.in_stock)`.
 #[test]
 fn dom_fallback_reports_the_gummies_as_in_stock() {
     let product = parse_from_html(OLLY_GUMMIES.html(), "119174", BASE_URL, "USD").unwrap();
@@ -87,7 +89,7 @@ fn dom_fallback_reports_the_gummies_as_in_stock() {
 /// `helpers::currency_detection_falls_through_on_a_page_with_no_markers`.
 #[test]
 fn dom_fallback_ignores_the_requested_currency() {
-    for &f in fixture::PRODUCTS {
+    for f in fixture::products() {
         let product = parse_from_html(f.html(), f.product_id(), BASE_URL, "CHF").unwrap();
         assert_eq!(product.currency, "USD", "{}", f.slug());
     }
@@ -111,7 +113,7 @@ fn dom_fallback_rejects_a_page_with_no_product() {
 
 #[test]
 fn captured_pages_are_not_mistaken_for_404s() {
-    for &f in fixture::ALL {
+    for f in fixture::all() {
         assert!(!is_not_found_page(f.html()), "{}", f.slug());
     }
     assert!(is_not_found_page("<html><title>404</title></html>"));
@@ -200,7 +202,7 @@ fn extract_spec_matches_labels_case_sensitively() {
 /// `Package quantity` and `First available`, which are already reachable.
 #[test]
 fn every_product_page_has_a_spec_list() {
-    for &f in fixture::PRODUCTS {
+    for f in fixture::products() {
         let doc = f.doc();
         assert!(extract_spec(&doc, "Product code").is_some(), "{}", f.slug());
         assert!(extract_spec(&doc, "UPC").is_some(), "{}", f.slug());
@@ -244,7 +246,7 @@ fn extract_spec_returns_none_for_a_label_that_is_not_there() {
 
 #[test]
 fn supplement_facts_parse_on_every_product_page() {
-    for &f in fixture::PRODUCTS {
+    for f in fixture::products() {
         let facts = parse_supplement_facts_html(&f.doc())
             .unwrap_or_else(|| panic!("{}: no supplement facts", f.slug()));
         assert!(!facts.nutrients.is_empty(), "{}", f.slug());
@@ -293,21 +295,41 @@ fn supplement_facts_are_none_without_a_table() {
 // parse_review_distribution_html
 // ---------------------------------------------------------------------------
 
-/// CHARACTERIZATION, NOT DESIRED: `parse_review_distribution_html` returns
-/// `None` on all five pages, so `## Reviews` never renders a histogram.
+/// How many `button.item` bars the page's review-histogram widget actually
+/// holds. Zero covers both "empty shell" and "no widget"; the two are told
+/// apart by whether the element is in the HTML at all.
+fn populated_bars(f: crate::fixture::Fixture) -> usize {
+    let doc = f.doc();
+    let sel = scraper::Selector::parse("ugc-review-progress-bar button.item").unwrap();
+    doc.select(&sel).count()
+}
+
+/// CHARACTERIZATION, NOT DESIRED: pins #32. `parse_review_distribution_html`
+/// returns `None` on all five pages, so `## Reviews` never renders a histogram.
 ///
-/// Three of the captures do carry a fully hydrated `<ugc-review-progress-bar>`
-/// with five `button.item` bars and their widths. The parser identifies a bar's
-/// star level by looking for the words `"5 stars"` in the button's text; the
-/// real markup draws the stars as an `<ugc-star>` element full of SVG, with no
-/// such text anywhere, so every bar is skipped and the whole function bails.
+/// The five captures fall into three groups, and only the first is evidence of
+/// the bug:
 ///
-/// Not one of #1-#6. Whoever files it flips this to a populated distribution;
-/// `review_distribution_parses_the_shape_the_parser_documents` below shows the
-/// arithmetic is fine once a star level can be found.
+/// - **product-104996 alone** carries a populated `<ugc-review-progress-bar>`:
+///   five `button.item` bars, five `each-count` spans, five `width: N%` values.
+///   The parser still returns `None`, and that is #32.
+/// - **product-108255 and product-59561** carry the element as an empty
+///   68-byte shell with no buttons at all — the widget had not filled in when
+///   the page was captured. `None` is the correct answer there.
+/// - **product-119174 and product-12949** have no such element anywhere.
+///   `None` is correct there too.
+///
+/// So one page, not three, proves the bug. The parser identifies a bar's star
+/// level by looking for the words `"5 stars"` in the button's text; the real
+/// markup draws the stars as an `<ugc-star>` element full of SVG with no such
+/// text, so every bar is skipped and the function bails.
+///
+/// #32 flips the 104996 case to a populated distribution and leaves the other
+/// four `None`. `review_distribution_parses_the_shape_the_parser_documents`
+/// below shows the arithmetic is fine once a star level can be found.
 #[test]
 fn review_distribution_is_never_found_on_a_real_page() {
-    for &f in fixture::PRODUCTS {
+    for f in fixture::products() {
         assert!(
             parse_review_distribution_html(&f.doc()).is_none(),
             "{} now yields a distribution — has the star-level lookup been fixed?",
@@ -315,11 +337,23 @@ fn review_distribution_is_never_found_on_a_real_page() {
         );
     }
 
-    // The widget really is there on three of them; it is the lookup that fails.
-    assert!(TWO_A_DAY.html().contains("ugc-review-progress-bar"));
-    assert!(TWO_A_DAY.html().contains("each-count"));
-    // ...and genuinely absent from the gummies page, which has too few reviews.
-    assert!(!OLLY_GUMMIES.html().contains("ugc-review-progress-bar"));
+    // Exactly one page has data for the parser to lose. Counting the bars
+    // keeps the three groups above honest: if a later re-capture fills in the
+    // empty shells, this test says so rather than quietly widening its claim.
+    for (f, bars) in [
+        (TWO_A_DAY, 5),
+        (B_COMPLEX, 0),
+        (GOLD_C_POWDER, 0),
+        (OLLY_GUMMIES, 0),
+        (ULTIMATE_OMEGA, 0),
+    ] {
+        assert_eq!(populated_bars(f), bars, "{}", f.slug());
+    }
+
+    // The distinction the groups turn on: an empty shell is present-but-blank,
+    // and the gummies page has no element at all.
+    assert!(B_COMPLEX.html().contains("<ugc-review-progress-bar"));
+    assert!(!OLLY_GUMMIES.html().contains("<ugc-review-progress-bar"));
 }
 
 /// The shape `parse_review_distribution_html`'s own doc comment describes: a

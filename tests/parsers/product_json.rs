@@ -14,7 +14,7 @@ use crate::fixture::{self, BASE_URL, B_COMPLEX, GOLD_C_POWDER, OLLY_GUMMIES, TWO
 
 #[test]
 fn json_ld_is_present_and_complete_on_every_product_page() {
-    for &f in fixture::PRODUCTS {
+    for f in fixture::products() {
         let product = parse_from_json_ld(&f.json_ld(), f.product_id(), BASE_URL)
             .unwrap_or_else(|| panic!("{}: JSON-LD did not parse", f.slug()));
 
@@ -84,13 +84,14 @@ fn json_ld_rejects_a_block_with_no_name() {
     assert!(parse_from_json_ld(&nameless, "1", BASE_URL).is_none());
 }
 
-/// CHARACTERIZATION, NOT DESIRED: `parse_from_js_globals` cannot parse the real
-/// page. It reads `ihrProduct.prdNm`; every captured page writes `prdctNm`, so
-/// the name comes back empty and the whole strategy returns `None` — meaning
-/// the JS-globals rung of the fallback ladder is dead in production.
+/// CHARACTERIZATION, NOT DESIRED: pins #30. `parse_from_js_globals` cannot
+/// parse the real page. It reads `ihrProduct.prdNm`; every captured page writes
+/// `prdctNm`, so the name comes back empty and the whole strategy returns
+/// `None` — the JS-globals rung of the fallback ladder is dead in production,
+/// and the stock and UPC data it carries is discarded with it.
 ///
-/// This bug is NOT yet filed (it is not one of #1-#6). Whoever files it flips
-/// this assertion to `is_some()` plus the field checks below it.
+/// #30 flips this to `is_some()`, plus the field checks in
+/// `js_globals_parse_when_the_expected_key_is_present` below.
 #[test]
 fn js_globals_never_match_the_real_page_shape() {
     let globals = fixture::json("js-globals-12949");
@@ -125,11 +126,12 @@ fn js_globals_parse_when_the_expected_key_is_present() {
 
 /// No captured page contains a `__NEXT_DATA__` block: iHerb does not serve one.
 /// Both `__NEXT_DATA__` parsers are therefore unreachable in production today
-/// and can only be tested against the synthetic fixtures below. If this test
-/// ever fails, iHerb has changed platform and the parsers become live code.
+/// and can only be tested against the synthetic fixtures below — which is the
+/// evidence #34 proposes deleting them on. If this test ever fails, iHerb has
+/// changed platform, the parsers become live code, and #34 is moot.
 #[test]
 fn next_data_is_absent_from_every_captured_page() {
-    for &f in fixture::ALL {
+    for f in fixture::all() {
         assert!(
             !f.html().contains("__NEXT_DATA__"),
             "{} now contains __NEXT_DATA__",
