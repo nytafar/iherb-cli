@@ -22,7 +22,11 @@ pub fn format_search_results(result: &SearchResult) -> String {
         // A card with no price prints one, honestly. It used to print `$0.00`,
         // which reads as free (#49).
         let price_str = match product.price {
-            Some(price) => format_price(price, product.original_price.as_ref(), &product.currency),
+            Some(price) => format_price(
+                price,
+                product.original_price.as_ref(),
+                product.currency.as_deref(),
+            ),
             None => "Unknown (no price could be read from the card)".to_string(),
         };
         out.push_str(&format!("- **Price:** {}\n", price_str));
@@ -133,7 +137,7 @@ fn format_overview(product: &ProductDetail, out: &mut String) {
     let price_str = format_price(
         product.price,
         product.original_price.as_ref(),
-        &product.currency,
+        product.currency.as_deref(),
     );
     out.push_str(&format!("- **Price:** {}\n", price_str));
 
@@ -344,24 +348,36 @@ fn format_reviews(product: &ProductDetail, out: &mut String) {
     out.push('\n');
 }
 
-fn format_price(price: f64, original: Option<&f64>, currency: &str) -> String {
+/// A price, with the currency the page published — or with a number and an
+/// explicit statement that nothing named its currency (#5).
+///
+/// `None` prints the bare number and says so. It must never print as though the
+/// currency were one we know: an unlabelled `12.38` a reader can see is
+/// unlabelled costs them a second query, and `CHF 12.38` over a US price costs
+/// them the wrong decision.
+fn format_price(price: f64, original: Option<&f64>, currency: Option<&str>) -> String {
     let symbol = match currency {
-        "USD" => "$",
-        "CHF" => "CHF ",
-        "EUR" => "€",
-        "GBP" => "£",
-        _ => currency,
+        Some("USD") => "$",
+        Some("CHF") => "CHF ",
+        Some("EUR") => "€",
+        Some("GBP") => "£",
+        Some(other) => other,
+        None => "",
+    };
+    let unnamed = match currency {
+        Some(_) => "",
+        None => " (currency unknown: the page published none)",
     };
 
     match original {
         Some(orig) if *orig > price => {
             let discount = ((*orig - price) / *orig * 100.0).round() as u32;
             format!(
-                "{}{:.2} ~~{}{:.2}~~ ({}% off)",
-                symbol, price, symbol, orig, discount
+                "{}{:.2} ~~{}{:.2}~~ ({}% off){}",
+                symbol, price, symbol, orig, discount, unnamed
             )
         }
-        _ => format!("{}{:.2}", symbol, price),
+        _ => format!("{}{:.2}{}", symbol, price, unnamed),
     }
 }
 

@@ -121,13 +121,13 @@ Take 1 capsule daily with or without food.
 | Flag | Description | Default |
 |---|---|---|
 | `--country <code>` | Country code for localized pricing (e.g., `us`, `ch`, `de`) | `us` |
-| `--currency <code>` | Currency code (e.g., `USD`, `CHF`, `EUR`) | `USD` |
+| `--currency <code>` | Require the storefront to price in this currency (e.g., `USD`, `CHF`, `EUR`). Does **not** convert — see below | none |
 | `--no-cache` | Bypass local cache and fetch fresh data | — |
 | `--delay <ms>` | Delay between requests in milliseconds | `2000` |
 | `--debug` | Run browser in headed (visible) mode | — |
 
 ```bash
-# Swiss storefront with CHF pricing
+# Swiss storefront, and refuse the results if it does not price in CHF
 iherb-cli search "magnesium" --country ch --currency CHF
 
 # Fast mode (shorter delay between requests)
@@ -136,6 +136,24 @@ iherb-cli search "zinc" --delay 500
 # Debug with visible browser
 iherb-cli product 61864 --debug
 ```
+
+### What `--currency` does
+
+It asserts; it does not convert.
+
+iHerb prices in the currency of the storefront that `--country` selects, and
+this tool reports whatever currency that storefront published. `--currency` says
+which one you were expecting: if the storefront prices in something else, or
+published no currency at all, the command fails with an error naming both. It
+never changes a price and never changes a label.
+
+Omit it — the default — to accept whatever the storefront prices in.
+
+A price whose currency the page did not publish is reported as
+`9.60 (currency unknown: the page published none)`, never as `$9.60` or as the
+currency you asked for. A number captioned with the wrong currency is worse than
+a number with none: an agent comparing `CHF 9.60` against `CHF 12.00` from a
+real Swiss storefront produces a confidently wrong recommendation.
 
 ## Configuration
 
@@ -153,6 +171,7 @@ Location: `~/.config/iherb-cli/config.toml`
 ```toml
 [defaults]
 country = "ch"
+# Optional. Same meaning as `--currency`: a requirement, not a conversion.
 currency = "CHF"
 ```
 

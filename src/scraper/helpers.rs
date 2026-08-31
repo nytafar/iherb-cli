@@ -165,8 +165,28 @@ pub fn is_not_found_page(html: &str) -> bool {
         || html.contains("404 Not Found")
 }
 
-/// Detect the actual currency from HTML via meta tags or price text.
+/// The currency the page itself declares, or `None` when it declares none.
+///
+/// Three readings, strongest first.
+///
+///  1. `window.CURRENCY_CODE`, which iHerb's own header script writes into every
+///     page and every page of the seven captures carries. It is the storefront's
+///     answer for the whole document rather than for one price, and it is the
+///     value the site's own GraphQL calls are built from
+///     (`?country=…&currency=`+`CURRENCY_CODE`). It goes first because it is the
+///     only one of the three that is unambiguous.
+///  2. `<meta itemprop="priceCurrency">`, the microdata on a product page.
+///  3. The symbol the price text starts with — a guess, and known to be a weak
+///     one: a bare `$` is USD on the US storefront and CAD, AUD, SGD, HKD, NZD
+///     or MXN on six others iHerb serves. It is kept as a last resort because
+///     it is still a reading of the page, but the rung above it exists so that
+///     it is almost never reached.
 pub fn detect_currency_from_html(doc: &Html) -> Option<String> {
+    if let Some(code) = detect_currency_from_globals(doc) {
+        tracing::debug!("Detected currency from window.CURRENCY_CODE: {}", code);
+        return Some(code);
+    }
+
     if let Ok(sel) = Selector::parse("meta[itemprop='priceCurrency']") {
         if let Some(el) = doc.select(&sel).next() {
             if let Some(code) = el.value().attr("content") {
@@ -189,6 +209,48 @@ pub fn detect_currency_from_html(doc: &Html) -> Option<String> {
         }
     }
 
+    None
+}
+
+/// Read `window.CURRENCY_CODE = "XXX"` out of the page's inline scripts.
+///
+/// Anchored on the assignment rather than on the name alone. The name occurs
+/// three other ways in the same bundle — `window.CURRENCY_CODE` read back in a
+/// URL concatenation, and `CURRENCY_CODE:"currencyCode"` in a map of
+/// feature-flag property names — and only the assignment carries the
+/// storefront's code. Requiring `=` and then exactly three A-Z letters in
+/// quotes is what tells them apart; the property-name entry uses `:` and holds
+/// a lowerCamelCase word, so it can match neither test.
+pub fn detect_currency_from_globals(doc: &Html) -> Option<String> {
+    let sel = Selector::parse("script").ok()?;
+    doc.select(&sel)
+        .find_map(|el| currency_assignment(&el.text().collect::<String>()))
+}
+
+/// The first `CURRENCY_CODE = "XXX"` in one script's source.
+fn currency_assignment(script: &str) -> Option<String> {
+    let mut rest = script;
+    while let Some(idx) = rest.find("CURRENCY_CODE") {
+        let after = rest[idx + "CURRENCY_CODE".len()..].trim_start();
+        rest = &rest[idx + "CURRENCY_CODE".len()..];
+
+        let Some(after) = after.strip_prefix('=') else {
+            continue;
+        };
+        let after = after.trim_start();
+        let Some(after) = after.strip_prefix(['"', '\'']) else {
+            continue;
+        };
+        let code: String = after.chars().take(3).collect();
+        // Exactly three A-Z letters, and the quote has to close right after
+        // them: `"USDX"` is not a currency code and must not be read as `USD`.
+        if code.len() == 3
+            && code.chars().all(|c| c.is_ascii_uppercase())
+            && after[code.len()..].starts_with(['"', '\''])
+        {
+            return Some(code);
+        }
+    }
     None
 }
 

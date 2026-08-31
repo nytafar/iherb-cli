@@ -1,6 +1,8 @@
 //! `parse_price_str`, `parse_review_count`, `detect_currency_from_html`.
 
-use iherb_cli::scraper::helpers::{detect_currency_from_html, parse_price_str, parse_review_count};
+use iherb_cli::scraper::helpers::{
+    detect_currency_from_globals, detect_currency_from_html, parse_price_str, parse_review_count,
+};
 use scraper::Html;
 
 use crate::fixture::{self, B_COMPLEX, SEARCH_VITAMIN_C};
@@ -98,8 +100,64 @@ fn currency_is_detected_from_the_captured_pages() {
     );
 }
 
+/// The strongest rung, and the one every captured page takes: the storefront's
+/// own `window.CURRENCY_CODE`.
+///
+/// It beats the microdata and the price symbol because it is the only one of
+/// the three the page states about *itself* rather than about one price. The
+/// synthetic page below disagrees with itself on purpose — a `CHF` global, a
+/// `USD` meta tag and a `$` price — so which rung answered is visible in the
+/// result rather than inferred.
 #[test]
-fn currency_comes_from_the_meta_tag_first_and_the_price_text_second() {
+fn currency_comes_from_the_storefront_global_first() {
+    let page = Html::parse_document(
+        r#"<html><head><script>
+             var n = {FeatureFlagPropertyKeys: {CURRENCY_CODE:"currencyCode"}};
+             window.CURRENCY_CODE = "CHF";
+             var u = host + "?country=" + window.COUNTRY_CODE + "&currency=" + window.CURRENCY_CODE;
+           </script></head>
+           <body><meta itemprop="priceCurrency" content="USD">
+           <span class="price"><bdi>$9.60</bdi></span></body></html>"#,
+    );
+    assert_eq!(detect_currency_from_html(&page).as_deref(), Some("CHF"));
+
+    // And it is the rung the captures take, search page included — that one
+    // carries no `priceCurrency` microdata at all, so before this its currency
+    // came from a bare `$`, which is USD on the US storefront and CAD, AUD,
+    // SGD, HKD, NZD or MXN on six others iHerb serves.
+    for f in fixture::all() {
+        assert_eq!(
+            detect_currency_from_globals(&f.doc()).as_deref(),
+            Some("USD"),
+            "{}",
+            f.slug()
+        );
+    }
+    assert!(!SEARCH_VITAMIN_C.html().contains("priceCurrency"));
+}
+
+/// A `CURRENCY_CODE` that is not the assignment of a three-letter code is not a
+/// currency and must not be read as one.
+///
+/// The name occurs three other ways in iHerb's header bundle, and a scan that
+/// merely found the word would read a property-name map as a currency.
+#[test]
+fn a_currency_global_that_is_not_a_code_is_not_read() {
+    for script in [
+        r#"n.FeatureFlagPropertyKeys = {CURRENCY_CODE:"currencyCode"};"#,
+        r#"var u = h + "&currency=" + window.CURRENCY_CODE + "&language=" + l;"#,
+        r#"window.CURRENCY_CODE = "USDX";"#,
+        r#"window.CURRENCY_CODE = "usd";"#,
+        r#"window.CURRENCY_CODE = code;"#,
+        r#"if (window.CURRENCY_CODE === "USD") {}"#,
+    ] {
+        let doc = Html::parse_document(&format!("<html><head><script>{}</script></head>", script));
+        assert_eq!(detect_currency_from_globals(&doc), None, "{}", script);
+    }
+}
+
+#[test]
+fn currency_falls_back_to_the_meta_tag_then_to_the_price_text() {
     let meta = Html::parse_document(r#"<meta itemprop="priceCurrency" content="chf">"#);
     assert_eq!(detect_currency_from_html(&meta).as_deref(), Some("CHF"));
 

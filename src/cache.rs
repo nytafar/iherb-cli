@@ -10,13 +10,27 @@ use std::time::{Duration, SystemTime};
 /// Bumping it abandons every entry on disk rather than reusing it, which is
 /// what a key derivation change has to do: an entry written under an older,
 /// coarser key cannot be shown to belong to the request now asking for it.
-/// `v2` is #1 — the generation in which an entry names the storefront it came
-/// from. `v1` files (`product_61864.json`, `search_<hash>.json`) are never
-/// read again and are left where they are; nothing deletes them, so a stale
-/// `v1` entry costs disk until the user clears the cache directory (#22 adds
-/// the command for that). Abandoning them is the point: a `v1` file cannot say
-/// which storefront it was fetched from, so serving one is guessing.
-const CACHE_GENERATION: &str = "v2";
+/// `v2` was #1 — the generation in which an entry names the storefront it came
+/// from. `v3` is #5, and it abandons the `v2` entries for a different reason:
+/// not because the key was too coarse, but because **the records themselves
+/// hold a currency nobody read**. Every path used to substitute one when the
+/// page published none — a hardcoded `"USD"`, or whatever label was passed to
+/// `--currency` — so a `v2` file can say `"currency": "CHF"` about a US price,
+/// and nothing in the file distinguishes that from a currency iHerb actually
+/// published. #5 removed the substitution going forward; a `v2` entry written
+/// before it is a fabricated value with a plausible timestamp and up to 30 days
+/// of TTL left, and the only way not to serve one is to stop naming it.
+///
+/// The key derivation is unchanged. `--currency` does not select a document, so
+/// putting it in the key would file identical fetches under different names;
+/// what changed is the shape of the records, which is what the generation is
+/// for.
+///
+/// Older files (`product_61864.json` and `v2_product_us_61864.json` alike) are
+/// never read again and are left where they are; nothing deletes them, so a
+/// stale entry costs disk until the user clears the cache directory (#22 adds
+/// the command for that).
+const CACHE_GENERATION: &str = "v3";
 
 /// Where a fetched artefact lives in the cache.
 ///
@@ -53,7 +67,10 @@ impl CacheKey {
     ///
     /// Changing the derivation orphans every entry users already have, which is
     /// why the name carries [`CACHE_GENERATION`] rather than being edited in
-    /// place, and why #8 pins the derivation from `tests/`.
+    /// place, and why #8 pins the derivation from `tests/`. Changing what a
+    /// stored *record* means orphans them too, for the same reason and through
+    /// the same mechanism: see [`CACHE_GENERATION`] for why #5 bumped it
+    /// without touching a single field below.
     pub fn file_name(&self) -> String {
         match self {
             CacheKey::Product {

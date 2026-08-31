@@ -82,7 +82,7 @@ fn an_absent_section_says_so() {
 #[test]
 fn search_results_render() {
     let mut result =
-        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD").unwrap();
+        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL).unwrap();
     // `cmd_search` truncates to --limit before formatting; five is enough to
     // cover the separator, the discount line and the rating line.
     result.products.truncate(5);
@@ -96,7 +96,7 @@ fn search_results_render() {
 #[test]
 fn a_search_short_of_the_limit_says_which_kind_of_short() {
     let mut result =
-        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD").unwrap();
+        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL).unwrap();
     assert_eq!(result.products.len(), 45);
 
     // Asked for what we have: nothing to report.
@@ -127,13 +127,8 @@ fn a_search_short_of_the_limit_says_which_kind_of_short() {
     assert!(note.contains("does not say"), "{}", note);
 }
 
-/// The `Data quality` line names the fields that were not read, whether they
-/// are absent or merely defaulted. A record degraded purely by a defaulted
-/// currency used to print an empty list, because the line only ever reported
-/// absent fields.
-#[test]
-fn the_degraded_line_names_a_defaulted_field() {
-    // A block complete except that the offers name no currency.
+/// A block complete except that the offers name no currency.
+fn a_product_with_no_currency() -> iherb_cli::model::ProductDetail {
     let no_currency = serde_json::json!({
         "@type": "Product",
         "name": "Acme, Thing, 60 Capsules",
@@ -142,20 +137,32 @@ fn the_degraded_line_names_a_defaulted_field() {
         "gtin12": "000000000001",
         "offers": { "price": "9.60", "availability": "https://schema.org/InStock" },
     });
-    let product = parse_from_json_ld(&no_currency, "1", BASE_URL).unwrap();
+    parse_from_json_ld(&no_currency, "1", BASE_URL).unwrap()
+}
+
+/// The `Data quality` line names the expected fields that were not read.
+///
+/// The record here is degraded by an *absent* currency, which is what offers
+/// with no `priceCurrency` now produce: before #5 they produced a hardcoded
+/// `"USD"`, so the same record was degraded by a *defaulted* currency instead.
+/// `the_degraded_line_names_a_defaulted_field` is the other half — the line has
+/// to name both kinds, and only one of them is reachable from a parser.
+#[test]
+fn the_degraded_line_names_an_absent_expected_field() {
+    let product = a_product_with_no_currency();
     let health = product.health();
     assert!(health.degraded);
-    // Plenty of *unexpected* fields are absent — no ingredients, no warnings.
-    // None of the EXPECTED ones is, so currency being defaulted is the only
-    // thing making this record degraded, and it is the only thing the line has
-    // to name. Reporting `fields_absent` here would print the wrong list.
-    assert!(health.fields_defaulted.contains(&"currency".to_string()));
+    assert!(health.fields_absent.contains(&"currency".to_string()));
+    // Plenty of *unexpected* fields are absent too — no ingredients, no
+    // warnings — and the line must not name those.
     for expected in iherb_cli::model::ProductDetail::EXPECTED_FIELDS {
-        assert!(
-            !health.fields_absent.contains(&expected.to_string()),
-            "{} should have been read",
-            expected
-        );
+        if *expected != "currency" {
+            assert!(
+                !health.fields_absent.contains(&expected.to_string()),
+                "{} should have been read",
+                expected
+            );
+        }
     }
 
     let rendered = format_product_detail(&product, Some(Section::Overview));
@@ -164,6 +171,89 @@ fn the_degraded_line_names_a_defaulted_field() {
         "the line must name the field, not print an empty list: {:?}",
         rendered
     );
+}
+
+/// The same line, for a field that has a value nobody read.
+///
+/// A record degraded purely by a *defaulted* expected field used to print an
+/// empty list, because the line only ever reported `fields_absent`. Currency
+/// was that field until #5 removed the substitution, so the state is now built
+/// by hand: no parser produces a defaulted expected field any more, and the
+/// branch in `unread_expected_fields` that handles one is still there and still
+/// has to work. Building it explicitly is the only way left to say so.
+#[test]
+fn the_degraded_line_names_a_defaulted_field() {
+    let mut product = a_product_with_no_currency();
+    product.currency = Some("USD".to_string());
+    product
+        .extraction
+        .reclaim("currency", iherb_cli::model::Source::Defaulted);
+
+    let health = product.health();
+    assert!(health.degraded);
+    assert!(health.fields_defaulted.contains(&"currency".to_string()));
+    assert!(!health.fields_absent.contains(&"currency".to_string()));
+
+    let rendered = format_product_detail(&product, Some(Section::Overview));
+    assert!(
+        rendered.contains("- **Data quality:** degraded — no strategy produced currency."),
+        "a defaulted field is named exactly as an absent one is: {:?}",
+        rendered
+    );
+}
+
+/// A price whose currency nobody read prints as a number that says so (#5).
+///
+/// This is the acceptance criterion of #5 at the only place a user meets it.
+/// The old formatter took a `&str` and always had one, so `9.60` from the US
+/// storefront printed as `CHF 9.60` whenever `--currency CHF` had been passed
+/// and detection had failed — a number that is wrong by a factor of the
+/// exchange rate, rendered exactly like a number that is right. An unlabelled
+/// number costs a reader a second query; a mislabelled one costs them the
+/// decision.
+#[test]
+fn a_price_with_no_currency_says_so_instead_of_borrowing_one() {
+    let product = a_product_with_no_currency();
+    assert_eq!(product.currency, None);
+
+    let rendered = format_product_detail(&product, Some(Section::Overview));
+    assert!(
+        rendered.contains("- **Price:** 9.60 (currency unknown: the page published none)"),
+        "{:?}",
+        rendered
+    );
+    // Nothing invents a symbol for it either.
+    assert!(!rendered.contains("$9.60"));
+
+    // The same on the search path, where every card on the page is affected at
+    // once because iHerb publishes one currency marker for the whole page.
+    let unmarked = parse_search_from_html(
+        r#"<html><body><div class="product-cell-container">
+             <a class="product-link" data-product-id="1" title="Thing" href="/pr/p/1"></a>
+             <div class="product-title" content="Thing"></div>
+             <meta itemprop="price" content="9.60">
+           </div></body></html>"#,
+        "q",
+        BASE_URL,
+    )
+    .unwrap();
+    let rendered = format_search_results(&unmarked);
+    assert!(
+        rendered.contains("- **Price:** 9.60 (currency unknown: the page published none)"),
+        "{:?}",
+        rendered
+    );
+}
+
+/// A price whose currency *was* read prints with it, unchanged. Without this
+/// the test above is satisfied by a formatter that never prints a currency.
+#[test]
+fn a_price_with_a_currency_still_prints_it() {
+    let product = as_production_would(TWO_A_DAY);
+    assert_eq!(product.currency.as_deref(), Some("USD"));
+    let rendered = format_product_detail(&product, Some(Section::Overview));
+    assert!(rendered.contains("- **Price:** $12.38"), "{:?}", rendered);
+    assert!(!rendered.contains("currency unknown"));
 }
 
 /// None of the captured pages is degraded on the production path, which is why
@@ -196,8 +286,7 @@ fn the_degraded_line_names_only_what_caused_the_degradation() {
         .html()
         .replace("Product code:", "Product identifier:");
     let product =
-        iherb_cli::scraper::product::parse_from_html(&relabelled, "119174", BASE_URL, "USD")
-            .unwrap();
+        iherb_cli::scraper::product::parse_from_html(&relabelled, "119174", BASE_URL).unwrap();
 
     let health = product.health();
     assert!(health.degraded);
@@ -233,8 +322,7 @@ fn the_degraded_line_names_only_what_caused_the_degradation() {
 #[test]
 fn a_truncated_description_says_it_is_truncated() {
     let via_dom =
-        iherb_cli::scraper::product::parse_from_html(TWO_A_DAY.html(), "104996", BASE_URL, "USD")
-            .unwrap();
+        iherb_cli::scraper::product::parse_from_html(TWO_A_DAY.html(), "104996", BASE_URL).unwrap();
 
     // The fallback really is what filled it, and it really does stop mid-phrase.
     assert_eq!(

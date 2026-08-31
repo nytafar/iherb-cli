@@ -58,7 +58,7 @@ fn search_results_render_as_markdown() {
             brand: "Acme".to_string(),
             price: Some(12.34),
             original_price: None,
-            currency: "USD".to_string(),
+            currency: Some("USD".to_string()),
             rating: Some(4.5),
             review_count: Some(7),
             product_url: "https://www.iherb.com/pr/acme/1".to_string(),
@@ -78,7 +78,8 @@ fn search_results_render_as_markdown() {
 fn test_config() -> AppConfig {
     AppConfig {
         country: "us".to_string(),
-        currency: "USD".to_string(),
+        // No `--currency`, so nothing is required of the storefront (#5).
+        currency: None,
         no_cache: false,
         delay_ms: 0,
         debug: false,
@@ -207,13 +208,110 @@ fn a_degraded_record_is_still_returned() {
     assert!(target.validate(&degraded).is_ok());
 }
 
+/// A config that requires the storefront to price in `currency` (#5).
+fn config_requiring(currency: &str) -> AppConfig {
+    AppConfig {
+        currency: Some(currency.to_string()),
+        ..test_config()
+    }
+}
+
+/// What `--currency` means after #5: a requirement on the storefront, checked
+/// against what the page published, and an error when it does not hold.
+///
+/// It used to be a fallback label. `--currency CHF` against the US storefront
+/// produced US prices captioned CHF whenever detection failed, and was silently
+/// discarded whenever it worked — so the flag's only observable effect was to
+/// mislabel. It now has one observable effect and it is the opposite one:
+/// nothing is relabelled, and a storefront that does not price in CHF is
+/// refused rather than described as if it did.
+#[test]
+fn currency_is_a_requirement_on_the_storefront_not_a_label() {
+    let mut usd = bare_product();
+    usd.extraction.strategy = Strategy::JsonLd;
+    usd.extraction.claim("name", Source::JsonLd);
+    usd.extraction.claim("price", Source::JsonLd);
+    usd.currency = Some("USD".to_string());
+    usd.extraction.claim("currency", Source::JsonLd);
+
+    // No `--currency`: whatever the storefront prices in is accepted. This is
+    // the default, and it has to stay the default — a `"USD"` default would
+    // fail every non-US storefront out of the box.
+    let unasked = ProductTarget::new(&test_config(), "61864").unwrap();
+    assert!(unasked.validate(&usd).is_ok());
+
+    // `--currency USD` against a storefront that prices in USD: satisfied.
+    let asked_usd = ProductTarget::new(&config_requiring("USD"), "61864").unwrap();
+    assert!(asked_usd.validate(&usd).is_ok());
+    // Case is not the disagreement.
+    let asked_lower = ProductTarget::new(&config_requiring("usd"), "61864").unwrap();
+    assert!(asked_lower.validate(&usd).is_ok());
+
+    // `--currency CHF` against the same storefront: the whole point. Before #5
+    // this record came back and its price was printed as CHF.
+    let asked_chf = ProductTarget::new(&config_requiring("CHF"), "61864").unwrap();
+    let err = asked_chf
+        .validate(&usd)
+        .expect_err("a USD storefront must not satisfy --currency CHF");
+    let err = err
+        .downcast::<IherbError>()
+        .expect("rejection must be a typed IherbError");
+    assert!(
+        matches!(
+            err,
+            IherbError::CurrencyMismatch { ref expected, ref actual, .. }
+                if expected == "CHF" && actual == "USD"
+        ),
+        "expected CurrencyMismatch, got {:?}",
+        err
+    );
+    // The message has to name both, or a caller cannot tell what to do next.
+    assert!(err.to_string().contains("CHF"));
+    assert!(err.to_string().contains("USD"));
+
+    // A page that published no currency cannot confirm one either. "We could
+    // not tell" is not a yes.
+    let mut unknown = usd.clone();
+    unknown.currency = None;
+    unknown.extraction.reclaim("currency", Source::Absent);
+    assert!(
+        asked_chf.validate(&unknown).is_err(),
+        "an unconfirmed currency must not satisfy --currency"
+    );
+    assert!(
+        unasked.validate(&unknown).is_ok(),
+        "...but it is only a problem for a caller who asked"
+    );
+}
+
+/// A cached record in the wrong currency does not answer a `--currency`
+/// request, so it is refetched rather than served past the check.
+///
+/// `validate` never runs on a cache hit — `fetch::cached` returns the entry
+/// directly — so without this the assertion above would hold on the first run
+/// of a command and silently not on the second, which is the shape of #1.
+#[test]
+fn a_cached_record_in_the_wrong_currency_does_not_answer_the_request() {
+    let mut usd = bare_product();
+    usd.currency = Some("USD".to_string());
+
+    let asked_chf = ProductTarget::new(&config_requiring("CHF"), "61864").unwrap();
+    assert!(!asked_chf.cache_is_sufficient(&usd));
+
+    let asked_usd = ProductTarget::new(&config_requiring("USD"), "61864").unwrap();
+    assert!(asked_usd.cache_is_sufficient(&usd));
+
+    let unasked = ProductTarget::new(&test_config(), "61864").unwrap();
+    assert!(unasked.cache_is_sufficient(&usd));
+}
+
 fn bare_product() -> ProductDetail {
     ProductDetail {
         name: "California Gold Nutrition, Gold C".to_string(),
         brand: String::new(),
         price: 0.0,
         original_price: None,
-        currency: "USD".to_string(),
+        currency: Some("USD".to_string()),
         rating: None,
         review_count: None,
         product_url: "https://www.iherb.com/pr/p/61864".to_string(),

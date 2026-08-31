@@ -24,7 +24,19 @@ pub struct ProductSummary {
     /// way; that is #50, and not this.)
     pub price: Option<f64>,
     pub original_price: Option<f64>,
-    pub currency: String,
+    /// The currency the results page published, or `None` when it published
+    /// none.
+    ///
+    /// An `Option` for the same reason `price` is one (#5). The card used to
+    /// carry `detect_currency_from_html(..).unwrap_or(--currency)`, so a page
+    /// with no currency marker got the label the caller happened to pass, and
+    /// `9.60` from the US storefront was printed as `CHF 9.60`. #49 stopped
+    /// provenance vouching for that value; it did not stop the value existing.
+    /// A mislabelled price is worse than a missing one — an agent comparing
+    /// `CHF 9.60` here against `CHF 12.00` from a real Swiss storefront makes a
+    /// confidently wrong recommendation — so there is now no label to
+    /// substitute, and an unread currency is `None`.
+    pub currency: Option<String>,
     pub rating: Option<f64>,
     pub review_count: Option<u32>,
     pub product_url: String,
@@ -96,7 +108,7 @@ impl ProductSummary {
             ("brand", !brand.is_empty()),
             ("price", price.is_some()),
             ("original_price", original_price.is_some()),
-            ("currency", !currency.is_empty()),
+            ("currency", currency.is_some()),
             ("rating", rating.is_some()),
             ("review_count", review_count.is_some()),
             ("product_url", !product_url.is_empty()),
@@ -196,7 +208,16 @@ pub struct ProductDetail {
     pub brand: String,
     pub price: f64,
     pub original_price: Option<f64>,
-    pub currency: String,
+    /// The currency the product page published, or `None` when it published
+    /// none.
+    ///
+    /// The same `Option` and for the same reason as
+    /// [`ProductSummary::currency`] (#5). Every strategy used to substitute
+    /// something here when the page said nothing — JSON-LD a hardcoded
+    /// `"USD"`, the JS globals and the DOM fallback the `--currency` label —
+    /// and the substituted value was indistinguishable from a currency iHerb
+    /// actually published.
+    pub currency: Option<String>,
     pub rating: Option<f64>,
     pub review_count: Option<u32>,
     pub product_url: String,
@@ -478,7 +499,7 @@ impl ProductDetail {
             ("brand", !brand.is_empty()),
             ("price", *price > 0.0),
             ("original_price", original_price.is_some()),
-            ("currency", !currency.is_empty()),
+            ("currency", currency.is_some()),
             ("rating", rating.is_some()),
             ("review_count", review_count.is_some()),
             ("product_url", !product_url.is_empty()),

@@ -19,7 +19,7 @@ fn json_ld_is_present_and_complete_on_every_product_page() {
         assert!(!product.name.is_empty(), "{}", f.slug());
         assert!(!product.brand.is_empty(), "{}", f.slug());
         assert!(product.price > 0.0, "{}", f.slug());
-        assert_eq!(product.currency, "USD", "{}", f.slug());
+        assert_eq!(product.currency.as_deref(), Some("USD"), "{}", f.slug());
         assert!(product.rating.is_some(), "{}", f.slug());
         assert!(product.review_count.is_some(), "{}", f.slug());
         assert!(product.description.is_some(), "{}", f.slug());
@@ -105,7 +105,7 @@ fn js_globals_read_the_key_the_page_writes() {
         "no page has ever written prdNm; if one does, that is new information"
     );
 
-    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "USD")
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL)
         .expect("the JS-globals rung must parse the shape every page actually has");
     assert_eq!(
         product.name,
@@ -119,13 +119,15 @@ fn js_globals_read_the_key_the_page_writes() {
 #[test]
 fn js_globals_fabricate_nothing_the_blob_can_answer() {
     let globals = fixture::json("js-globals-12949");
-    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "CHF").unwrap();
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL).unwrap();
 
     assert_eq!(product.brand, "Nordic Naturals");
     assert_eq!(product.price, 64.56);
     assert_eq!(product.product_code.as_deref(), Some("NOR-03790"));
-    // JS globals carry no currency, so the config fallback label is used as-is.
-    assert_eq!(product.currency, "CHF");
+    // JS globals carry no currency, so the record has none. It used to hold the
+    // `--currency` label, which is what #5 removed: a label from the command
+    // line printed against iHerb's numbers is a currency nobody read.
+    assert_eq!(product.currency, None);
 
     // `upcCd: 768990037900` — a JSON number, not a string.
     assert_eq!(product.upc.as_deref(), Some("768990037900"));
@@ -145,12 +147,12 @@ fn js_globals_fabricate_nothing_the_blob_can_answer() {
 fn js_globals_report_out_of_stock_when_the_blob_says_so() {
     let mut globals = fixture::json("js-globals-12949");
     globals["ihrProduct"]["stckInd"] = serde_json::json!("OutOfStock");
-    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "USD").unwrap();
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL).unwrap();
     assert_eq!(product.in_stock, Some(false));
 
     // A live fetch of product 119174 on 2026-08-31 returned this spelling.
     globals["ihrProduct"]["stckInd"] = serde_json::json!("OutOfStockETA");
-    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "USD").unwrap();
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL).unwrap();
     assert_eq!(product.in_stock, Some(false));
 }
 
@@ -163,7 +165,7 @@ fn js_globals_leave_an_unreadable_stock_label_unknown() {
     globals["ihrProduct"]["stckInd"] = serde_json::json!("PreOrder");
     // `productDetails.availableToPurchase` is still the second opinion here.
     globals["productDetails"]["availableToPurchase"] = serde_json::json!("");
-    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "USD").unwrap();
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL).unwrap();
     assert_eq!(product.in_stock, None);
 }
 
@@ -176,11 +178,11 @@ fn js_globals_fall_back_to_available_to_purchase() {
         .as_object_mut()
         .unwrap()
         .remove("stckInd");
-    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "USD").unwrap();
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL).unwrap();
     assert_eq!(product.in_stock, Some(true));
 
     globals["productDetails"]["availableToPurchase"] = serde_json::json!("False");
-    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "USD").unwrap();
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL).unwrap();
     assert_eq!(product.in_stock, Some(false));
 }
 

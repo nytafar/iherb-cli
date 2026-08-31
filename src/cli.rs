@@ -14,8 +14,14 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub country: Option<String>,
 
-    /// Fallback currency label when auto-detection fails (e.g., USD, CHF, EUR)
-    #[arg(long, global = true)]
+    /// Require the storefront to price in this currency, e.g. USD, CHF, EUR.
+    ///
+    /// Does not convert. iHerb prices in the currency of the storefront
+    /// `--country` selects, and this tool reports the currency that storefront
+    /// published; the flag says which one you were expecting, and a
+    /// disagreement is an error rather than a relabelling. Omit it to accept
+    /// whatever the storefront prices in.
+    #[arg(long, global = true, verbatim_doc_comment)]
     pub currency: Option<String>,
 
     /// Bypass the local cache and fetch fresh data

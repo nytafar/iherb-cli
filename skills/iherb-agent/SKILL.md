@@ -46,7 +46,7 @@ Output: Full Markdown with overview, supplement facts table, ingredients, sugges
 ### Global flags
 
 - `--country <code>`: localized storefront (e.g., `ch`, `de`, `jp`). Default: `us`
-- `--currency <code>`: currency (e.g., `CHF`, `EUR`). Default: `USD`
+- `--currency <code>`: require the storefront to price in this currency (e.g., `CHF`, `EUR`). It does **not** convert — a storefront that prices in something else is an error, not a relabelling. Default: unset, which accepts whatever the storefront prices in
 - `--no-cache`: bypass cache
 - `--debug`: show browser window
 
@@ -99,10 +99,19 @@ Then verify quality by checking ingredients and ratings on the cheapest options.
 
 ### Localized pricing
 
+`--country` is what changes the prices; `--currency` only checks them. Prices
+come back in the storefront's own currency, and a price the page did not name a
+currency for is reported as `(currency unknown: the page published none)` rather
+than being captioned with one.
+
 ```bash
+# Swiss storefront; fail rather than report Swiss prices in anything but CHF
 iherb-cli search "omega 3" --country ch --currency CHF
 iherb-cli product 61864 --country de --currency EUR
 ```
+
+Never compare two prices without comparing their currencies. A number whose
+currency is unknown is not comparable to one whose currency is known.
 
 ## Tips
 

@@ -22,7 +22,6 @@ pub async fn extract_product(
     html: &str,
     product_id: &str,
     base_url: &str,
-    currency: &str,
 ) -> Result<ProductDetail, IherbError> {
     debug_dump_html(html, &format!("product_{}", product_id));
 
@@ -44,7 +43,7 @@ pub async fn extract_product(
             "Attempting JS globals extraction for product {}",
             product_id
         );
-        if let Some(mut product) = parse_from_js_globals(&globals, product_id, base_url, currency) {
+        if let Some(mut product) = parse_from_js_globals(&globals, product_id, base_url) {
             enrich_from_html(html, &mut product);
             tracing::info!("Successfully extracted product from JS globals + DOM enrichment");
             return Ok(product);
@@ -54,7 +53,7 @@ pub async fn extract_product(
 
     // Fallback to DOM scraping
     tracing::info!("Extracting product from DOM for {}", product_id);
-    parse_from_html(html, product_id, base_url, currency)
+    parse_from_html(html, product_id, base_url)
 }
 
 /// Extract price, original price, and currency from JSON-LD offers.
@@ -63,10 +62,11 @@ pub async fn extract_product(
 /// The currency is `None` when the offers carry no `priceCurrency` anywhere.
 /// The `"USD"` fallback used to live in here, which meant the caller could not
 /// tell a currency iHerb published from one this function invented — so
-/// provenance recorded the invention as though JSON-LD had supplied it. The
-/// fallback now happens at the caller, which records it as
-/// [`Source::Defaulted`]. Fixing the *value* is #5; this is only about not
-/// vouching for it.
+/// provenance recorded the invention as though JSON-LD had supplied it. #49
+/// moved the fallback out to the caller and recorded it as
+/// [`Source::Defaulted`]; #5 deleted it. `None` now travels all the way to
+/// [`ProductDetail::currency`] rather than being turned into a value on the
+/// way.
 fn extract_prices_from_offers(
     offers: Option<&serde_json::Value>,
 ) -> (f64, Option<f64>, Option<String>) {
@@ -217,14 +217,6 @@ pub fn parse_from_json_ld(
     // Try top-level offers.price first, then fall back to priceSpecification
     let (price, original_price, read_currency) = extract_prices_from_offers(offers);
 
-    // The value is unchanged — `"USD"` when the offers name no currency, which
-    // is what shipped before and what #5 will fix. What changes is that the
-    // fallback is visible here, so the claim below can tell the truth about it.
-    const DEFAULT_CURRENCY: &str = "USD";
-    let currency = read_currency
-        .clone()
-        .unwrap_or_else(|| DEFAULT_CURRENCY.to_string());
-
     let in_stock = offers
         .and_then(|o| o.get("availability"))
         .and_then(|v| v.as_str())
@@ -276,7 +268,7 @@ pub fn parse_from_json_ld(
         brand,
         price,
         original_price,
-        currency,
+        currency: read_currency,
         rating,
         review_count,
         product_url,
@@ -297,13 +289,12 @@ pub fn parse_from_json_ld(
 
     product.claim_unattributed(Source::JsonLd);
 
-    // Two values JSON-LD did not carry, which `claim_unattributed` would
-    // otherwise attribute to it because they are non-empty. No capture takes
-    // the currency branch — all five publish `priceCurrency` — and all five
-    // take the URL one, because none publishes `url`.
-    if read_currency.is_none() {
-        product.extraction.reclaim("currency", Source::Defaulted);
-    }
+    // One value JSON-LD did not carry, which `claim_unattributed` would
+    // otherwise attribute to it because it is non-empty: all five captures take
+    // this branch, because none publishes `url`. The currency needs no such
+    // rescue any more — offers with no `priceCurrency` now leave the field
+    // `None`, which `claim_unattributed` skips and `source_of` reports as
+    // [`Source::Absent`].
     if read_product_url.is_none() {
         product.extraction.reclaim("product_url", Source::Defaulted);
     }
@@ -316,7 +307,6 @@ pub fn parse_from_js_globals(
     globals: &serde_json::Value,
     product_id: &str,
     base_url: &str,
-    currency: &str,
 ) -> Option<ProductDetail> {
     let pd = globals.get("productDetails");
     let ihr = globals.get("ihrProduct");
@@ -389,7 +379,10 @@ pub fn parse_from_js_globals(
         brand,
         price,
         original_price: None,
-        currency: currency.to_string(),
+        // The globals carry no currency at all. This used to be the
+        // `--currency` label, which made a US price read as a Swiss one on any
+        // page that reached this strategy (#5).
+        currency: None,
         rating: None,
         review_count: None,
         product_url: format!("{}/pr/p/{}", base_url, product_id),
@@ -410,13 +403,8 @@ pub fn parse_from_js_globals(
 
     product.claim_unattributed(Source::JsGlobals);
 
-    // The globals carry no currency and no URL at all: the currency is whatever
-    // label the caller passed to `--currency` and the URL is synthesised from
-    // the id. Both are values nobody read, so neither is attributed to this
-    // strategy. `js_globals_parse_when_the_expected_key_is_present` asserting
-    // `product.currency == "CHF"` after being handed `"CHF"` is exactly the
-    // shape of the problem.
-    product.extraction.reclaim("currency", Source::Defaulted);
+    // The globals carry no URL either: it is synthesised from the id, so it is
+    // a value nobody read and is not attributed to this strategy.
     product.extraction.reclaim("product_url", Source::Defaulted);
 
     Some(product)
@@ -786,7 +774,6 @@ pub fn parse_from_html(
     html: &str,
     product_id: &str,
     base_url: &str,
-    currency: &str,
 ) -> Result<ProductDetail, IherbError> {
     let doc = Html::parse_document(html);
 
@@ -837,11 +824,11 @@ pub fn parse_from_html(
 
     let supplement_facts = parse_supplement_facts_html(&doc);
 
-    // Detect actual currency from the page, falling back to config currency
+    // What the page says its prices are in, or nothing. There is no fallback:
+    // the `--currency` label used to fill this, so a page whose currency
+    // markers we could not read had the caller's guess printed against iHerb's
+    // numbers (#5).
     let read_currency = detect_currency_from_html(&doc);
-    let detected_currency = read_currency
-        .clone()
-        .unwrap_or_else(|| currency.to_string());
 
     let product_url = format!("{}/pr/p/{}", base_url, product_id);
 
@@ -850,7 +837,7 @@ pub fn parse_from_html(
         brand,
         price,
         original_price,
-        currency: detected_currency,
+        currency: read_currency,
         rating,
         review_count,
         product_url,
@@ -875,12 +862,6 @@ pub fn parse_from_html(
 
     product.claim_unattributed(Source::Dom);
 
-    // The `--currency` label is not a reading of the page. All seven captures
-    // publish a currency marker, so none takes this branch; a page that does
-    // not is exactly the case #5 is about, and `degraded` now fires on it.
-    if read_currency.is_none() {
-        product.extraction.reclaim("currency", Source::Defaulted);
-    }
     // Always synthesised from the id: the DOM strategy never reads a canonical
     // product URL off the page.
     product.extraction.reclaim("product_url", Source::Defaulted);

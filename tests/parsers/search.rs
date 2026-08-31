@@ -28,7 +28,7 @@ use crate::fixture::{BASE_URL, CATEGORY_SUPPLEMENTS, SEARCH_VITAMIN_C};
 
 #[test]
 fn search_page_yields_a_full_page_of_products() {
-    let result = parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD")
+    let result = parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL)
         .expect("the search page must parse");
 
     assert_eq!(result.query, "vitamin c");
@@ -48,14 +48,13 @@ fn search_page_yields_a_full_page_of_products() {
             product.price
         );
         assert!(product.product_url.starts_with(BASE_URL));
-        assert_eq!(product.currency, "USD");
+        assert_eq!(product.currency.as_deref(), Some("USD"));
     }
 }
 
 #[test]
 fn search_cards_carry_brand_rating_and_discount() {
-    let result =
-        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD").unwrap();
+    let result = parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL).unwrap();
 
     let first = &result.products[0];
     assert_eq!(first.product_id, "61864");
@@ -88,8 +87,7 @@ fn search_cards_carry_brand_rating_and_discount() {
 /// An agent ranking these counted the same product twice.
 #[test]
 fn a_product_placed_twice_is_returned_once() {
-    let result =
-        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD").unwrap();
+    let result = parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL).unwrap();
 
     let mut seen = BTreeMap::new();
     for product in &result.products {
@@ -127,8 +125,7 @@ fn a_product_placed_twice_is_returned_once() {
 /// down the list for no reason a caller could see.
 #[test]
 fn the_first_placement_of_a_repeated_product_is_the_one_kept() {
-    let result =
-        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD").unwrap();
+    let result = parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL).unwrap();
 
     let card = Selector::parse("div.product-cell-container").unwrap();
     let link = Selector::parse("a.absolute-link.product-link, a.product-link").unwrap();
@@ -192,21 +189,31 @@ fn a_product_repeated_across_pages_is_returned_once() {
 /// The captured results page, parsed exactly as `extract` parses each page it
 /// navigates to.
 fn one_captured_page() -> iherb_cli::model::SearchResult {
-    parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD").unwrap()
+    parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL).unwrap()
 }
 
-/// CHARACTERIZATION, NOT DESIRED: the same #5 shape as the product page. The
-/// requested currency is discarded whenever the page carries one.
+/// FLIPPED BY #5. This was the search half of the characterization: the parser
+/// took a `currency` argument, threw it away whenever the page carried a marker
+/// of its own, and stamped it onto every card when the page did not.
+///
+/// The argument is gone. Every card on a results page carries the one currency
+/// the page published, because iHerb publishes one for the whole page.
 #[test]
-fn search_ignores_the_requested_currency() {
-    let result =
-        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "CHF").unwrap();
-    assert!(result.products.iter().all(|p| p.currency == "USD"));
+fn every_card_carries_the_currency_the_page_published() {
+    let result = parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL).unwrap();
+    assert!(result
+        .products
+        .iter()
+        .all(|p| p.currency.as_deref() == Some("USD")));
+    assert!(result
+        .products
+        .iter()
+        .all(|p| p.source_of("currency") == Source::Dom));
 }
 
 #[test]
 fn a_page_with_no_cards_is_an_empty_result_not_an_error() {
-    let result = parse_search_from_html("<html><body></body></html>", "nothing", BASE_URL, "USD")
+    let result = parse_search_from_html("<html><body></body></html>", "nothing", BASE_URL)
         .expect("an empty page is not an error");
     assert!(result.products.is_empty());
     assert_eq!(result.total_results, None);
@@ -226,7 +233,7 @@ fn a_page_with_no_cards_is_an_empty_result_not_an_error() {
 /// and fail this one.
 #[test]
 fn every_card_field_names_the_strategy_that_produced_it() {
-    let result = parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD")
+    let result = parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL)
         .expect("the search page must parse");
     let first = &result.products[0];
 
@@ -270,30 +277,32 @@ fn every_card_field_names_the_strategy_that_produced_it() {
 /// was presented exactly as a currency read off the page. That is #49's first
 /// fabrication, and it is the same shape #28 removed from the product path.
 ///
-/// Making the label *right* is #5. This is about not vouching for it.
+/// #49 stopped the label being vouched for; #5 stopped it existing. The
+/// assertions below moved with it: a card whose page published no currency used
+/// to hold the caller's label as [`Source::Defaulted`], and now holds nothing
+/// as [`Source::Absent`]. Both states are degraded, which is the part #49 built
+/// and #5 keeps.
 #[test]
 fn an_undetected_currency_is_not_attributed_to_the_page() {
     // The captured page publishes one, so it is read.
-    let read =
-        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "CHF").unwrap();
-    assert_eq!(read.products[0].currency, "USD");
+    let read = parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL).unwrap();
+    assert_eq!(read.products[0].currency.as_deref(), Some("USD"));
     assert_eq!(read.products[0].source_of("currency"), Source::Dom);
 
-    // A page with cards and no currency marker anywhere: the label is used,
-    // and recorded as a value nobody read.
-    let unmarked =
-        parse_search_from_html(&a_card_with_no_currency(), "q", BASE_URL, "CHF").unwrap();
+    // A page with cards and no currency marker anywhere. There is no longer a
+    // label to substitute, so the card has no currency at all.
+    let unmarked = parse_search_from_html(&a_card_with_no_currency(), "q", BASE_URL).unwrap();
     let card = &unmarked.products[0];
-    assert_eq!(card.currency, "CHF", "the label is still what gets used");
-    assert_eq!(card.source_of("currency"), Source::Defaulted);
+    assert_eq!(card.currency, None, "there is no label left to substitute");
+    assert_eq!(card.source_of("currency"), Source::Absent);
 
     // And it is visible as such rather than buried: `currency` is a field every
     // results card publishes, so a page that does not publish one is degraded.
     let health = card.health();
-    assert!(health.fields_defaulted.contains(&"currency".to_string()));
+    assert!(health.fields_absent.contains(&"currency".to_string()));
     assert!(
         health.degraded,
-        "a currency nobody read must be able to make a record degraded"
+        "a card with no currency must be able to make a record degraded"
     );
 }
 
@@ -305,7 +314,7 @@ fn an_undetected_currency_is_not_attributed_to_the_page() {
 /// them first.
 #[test]
 fn a_card_with_no_readable_price_has_none() {
-    let result = parse_search_from_html(&a_card_with_no_price(), "q", BASE_URL, "USD").unwrap();
+    let result = parse_search_from_html(&a_card_with_no_price(), "q", BASE_URL).unwrap();
     let card = &result.products[0];
 
     assert_eq!(card.price, None);
@@ -335,8 +344,7 @@ fn a_card_with_no_readable_price_has_none() {
 /// what lets #9 render the field the same way in both commands.
 #[test]
 fn a_card_with_no_stock_signal_does_not_claim_to_be_in_stock() {
-    let result =
-        parse_search_from_html(&a_card_with_no_stock_marker(), "q", BASE_URL, "USD").unwrap();
+    let result = parse_search_from_html(&a_card_with_no_stock_marker(), "q", BASE_URL).unwrap();
     let card = &result.products[0];
 
     assert_eq!(card.in_stock, None);
@@ -344,14 +352,13 @@ fn a_card_with_no_stock_signal_does_not_claim_to_be_in_stock() {
 
     // Out of stock is still read as out of stock, so this is not the parser
     // giving up on the field.
-    let out = parse_search_from_html(&a_card_out_of_stock(), "q", BASE_URL, "USD").unwrap();
+    let out = parse_search_from_html(&a_card_out_of_stock(), "q", BASE_URL).unwrap();
     assert_eq!(out.products[0].in_stock, Some(false));
     assert_eq!(out.products[0].source_of("in_stock"), Source::Dom);
 
     // And every card on the real capture carries the attribute, so this is not
     // a change that quietly blanks the field on live pages.
-    let real =
-        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD").unwrap();
+    let real = parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL).unwrap();
     assert!(real.products.iter().all(|p| p.in_stock == Some(true)));
 }
 
@@ -363,8 +370,7 @@ fn a_card_with_no_stock_signal_does_not_claim_to_be_in_stock() {
 /// silently not on search.
 #[test]
 fn a_search_card_reports_its_health_in_the_same_shape_a_product_does() {
-    let result =
-        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD").unwrap();
+    let result = parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL).unwrap();
     let json = serde_json::to_value(result.products[0].health()).expect("must serialize");
 
     // The same keys `provenance::health_serializes_to_the_block_issue_9_renders`
@@ -384,12 +390,13 @@ fn a_search_card_reports_its_health_in_the_same_shape_a_product_does() {
     assert_eq!(json["sources"]["name"], "dom");
     assert_eq!(json["sources"]["original_price"], "absent");
 
-    // And the vocabulary is the same one: `defaulted` on a card means what it
-    // means on a product.
-    let unmarked =
-        parse_search_from_html(&a_card_with_no_currency(), "q", BASE_URL, "CHF").unwrap();
+    // And the vocabulary is the same one: `absent` on a card means what it means
+    // on a product. It was `defaulted` here until #5, because the card carried
+    // the `--currency` label; the label is gone, so what is left is the absence
+    // the product path reports for the same page.
+    let unmarked = parse_search_from_html(&a_card_with_no_currency(), "q", BASE_URL).unwrap();
     let json = serde_json::to_value(unmarked.products[0].health()).unwrap();
-    assert_eq!(json["sources"]["currency"], "defaulted");
+    assert_eq!(json["sources"]["currency"], "absent");
     assert_eq!(json["degraded"], true);
 }
 
@@ -602,9 +609,75 @@ fn one_page_walked() -> iherb_cli::model::SearchResult {
     result
 }
 
+/// `--currency` on the search path (#5): a requirement on the storefront,
+/// checked against every card, enforced on the fresh path and on the cached one.
+///
+/// The cards on the captured page are USD, so a run that asked for CHF is
+/// refused rather than handed 45 US prices to caption as Swiss ones — which is
+/// what the flag did before, whenever currency detection failed.
+#[test]
+fn a_search_in_the_wrong_currency_is_refused_rather_than_relabelled() {
+    let dir = TempDir::new("currency-search");
+    let usd_config = iherb_cli::config::AppConfig {
+        currency: Some("USD".to_string()),
+        ..cache_config(dir.path())
+    };
+    let chf_config = iherb_cli::config::AppConfig {
+        currency: Some("CHF".to_string()),
+        ..cache_config(dir.path())
+    };
+
+    let walked = one_page_walked();
+    assert_eq!(walked.products[0].currency.as_deref(), Some("USD"));
+
+    let asked_usd =
+        SearchTarget::new(&usd_config, "vitamin c", 10, SortOrder::Relevance, None).unwrap();
+    let asked_chf =
+        SearchTarget::new(&chf_config, "vitamin c", 10, SortOrder::Relevance, None).unwrap();
+    let unasked = SearchTarget::new(
+        &cache_config(dir.path()),
+        "vitamin c",
+        10,
+        SortOrder::Relevance,
+        None,
+    )
+    .unwrap();
+
+    // The fresh path.
+    assert!(unasked.validate(&walked).is_ok());
+    assert!(asked_usd.validate(&walked).is_ok());
+    assert!(
+        asked_chf.validate(&walked).is_err(),
+        "a USD results page must not satisfy --currency CHF"
+    );
+
+    // And the cached one, which `validate` never sees: a stored entry in the
+    // wrong currency does not answer the request, so it is refetched instead of
+    // being served past the check.
+    let cache = Cache::new(dir.path(), false);
+    cache.set(&asked_chf.cache_key(), &walked).unwrap();
+    assert!(
+        cached(&asked_chf, &chf_config).is_none(),
+        "a cached USD entry was served to a --currency CHF request"
+    );
+    assert!(
+        cached(&asked_usd, &usd_config).is_some(),
+        "...while the request the entry does answer still hits it"
+    );
+
+    // A card whose page published no currency confirms nothing, so it cannot
+    // satisfy a request either.
+    let mut unmarked = walked.clone();
+    for product in &mut unmarked.products {
+        product.currency = None;
+    }
+    assert!(asked_usd.validate(&unmarked).is_err());
+    assert!(unasked.validate(&unmarked).is_ok());
+}
+
 /// What the parser returns for a results page past the end of the results.
 fn an_empty_page() -> iherb_cli::model::SearchResult {
-    parse_search_from_html("<html><body></body></html>", "vitamin c", BASE_URL, "USD").unwrap()
+    parse_search_from_html("<html><body></body></html>", "vitamin c", BASE_URL).unwrap()
 }
 
 /// A config pointed at a scratch cache directory, for the round-trips above.
@@ -960,7 +1033,8 @@ fn the_ambiguous_name_is_left_unresolved() {
 fn search_config() -> iherb_cli::config::AppConfig {
     iherb_cli::config::AppConfig {
         country: "us".to_string(),
-        currency: "USD".to_string(),
+        // No `--currency`, so nothing is required of the storefront (#5).
+        currency: None,
         no_cache: false,
         delay_ms: 0,
         debug: false,

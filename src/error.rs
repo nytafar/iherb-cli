@@ -27,6 +27,18 @@ pub enum IherbError {
     #[error("Extraction failed for product {0}: the page loaded but no strategy produced usable data. The scraper may need updating.")]
     ParseFailed(String),
 
+    /// `--currency` named a currency, and the storefront did not price in it.
+    ///
+    /// An error rather than a relabelling (#5). iHerb prices in the currency of
+    /// the storefront `--country` selects; the flag cannot convert, so the only
+    /// honest thing it can do about a disagreement is refuse to answer.
+    #[error("Storefront currency is {actual}, not the {expected} that --currency asked for ({what}). iHerb prices in its storefront's own currency and this tool does not convert; --country selects the storefront.")]
+    CurrencyMismatch {
+        expected: String,
+        actual: String,
+        what: String,
+    },
+
     #[error("Chrome download failed: {0}")]
     ChromeDownload(String),
 

@@ -5,7 +5,15 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub country: String,
-    pub currency: String,
+    /// The currency `--currency` requires the storefront to price in, or `None`
+    /// when the caller did not say.
+    ///
+    /// An `Option` with no default, because the default cannot be a currency
+    /// (#5). This used to be a `String` defaulting to `"USD"`, which was safe
+    /// only because the value was a label of last resort that the page usually
+    /// overrode. As a requirement, a `"USD"` default would make every
+    /// non-US storefront fail out of the box.
+    pub currency: Option<String>,
     pub no_cache: bool,
     pub delay_ms: u64,
     pub debug: bool,
@@ -62,10 +70,13 @@ impl AppConfig {
             .or(file_config.defaults.country)
             .unwrap_or_else(|| "us".to_string());
 
+        // No `unwrap_or`: saying nothing is a real answer here, and the only
+        // safe one. See [`AppConfig::currency`].
         let currency = currency
             .or(currency_env)
             .or(file_config.defaults.currency)
-            .unwrap_or_else(|| "USD".to_string());
+            .map(|c| c.trim().to_uppercase())
+            .filter(|c| !c.is_empty());
 
         let delay_ms = delay.or(file_config.defaults.delay_ms).unwrap_or(2000);
 

@@ -38,11 +38,12 @@ fn search(country: &str, query: &str, sort: SortOrder, category: Option<&str>) -
     .file_name()
 }
 
-/// A config that differs from its sibling only in storefront.
+/// A config that differs from its sibling only in storefront, or only in the
+/// currency `--currency` requires.
 fn config(country: &str, currency: &str, cache_dir: PathBuf) -> AppConfig {
     AppConfig {
         country: country.to_string(),
-        currency: currency.to_string(),
+        currency: Some(currency.to_string()),
         no_cache: false,
         delay_ms: 0,
         debug: false,
@@ -58,37 +59,97 @@ fn config(country: &str, currency: &str, cache_dir: PathBuf) -> AppConfig {
 
 #[test]
 fn product_entries_are_named_after_the_storefront_and_the_product_id() {
-    assert_eq!(product("us", "61864"), "v2_product_us_61864.json");
+    assert_eq!(product("us", "61864"), "v3_product_us_61864.json");
     assert_ne!(product("us", "61864"), product("us", "61865"));
     assert_ne!(product("us", "61864"), product("ch", "61864"));
 }
 
-/// The `v2_` generation is not decoration: it is what stops a `v1` entry,
-/// written before the key knew about storefronts, from being read now. Nothing
-/// deletes those files; they are simply never named again.
+/// The generation prefix is not decoration: it is what stops an entry written
+/// under an older set of rules from being read now. Nothing deletes those
+/// files; they are simply never named again.
 #[test]
-fn v1_entries_can_never_be_named_by_the_current_key() {
-    let dir = TempDir::new("v1-orphaned");
+fn entries_from_older_generations_can_never_be_named_by_the_current_key() {
+    let dir = TempDir::new("older-generations-orphaned");
     let us = config("us", "USD", dir.path());
     let cache = Cache::new(dir.path(), false);
 
-    // A poisoned entry exactly as v1 wrote it, with a mtime of now so the TTL
-    // cannot be what saves us.
+    // Poisoned entries exactly as v1 and v2 wrote them, with a mtime of now so
+    // the TTL cannot be what saves us.
     std::fs::create_dir_all(dir.path()).unwrap();
-    std::fs::write(dir.path().join("product_61864.json"), r#""stale""#).unwrap();
+    for stale in ["product_61864.json", "v2_product_us_61864.json"] {
+        std::fs::write(dir.path().join(stale), r#""stale""#).unwrap();
+    }
 
     let key = ProductTarget::new(&us, "61864").unwrap().cache_key();
-    assert_ne!(key.file_name(), "product_61864.json");
-    assert!(cache.get::<String>(&key).is_none(), "v1 entry was read");
+    assert_eq!(key.file_name(), "v3_product_us_61864.json");
+    assert!(
+        cache.get::<String>(&key).is_none(),
+        "a stale entry was read"
+    );
+}
+
+/// FOLDED INTO #5: the currency collision the review of #1 found, and why the
+/// key is not what fixes it.
+///
+/// Two runs differing only in `--currency` shared an entry, and because every
+/// path substituted the label when the page published no currency, the second
+/// run was served a record asserting a currency it had never asked iHerb for.
+/// The obvious fix was to put the currency in the key. That would have been the
+/// wrong one: `--currency` never changed which document was fetched, so keying
+/// on it would file two names for one fetch and double the work to hide a
+/// fabrication rather than remove it.
+///
+/// What removes it is that no record carries a substituted currency any more,
+/// and the `v3_` generation is what stops the ones already on disk being
+/// served. So the two configs below still share an entry — deliberately, and
+/// now harmlessly, because the entry no longer says anything `--currency` could
+/// have changed.
+#[test]
+fn two_currencies_still_share_an_entry_because_neither_changes_the_fetch() {
+    let dir = TempDir::new("currency-key");
+    let usd = config("us", "USD", dir.path());
+    let chf = config("us", "CHF", dir.path());
+
+    let from_usd = ProductTarget::new(&usd, "61864").unwrap();
+    let from_chf = ProductTarget::new(&chf, "61864").unwrap();
+
+    // The same URL, because `--currency` is not part of the request.
+    assert_eq!(from_usd.url(1), from_chf.url(1));
+    assert_eq!(
+        from_usd.cache_key().file_name(),
+        from_chf.cache_key().file_name()
+    );
+
+    // A pre-#5 entry under the same country, holding the fabrication: a US
+    // price that a `--currency CHF` run labelled CHF. It is written under the
+    // name that run would have used, and it is never read again.
+    std::fs::create_dir_all(dir.path()).unwrap();
+    std::fs::write(
+        dir.path().join("v2_product_us_61864.json"),
+        r#"{"name":"Gold C","brand":"CGN","price":9.6,"original_price":null,
+            "currency":"CHF","rating":null,"review_count":null,
+            "product_url":"https://www.iherb.com/pr/item/61864","product_id":"61864",
+            "in_stock":null,"description":null,"product_code":null,"upc":null,
+            "ingredients":null,"supplement_facts":null,"suggested_use":null,
+            "warnings":null,"shipping_weight":null,"category_breadcrumb":null,
+            "review_distribution":null}"#,
+    )
+    .unwrap();
+
+    let cache = Cache::new(dir.path(), false);
+    assert!(
+        cache.get::<ProductDetail>(&from_chf.cache_key()).is_none(),
+        "a v2 entry holding a fabricated currency was served"
+    );
 }
 
 #[test]
 fn search_entries_are_a_hash_of_country_query_sort_and_category() {
     let base = search("us", "magnesium", SortOrder::Relevance, None);
-    assert!(base.starts_with("v2_search_"));
+    assert!(base.starts_with("v3_search_"));
     assert!(base.ends_with(".json"));
     // 16 hex characters between the prefix and the extension.
-    assert_eq!(base.len(), "v2_search_".len() + 16 + ".json".len());
+    assert_eq!(base.len(), "v3_search_".len() + 16 + ".json".len());
 
     assert_eq!(base, search("us", "magnesium", SortOrder::Relevance, None));
     assert_ne!(base, search("ch", "magnesium", SortOrder::Relevance, None));
@@ -149,8 +210,8 @@ fn two_storefronts_get_their_own_product_cache_file() {
         from_us.cache_key().file_name(),
         from_ch.cache_key().file_name()
     );
-    assert_eq!(from_us.cache_key().file_name(), "v2_product_us_61864.json");
-    assert_eq!(from_ch.cache_key().file_name(), "v2_product_ch_61864.json");
+    assert_eq!(from_us.cache_key().file_name(), "v3_product_us_61864.json");
+    assert_eq!(from_ch.cache_key().file_name(), "v3_product_ch_61864.json");
 }
 
 /// FLIPPED BY #1, and the one that matters: the failure a user actually hit
@@ -170,7 +231,7 @@ fn a_swiss_fetch_is_not_served_the_us_price() {
         brand: "California Gold Nutrition".to_string(),
         price: 9.60,
         original_price: None,
-        currency: "USD".to_string(),
+        currency: Some("USD".to_string()),
         rating: Some(4.8),
         review_count: Some(381_864),
         product_url: "https://www.iherb.com/pr/item/61864".to_string(),
@@ -206,7 +267,7 @@ fn a_swiss_fetch_is_not_served_the_us_price() {
         .get::<ProductDetail>(&us_key)
         .expect("the US read still hits its own entry")
         .data;
-    assert_eq!(still_there.currency, "USD");
+    assert_eq!(still_there.currency.as_deref(), Some("USD"));
     assert_eq!(still_there.price, 9.60);
 
     // Once Switzerland is written it is a second file, not an overwrite.
@@ -297,7 +358,7 @@ fn a_widened_search_still_finds_the_narrow_entry() {
                 brand: "Acme".to_string(),
                 price: Some(1.0),
                 original_price: None,
-                currency: "USD".to_string(),
+                currency: Some("USD".to_string()),
                 rating: None,
                 review_count: None,
                 product_url: format!("https://www.iherb.com/pr/p/{}", i),

@@ -12,6 +12,7 @@ use crate::fetch::{FetchTarget, Paging};
 use crate::model::{ProductSummary, SearchFetch, SearchResult};
 use crate::scraper;
 use crate::scraper::search::CategoryId;
+use crate::targets::check_currency;
 
 pub struct SearchTarget {
     query: String,
@@ -20,7 +21,8 @@ pub struct SearchTarget {
     category: Option<CategoryId>,
     country: String,
     base_url: String,
-    currency: String,
+    /// What `--currency` requires the storefront to price in, or `None`.
+    expected_currency: Option<String>,
 }
 
 /// Products gathered so far, plus the result total from the first page that
@@ -79,7 +81,7 @@ impl SearchTarget {
             category,
             country: config.country.clone(),
             base_url: config.base_url(),
-            currency: config.currency.clone(),
+            expected_currency: config.currency.clone(),
         })
     }
 
@@ -89,6 +91,24 @@ impl SearchTarget {
 
     pub fn limit(&self) -> usize {
         self.limit
+    }
+
+    /// Whether every card in a result set is priced in the currency
+    /// `--currency` requires (#5).
+    ///
+    /// Every card, not the first: iHerb publishes one currency marker per
+    /// results page, so on a single page they agree by construction — but a
+    /// walk spans pages, and a set assembled from several is only confirmed if
+    /// each of them was.
+    fn currency_holds(&self, result: &SearchResult) -> Result<()> {
+        for product in &result.products {
+            check_currency(
+                self.expected_currency.as_deref(),
+                product.currency.as_deref(),
+                &format!("the results for {:?}", self.query),
+            )?;
+        }
+        Ok(())
     }
 
     /// Fold one parsed result page into what has been gathered, and say whether
@@ -161,15 +181,9 @@ impl FetchTarget for SearchTarget {
         html: &'a str,
         acc: &'a mut Self::Accumulator,
     ) -> Result<Paging> {
-        let page_result = scraper::search::extract_search(
-            page,
-            html,
-            &self.query,
-            &self.base_url,
-            &self.currency,
-        )
-        .await
-        .context("Failed to extract search results")?;
+        let page_result = scraper::search::extract_search(page, html, &self.query, &self.base_url)
+            .await
+            .context("Failed to extract search results")?;
 
         Ok(self.absorb(page_result, acc))
     }
@@ -199,14 +213,19 @@ impl FetchTarget for SearchTarget {
     /// recorded — is not treated as complete. Assuming it was is how #6 read to
     /// a caller: silently fewer results than asked for, with a plausible
     /// timestamp and a header still quoting the full total.
+    /// ...and, since #5, when its cards are priced in the currency
+    /// `--currency` requires. See [`crate::targets::ProductTarget::cache_is_sufficient`]
+    /// for why a mismatch refetches rather than erroring here.
     fn cache_is_sufficient(&self, cached: &Self::Output) -> bool {
-        cached.products.len() >= self.limit || cached.fetch.exhausted == Some(true)
+        let enough = cached.products.len() >= self.limit || cached.fetch.exhausted == Some(true);
+        enough && self.currency_holds(cached).is_ok()
     }
 
     fn validate(&self, result: &Self::Output) -> Result<()> {
         if result.products.is_empty() {
             anyhow::bail!("No search results found for: {}", self.query);
         }
+        self.currency_holds(result)?;
         Ok(())
     }
 }

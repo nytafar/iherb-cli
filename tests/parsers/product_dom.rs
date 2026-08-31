@@ -3,7 +3,7 @@
 //! `parse_review_distribution_html`.
 
 use iherb_cli::error::IherbError;
-use iherb_cli::model::ReviewDistribution;
+use iherb_cli::model::{ReviewDistribution, Source};
 use iherb_cli::scraper::helpers::is_not_found_page;
 use iherb_cli::scraper::product::{
     enrich_from_html, extract_spec, parse_from_html, parse_from_json_ld, parse_product_specs,
@@ -21,7 +21,7 @@ use crate::fixture::{
 #[test]
 fn dom_fallback_reads_every_product_page() {
     for f in fixture::products() {
-        let product = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD")
+        let product = parse_from_html(f.html(), f.product_id(), BASE_URL)
             .unwrap_or_else(|e| panic!("{}: {}", f.slug(), e));
 
         assert!(!product.name.is_empty(), "{}", f.slug());
@@ -39,7 +39,7 @@ fn dom_fallback_reads_every_product_page() {
 #[test]
 fn dom_fallback_agrees_with_json_ld_on_price_and_rating() {
     for f in fixture::products() {
-        let dom = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD").unwrap();
+        let dom = parse_from_html(f.html(), f.product_id(), BASE_URL).unwrap();
         let ld = parse_from_json_ld(&f.json_ld(), f.product_id(), BASE_URL).unwrap();
 
         assert_eq!(dom.name, ld.name, "{}", f.slug());
@@ -66,7 +66,7 @@ fn dom_fallback_agrees_with_json_ld_on_price_and_rating() {
 #[test]
 fn dom_fallback_reads_product_code_and_shipping_weight() {
     for f in fixture::products() {
-        let product = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD").unwrap();
+        let product = parse_from_html(f.html(), f.product_id(), BASE_URL).unwrap();
         assert!(product.product_code.is_some(), "{}", f.slug());
         assert!(product.upc.is_some(), "{}", f.slug());
 
@@ -81,7 +81,7 @@ fn dom_fallback_reads_product_code_and_shipping_weight() {
         );
     }
 
-    let nordic = parse_from_html(ULTIMATE_OMEGA.html(), "12949", BASE_URL, "USD").unwrap();
+    let nordic = parse_from_html(ULTIMATE_OMEGA.html(), "12949", BASE_URL).unwrap();
     assert_eq!(nordic.product_code.as_deref(), Some("NOR-03790"));
     assert_eq!(nordic.shipping_weight.as_deref(), Some("0.72 lb"));
 }
@@ -98,7 +98,7 @@ fn dom_fallback_reads_product_code_and_shipping_weight() {
 /// JSON-LD does, or the fallback is not a fallback.
 #[test]
 fn dom_fallback_reads_the_gummies_as_out_of_stock() {
-    let product = parse_from_html(OLLY_GUMMIES.html(), "119174", BASE_URL, "USD").unwrap();
+    let product = parse_from_html(OLLY_GUMMIES.html(), "119174", BASE_URL).unwrap();
     assert_eq!(product.in_stock, Some(false));
 
     // The exact-case substring the old default relied on is still not there.
@@ -130,7 +130,7 @@ fn the_gummies_page_says_out_of_stock_four_ways() {
 #[test]
 fn dom_and_json_ld_agree_about_availability() {
     for f in fixture::products() {
-        let dom = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD").unwrap();
+        let dom = parse_from_html(f.html(), f.product_id(), BASE_URL).unwrap();
         let ld = parse_from_json_ld(&f.json_ld(), f.product_id(), BASE_URL).unwrap();
         assert_eq!(dom.in_stock, ld.in_stock, "{}", f.slug());
         assert!(dom.in_stock.is_some(), "{}", f.slug());
@@ -153,7 +153,7 @@ fn an_out_of_stock_sibling_variant_does_not_condemn_the_page() {
     let html = B_COMPLEX.html();
     assert!(html.contains(r#"data-is-out-of-stock="True""#));
 
-    let product = parse_from_html(html, "108255", BASE_URL, "USD").unwrap();
+    let product = parse_from_html(html, "108255", BASE_URL).unwrap();
     assert_eq!(product.in_stock, Some(true));
 }
 
@@ -198,7 +198,7 @@ fn variant_scoping_survives_a_page_with_no_stock_status_heading() {
          would accidentally be right"
     );
 
-    let product = parse_from_html(&html, "108255", BASE_URL, "USD").unwrap();
+    let product = parse_from_html(&html, "108255", BASE_URL).unwrap();
     assert_eq!(
         product.in_stock,
         Some(true),
@@ -213,21 +213,42 @@ fn variant_scoping_survives_a_page_with_no_stock_status_heading() {
 #[test]
 fn a_page_with_no_stock_signal_answers_unknown() {
     let bare = r#"<html><body><h1 id="name">Some Product</h1></body></html>"#;
-    let product = parse_from_html(bare, "1", BASE_URL, "USD").unwrap();
+    let product = parse_from_html(bare, "1", BASE_URL).unwrap();
     assert_eq!(product.in_stock, None);
 }
 
-/// CHARACTERIZATION, NOT DESIRED: pins #5 from the parser side. The `currency`
-/// argument is a label of last resort, never a request parameter: the captured
-/// US pages carry `USD` and it wins, so `--currency CHF` silently produces USD
-/// prices labelled USD. The danger case is the opposite one — see
-/// `helpers::currency_detection_falls_through_on_a_page_with_no_markers`.
+/// FLIPPED BY #5. This was the characterization from the parser side: the
+/// function took a `currency` argument, the captured US pages carried `USD` and
+/// beat it, and a page carrying no marker got the argument stamped on instead —
+/// so `--currency CHF` against the US storefront produced either USD prices
+/// labelled USD or USD prices labelled CHF, depending only on whether detection
+/// happened to work.
+///
+/// There is no argument to ignore any more. The DOM path reports the currency
+/// the page published, and reports nothing when the page published nothing.
 #[test]
-fn dom_fallback_ignores_the_requested_currency() {
+fn the_dom_path_reports_the_currency_the_page_published() {
     for f in fixture::products() {
-        let product = parse_from_html(f.html(), f.product_id(), BASE_URL, "CHF").unwrap();
-        assert_eq!(product.currency, "USD", "{}", f.slug());
+        let product = parse_from_html(f.html(), f.product_id(), BASE_URL).unwrap();
+        assert_eq!(product.currency.as_deref(), Some("USD"), "{}", f.slug());
+        assert_eq!(product.source_of("currency"), Source::Dom, "{}", f.slug());
     }
+
+    // A product page with no currency marker anywhere. Before #5 this record
+    // carried a currency; now it carries the absence of one, and says so.
+    let unmarked = parse_from_html(
+        r#"<html><body><h1 id="name">Some Product</h1>
+           <span class="price"><bdi>9.60</bdi></span></body></html>"#,
+        "1",
+        BASE_URL,
+    )
+    .unwrap();
+    assert_eq!(unmarked.currency, None);
+    assert_eq!(unmarked.source_of("currency"), Source::Absent);
+    assert!(
+        unmarked.health().degraded,
+        "a price with no currency is not extraction succeeding"
+    );
 }
 
 /// Two rejections that used to be the same one (#28).
@@ -239,13 +260,8 @@ fn dom_fallback_ignores_the_requested_currency() {
 /// id, which is the misclassification the whole issue is about.
 #[test]
 fn a_page_that_will_not_parse_is_not_a_missing_product() {
-    let err = parse_from_html(
-        "<html><body><p>nothing</p></body></html>",
-        "1",
-        BASE_URL,
-        "USD",
-    )
-    .expect_err("a page with no h1 is not a product page");
+    let err = parse_from_html("<html><body><p>nothing</p></body></html>", "1", BASE_URL)
+        .expect_err("a page with no h1 is not a product page");
     assert!(
         matches!(err, IherbError::ParseFailed(ref id) if id == "1"),
         "expected ParseFailed, got {:?}",
@@ -253,7 +269,7 @@ fn a_page_that_will_not_parse_is_not_a_missing_product() {
     );
     assert!(err.to_string().contains('1'));
 
-    let err = parse_from_html("<html><title>404</title>", "42", BASE_URL, "USD")
+    let err = parse_from_html("<html><title>404</title>", "42", BASE_URL)
         .expect_err("a 404 page is not a product page");
     assert!(
         matches!(err, IherbError::ProductNotFound(ref id) if id == "42"),
@@ -708,10 +724,7 @@ fn a_malformed_histogram_degrades_the_record() {
     let health = product.health();
 
     assert_eq!(product.review_distribution, None, "nothing may be invented");
-    assert_eq!(
-        product.source_of("review_distribution"),
-        iherb_cli::model::Source::Malformed
-    );
+    assert_eq!(product.source_of("review_distribution"), Source::Malformed);
     assert!(health
         .fields_malformed
         .contains(&"review_distribution".to_string()));

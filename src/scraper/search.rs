@@ -165,35 +165,36 @@ pub async fn extract_search(
     html: &str,
     query: &str,
     base_url: &str,
-    currency: &str,
 ) -> Result<SearchResult, IherbError> {
     debug_dump_html(html, &format!("search_{}", query.replace(' ', "_")));
 
     tracing::info!("Extracting search results from DOM");
-    parse_search_from_html(html, query, base_url, currency)
+    parse_search_from_html(html, query, base_url)
 }
 
 /// Parse search results from HTML using data attributes and CSS selectors.
+///
+/// There is no `currency` argument any more (#5). There used to be, and it was
+/// the `--currency` label: a page that published no currency marker had the
+/// caller's label stamped onto every card. #49 stopped provenance vouching for
+/// that; this stops the substitution. What a card carries now is what the page
+/// said, or nothing.
 pub fn parse_search_from_html(
     html: &str,
     query: &str,
     base_url: &str,
-    currency: &str,
 ) -> Result<SearchResult, IherbError> {
     let doc = Html::parse_document(html);
     let total_results = extract_total_results(&doc);
 
-    // The page's own currency marker, or `None` when it publishes none. The
-    // `--currency` label is substituted below, and the substitution is recorded
-    // rather than hidden: asserting the configured currency as if it had been
-    // read off the page is what #49 was filed about. Making the label *right*
-    // is #5 and is a different question from not vouching for it.
+    // The page's own currency marker, or `None` when it publishes none. iHerb
+    // publishes one marker for the whole results page, so this is read once and
+    // every card gets the same answer — including when the answer is "none".
     let read_currency = detect_currency_from_html(&doc);
     let currency_source = match read_currency {
         Some(_) => Source::Dom,
-        None => Source::Defaulted,
+        None => Source::Absent,
     };
-    let detected_currency = read_currency.unwrap_or_else(|| currency.to_string());
 
     let mut cards_parsed = 0usize;
     let mut products = Vec::new();
@@ -210,7 +211,7 @@ pub fn parse_search_from_html(
                 parse_product_card(
                     card,
                     &link_sel,
-                    &detected_currency,
+                    read_currency.as_deref(),
                     currency_source,
                     base_url,
                 )
@@ -247,15 +248,16 @@ pub fn parse_search_from_html(
 /// Read one card into a [`ProductSummary`], recording where each value came
 /// from.
 ///
-/// `currency_source` is the page's answer, not the card's: iHerb publishes one
-/// currency marker for the whole results page, so every card either got a
-/// currency that was read or the same label nobody read. Passing it in is what
-/// stops [`ProductSummary::claim_unattributed`] attributing a substituted label
-/// to the DOM, which is #49's first fabrication.
+/// `currency` and `currency_source` are the page's answer, not the card's:
+/// iHerb publishes one currency marker for the whole results page, so every
+/// card either gets a currency that was read or no currency at all. They travel
+/// together because [`ProductSummary::claim_unattributed`] would otherwise
+/// attribute the value to the DOM whatever its origin, which is #49's first
+/// fabrication.
 fn parse_product_card(
     card_el: &scraper::ElementRef,
     link_sel: &Selector,
-    currency: &str,
+    currency: Option<&str>,
     currency_source: Source,
     base_url: &str,
 ) -> Option<ProductSummary> {
@@ -331,7 +333,7 @@ fn parse_product_card(
         brand,
         price,
         original_price,
-        currency: currency.to_string(),
+        currency: currency.map(str::to_string),
         rating,
         review_count,
         product_url: product_url.clone(),
@@ -344,8 +346,11 @@ fn parse_product_card(
     // filled above therefore came from the DOM...
     summary.claim_unattributed(Source::Dom);
 
-    // ...except the two values that did not, which `claim_unattributed` would
-    // otherwise attribute to it because they are non-empty.
+    // ...except the two values that did not. `currency` is reclaimed even when
+    // the page published one, because `currency_source` is the page-level
+    // answer and this is the one place that knows it; a card whose currency is
+    // `None` would otherwise go unclaimed and read as `Absent` by accident
+    // rather than on purpose.
     summary.extraction.reclaim("currency", currency_source);
     if read_product_url.is_none() {
         summary.extraction.reclaim("product_url", Source::Defaulted);

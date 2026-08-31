@@ -112,7 +112,7 @@ fn an_unknown_field_is_absent() {
 /// path does.
 #[test]
 fn the_dom_strategy_records_itself_and_enriches() {
-    let product = parse_from_html(ULTIMATE_OMEGA.html(), "12949", BASE_URL, "USD").unwrap();
+    let product = parse_from_html(ULTIMATE_OMEGA.html(), "12949", BASE_URL).unwrap();
 
     assert_eq!(product.extraction.strategy, Strategy::Dom);
     assert!(
@@ -136,7 +136,7 @@ fn the_dom_strategy_records_itself_and_enriches() {
 #[test]
 fn every_strategy_produces_the_same_field_coverage() {
     for f in fixture::products() {
-        let dom = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD").unwrap();
+        let dom = parse_from_html(f.html(), f.product_id(), BASE_URL).unwrap();
         let json_ld = as_production_would(f);
 
         let dom_has: Vec<&str> = dom
@@ -205,7 +205,7 @@ fn degraded_distinguishes_rotted_selectors_from_a_sparse_page() {
         "a page that genuinely has no ingredients is sparse, not broken"
     );
 
-    let via_dom = parse_from_html(OLLY_GUMMIES.html(), "119174", BASE_URL, "USD")
+    let via_dom = parse_from_html(OLLY_GUMMIES.html(), "119174", BASE_URL)
         .unwrap()
         .health();
     assert_eq!(via_dom.sources["product_code"], Source::Dom);
@@ -217,7 +217,7 @@ fn degraded_distinguishes_rotted_selectors_from_a_sparse_page() {
     let renamed = OLLY_GUMMIES
         .html()
         .replace("product-specs-list", "product-specs-listicle");
-    let rotted = parse_from_html(&renamed, "119174", BASE_URL, "USD")
+    let rotted = parse_from_html(&renamed, "119174", BASE_URL)
         .unwrap()
         .health();
     assert_eq!(rotted.sources["product_code"], Source::Absent);
@@ -270,7 +270,7 @@ fn a_hand_built_record_is_unrecorded() {
         brand: String::new(),
         price: 1.0,
         original_price: None,
-        currency: "USD".to_string(),
+        currency: Some("USD".to_string()),
         rating: None,
         review_count: None,
         product_url: String::new(),
@@ -374,7 +374,10 @@ fn health_serializes_to_the_block_issue_9_renders() {
 /// could never contribute to `degraded` however thoroughly the currency
 /// selectors rotted.
 ///
-/// Fixing the *value* is #5 and not done here. This is about not lying about it.
+/// #49 stopped provenance lying about the value; #5 removed the value. Offers
+/// with no `priceCurrency` used to become a hardcoded `"USD"` recorded as
+/// [`Source::Defaulted`]; they now become no currency at all, recorded as
+/// [`Source::Absent`]. Both are unattested, which is what this test is for.
 #[test]
 fn an_undetected_currency_is_not_attributed_to_a_strategy() {
     // JSON-LD with a price but no `priceCurrency` anywhere.
@@ -385,18 +388,22 @@ fn an_undetected_currency_is_not_attributed_to_a_strategy() {
     });
     let product = parse_from_json_ld(&no_currency, "1", BASE_URL).unwrap();
 
-    // The value is unchanged — that is #5's to fix, not this test's.
-    assert_eq!(product.currency, "USD");
-    // What changed: provenance no longer claims JSON-LD supplied it.
-    assert_eq!(product.source_of("currency"), Source::Defaulted);
+    // There is no `"USD"` to inherit any more: `9.60` of nothing named.
+    assert_eq!(product.currency, None);
+    assert_eq!(product.source_of("currency"), Source::Absent);
     assert!(!product.source_of("currency").is_attested());
 }
 
-/// The rot-detector can now fire. This is the whole point of the change: a
-/// field that is only ever a default cannot make `degraded` true, so its slot
-/// in `EXPECTED_FIELDS` is dead weight.
+/// The rot-detector fires on a field that was not read, whether it is absent or
+/// merely defaulted. Either way its slot in `EXPECTED_FIELDS` has to be able to
+/// make `degraded` true, or the slot is dead weight.
+///
+/// The parser now reaches the absent half: offers with no `priceCurrency`
+/// produce no currency. Before #5 the same offers produced a hardcoded `"USD"`
+/// and reached the defaulted half, which is asserted below on a record built by
+/// hand, since nothing produces a defaulted expected field any more.
 #[test]
-fn a_defaulted_expected_field_makes_the_record_degraded() {
+fn an_unread_expected_field_makes_the_record_degraded() {
     assert!(
         ProductDetail::EXPECTED_FIELDS.contains(&"currency"),
         "this test is about currency's slot in the expected set"
@@ -410,16 +417,25 @@ fn a_defaulted_expected_field_makes_the_record_degraded() {
         "gtin12": "000000000001",
         "offers": { "price": "9.60", "availability": "https://schema.org/InStock" },
     });
-    let health = parse_from_json_ld(&no_currency, "1", BASE_URL)
-        .unwrap()
-        .health();
+    let mut product = parse_from_json_ld(&no_currency, "1", BASE_URL).unwrap();
+    let health = product.health();
 
     // Everything else in the expected set was read.
     assert!(health.fields_absent.is_empty() || !health.fields_absent.contains(&"name".to_string()));
-    assert!(health.fields_defaulted.contains(&"currency".to_string()));
+    assert!(health.fields_absent.contains(&"currency".to_string()));
     assert!(
         health.degraded,
         "a currency nobody read is exactly the 'our selectors rotted' signal"
+    );
+
+    // The same record with a value nobody read, rather than no value at all.
+    product.currency = Some("USD".to_string());
+    product.extraction.reclaim("currency", Source::Defaulted);
+    let defaulted = product.health();
+    assert!(defaulted.fields_defaulted.contains(&"currency".to_string()));
+    assert!(
+        defaulted.degraded,
+        "a value nobody read must degrade the record exactly as a missing one does"
     );
 
     // And the same page with a currency is not degraded, so `degraded` is
@@ -473,7 +489,7 @@ fn every_captured_page_publishes_a_currency() {
             f.slug()
         );
 
-        let via_dom = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD").unwrap();
+        let via_dom = parse_from_html(f.html(), f.product_id(), BASE_URL).unwrap();
         assert_eq!(
             via_dom.source_of("currency"),
             Source::Dom,
@@ -483,19 +499,24 @@ fn every_captured_page_publishes_a_currency() {
     }
 }
 
-/// The JS-globals blob carries no currency at all, so that path's currency is
-/// always the caller's `--currency` label. Attributing it to the strategy would
-/// mean provenance vouching for a value that came from the command line.
+/// The JS-globals blob carries no currency at all, so that path produces no
+/// currency at all.
+///
+/// It used to produce the caller's `--currency` label, which #49 recorded as
+/// [`Source::Defaulted`] rather than attributing to the strategy. #5 went the
+/// rest of the way: a label from the command line is not a reading of the page,
+/// so there is nothing to record. The record is still degraded — the blob
+/// answering nothing about currency is exactly what `EXPECTED_FIELDS` is for.
 #[test]
-fn the_js_globals_currency_is_always_the_callers_label() {
+fn the_js_globals_path_produces_no_currency() {
     let globals = fixture::json("js-globals-12949");
-    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "CHF").unwrap();
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL).unwrap();
 
-    assert_eq!(product.currency, "CHF");
-    assert_eq!(product.source_of("currency"), Source::Defaulted);
+    assert_eq!(product.currency, None);
+    assert_eq!(product.source_of("currency"), Source::Absent);
     assert!(
         product.health().degraded,
-        "a currency taken from the command line is not extraction succeeding"
+        "a record with no currency is not extraction succeeding"
     );
 
     // The fields the blob really does carry are still attributed to it.
@@ -521,7 +542,7 @@ fn product_url_is_never_read_from_a_page() {
             format!("{}/pr/p/{}", BASE_URL, f.product_id())
         );
 
-        let via_dom = parse_from_html(f.html(), f.product_id(), BASE_URL, "USD").unwrap();
+        let via_dom = parse_from_html(f.html(), f.product_id(), BASE_URL).unwrap();
         assert_eq!(
             via_dom.source_of("product_url"),
             Source::Defaulted,

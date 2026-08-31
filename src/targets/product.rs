@@ -9,12 +9,14 @@ use crate::error::IherbError;
 use crate::fetch::{FetchTarget, Paging};
 use crate::model::{ProductDetail, Source};
 use crate::scraper;
+use crate::targets::check_currency;
 
 pub struct ProductTarget {
     product_id: String,
     country: String,
     base_url: String,
-    currency: String,
+    /// What `--currency` requires the storefront to price in, or `None`.
+    expected_currency: Option<String>,
 }
 
 impl ProductTarget {
@@ -24,7 +26,7 @@ impl ProductTarget {
             product_id: parse_product_identifier(id_or_url)?,
             country: config.country.clone(),
             base_url: config.base_url(),
-            currency: config.currency.clone(),
+            expected_currency: config.currency.clone(),
         })
     }
 
@@ -48,6 +50,25 @@ impl FetchTarget for ProductTarget {
         format!("{}/pr/item/{}", self.base_url, self.product_id)
     }
 
+    /// A cached record whose currency is not the one `--currency` requires does
+    /// not answer this request.
+    ///
+    /// Answering `false` refetches, and the refetch will come back with the
+    /// same currency and fail [`FetchTarget::validate`] — so the cost of a
+    /// mismatch is one wasted navigation before a clear error, rather than a
+    /// stored record being served past the check. Serving it is the #1-class
+    /// bug this issue is a sibling of, so the wasted fetch is the cheaper
+    /// mistake. Checking the entry at the cache read instead would need
+    /// `fetch::cached`, which does not run `validate`.
+    fn cache_is_sufficient(&self, cached: &Self::Output) -> bool {
+        check_currency(
+            self.expected_currency.as_deref(),
+            cached.currency.as_deref(),
+            "the cached record",
+        )
+        .is_ok()
+    }
+
     fn navigation_context(&self) -> String {
         "Failed to navigate to product page".to_string()
     }
@@ -64,15 +85,10 @@ impl FetchTarget for ProductTarget {
             return Err(IherbError::ProductNotFound(self.product_id.clone()).into());
         }
 
-        let product = scraper::product::extract_product(
-            page,
-            html,
-            &self.product_id,
-            &self.base_url,
-            &self.currency,
-        )
-        .await
-        .context("Failed to extract product data")?;
+        let product =
+            scraper::product::extract_product(page, html, &self.product_id, &self.base_url)
+                .await
+                .context("Failed to extract product data")?;
 
         *acc = Some(product);
         Ok(Paging::Done)
@@ -101,6 +117,10 @@ impl FetchTarget for ProductTarget {
     ///
     /// `product_not_found` is now reserved for a page that actually says the
     /// product is gone, and is raised in `extract` rather than here.
+    ///
+    /// This is also where `--currency` is enforced (#5): the storefront either
+    /// priced in what was asked for or it did not, and the record has to be
+    /// read before that can be known.
     fn validate(&self, product: &Self::Output) -> Result<()> {
         let missing: Vec<&str> = ["name", "price"]
             .into_iter()
@@ -115,6 +135,12 @@ impl FetchTarget for ProductTarget {
             );
             return Err(IherbError::ParseFailed(self.product_id.clone()).into());
         }
+
+        check_currency(
+            self.expected_currency.as_deref(),
+            product.currency.as_deref(),
+            &format!("product {}", self.product_id),
+        )?;
 
         // A record that parsed but is missing something every product page
         // publishes is usable and suspect at the same time. It is not an error;
