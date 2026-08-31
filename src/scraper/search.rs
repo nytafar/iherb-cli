@@ -207,9 +207,9 @@ pub fn parse_search_from_html(
         let cards: Vec<_> = doc.select(&card_sel).collect();
         tracing::debug!("Found {} product-cell-container cards", cards.len());
         products.extend(
-            cards
-                .iter()
-                .filter_map(|card| parse_product_card(card, &link_sel, &detected_currency, base_url)),
+            cards.iter().filter_map(|card| {
+                parse_product_card(card, &link_sel, &detected_currency, base_url)
+            }),
         );
     }
 
@@ -275,8 +275,8 @@ fn parse_product_card(
 
     let rating = extract_card_rating(card_el);
 
-    let review_count = extract_element_text(card_el, "a.rating-count span")
-        .and_then(|s| parse_review_count(&s));
+    let review_count =
+        extract_element_text(card_el, "a.rating-count span").and_then(|s| parse_review_count(&s));
 
     let in_stock = extract_card_stock_status(card_el, link_attrs);
 
@@ -391,4 +391,3 @@ fn extract_total_results(doc: &Html) -> Option<u32> {
 
     None
 }
-

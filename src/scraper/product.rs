@@ -71,20 +71,22 @@ fn extract_prices_from_offers(offers: Option<&serde_json::Value>) -> (f64, Optio
     };
 
     // Try top-level offers.price
-    let top_price = offers
-        .get("price")
-        .and_then(|v| {
-            v.as_str()
-                .and_then(|s| s.parse::<f64>().ok())
-                .or_else(|| v.as_f64())
-        });
+    let top_price = offers.get("price").and_then(|v| {
+        v.as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| v.as_f64())
+    });
     let top_currency = offers
         .get("priceCurrency")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
     if let Some(price) = top_price {
-        return (price, None, top_currency.unwrap_or_else(|| "USD".to_string()));
+        return (
+            price,
+            None,
+            top_currency.unwrap_or_else(|| "USD".to_string()),
+        );
     }
 
     // Fall back to priceSpecification array
@@ -94,13 +96,11 @@ fn extract_prices_from_offers(offers: Option<&serde_json::Value>) -> (f64, Optio
         let mut currency = None;
 
         for spec in specs {
-            let spec_price = spec
-                .get("price")
-                .and_then(|v| {
-                    v.as_str()
-                        .and_then(|s| s.parse::<f64>().ok())
-                        .or_else(|| v.as_f64())
-                });
+            let spec_price = spec.get("price").and_then(|v| {
+                v.as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .or_else(|| v.as_f64())
+            });
             let spec_currency = spec
                 .get("priceCurrency")
                 .and_then(|v| v.as_str())
@@ -336,10 +336,7 @@ fn enrich_pricing(doc: &Html, product: &mut ProductDetail) {
         Some(el) => el,
         None => return,
     };
-    let list_price = el
-        .value()
-        .attr("data-list-price")
-        .and_then(parse_price_str);
+    let list_price = el.value().attr("data-list-price").and_then(parse_price_str);
     let disc_price = el
         .value()
         .attr("data-discount-price")
@@ -607,8 +604,8 @@ pub fn parse_from_html(
         return Err(IherbError::ProductNotFound(product_id.to_string()));
     }
 
-    let name = extract_text(&doc, "h1#name, h1[data-testid='product-name'], h1")
-        .unwrap_or_default();
+    let name =
+        extract_text(&doc, "h1#name, h1[data-testid='product-name'], h1").unwrap_or_default();
 
     // If we couldn't extract a meaningful product name, this is not a valid product page
     if name.is_empty() || name == "Unknown Product" {
@@ -652,8 +649,7 @@ pub fn parse_from_html(
     let review_distribution = parse_review_distribution_html(&doc);
 
     // Detect actual currency from the page, falling back to config currency
-    let detected_currency =
-        detect_currency_from_html(&doc).unwrap_or_else(|| currency.to_string());
+    let detected_currency = detect_currency_from_html(&doc).unwrap_or_else(|| currency.to_string());
 
     let product_url = format!("{}/pr/p/{}", base_url, product_id);
 

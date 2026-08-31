@@ -1,5 +1,5 @@
 use crate::error::IherbError;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Resolves the Chrome binary path. Priority:
 /// 1. User-configured path (from config)
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 /// 4. Auto-download Chrome for Testing
 pub async fn resolve_chrome(
     user_path: Option<&PathBuf>,
-    data_dir: &PathBuf,
+    data_dir: &Path,
 ) -> Result<PathBuf, IherbError> {
     // 1. User-configured path
     if let Some(path) = user_path {
@@ -91,7 +91,7 @@ fn detect_system_chrome() -> Option<PathBuf> {
     None
 }
 
-pub fn downloaded_chrome_path(data_dir: &PathBuf) -> PathBuf {
+pub fn downloaded_chrome_path(data_dir: &Path) -> PathBuf {
     let chrome_dir = data_dir.join("chrome");
     if cfg!(target_os = "macos") {
         chrome_dir

@@ -102,7 +102,10 @@ async fn cmd_search(
         let mut result = hit.data;
         result.products.truncate(limit);
         print!("{}", output::format_search_results(&result));
-        println!("\n- **Data from:** {}", output::format_cached_at(hit.cached_at));
+        println!(
+            "\n- **Data from:** {}",
+            output::format_cached_at(hit.cached_at)
+        );
         return Ok(());
     }
 
@@ -165,7 +168,10 @@ async fn cmd_search(
     result.products.truncate(limit);
 
     print!("{}", output::format_search_results(&result));
-    println!("\n- **Data from:** {}", output::format_cached_at(SystemTime::now()));
+    println!(
+        "\n- **Data from:** {}",
+        output::format_cached_at(SystemTime::now())
+    );
     Ok(())
 }
 
@@ -180,7 +186,10 @@ async fn cmd_product(
 
     if let Some(hit) = cache.get_product::<model::ProductDetail>(&product_id) {
         print!("{}", output::format_product_detail(&hit.data, section));
-        println!("\n- **Data from:** {}", output::format_cached_at(hit.cached_at));
+        println!(
+            "\n- **Data from:** {}",
+            output::format_cached_at(hit.cached_at)
+        );
         return Ok(());
     }
 
@@ -220,7 +229,10 @@ async fn cmd_product(
     }
 
     print!("{}", output::format_product_detail(&product, section));
-    println!("\n- **Data from:** {}", output::format_cached_at(SystemTime::now()));
+    println!(
+        "\n- **Data from:** {}",
+        output::format_cached_at(SystemTime::now())
+    );
     Ok(())
 }
 

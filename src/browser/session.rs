@@ -74,11 +74,11 @@ impl BrowserSession {
 
         let browser_config = builder
             .build()
-            .map_err(|e| IherbError::BrowserLaunch(format!("{}", e)))?;
+            .map_err(|e| IherbError::BrowserLaunch(e.to_string()))?;
 
         let (browser, mut handler) = Browser::launch(browser_config)
             .await
-            .map_err(|e| IherbError::BrowserLaunch(format!("{}", e)))?;
+            .map_err(|e| IherbError::BrowserLaunch(e.to_string()))?;
 
         let handle = tokio::spawn(async move {
             while let Some(event) = handler.next().await {

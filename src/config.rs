@@ -1,6 +1,6 @@
 use crate::error::IherbError;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -85,14 +85,10 @@ impl AppConfig {
 
     pub fn validate_country(country: &str) -> Result<(), IherbError> {
         const KNOWN_COUNTRIES: &[&str] = &[
-            "us", "ca", "au", "nz", "sg", "hk", "tw", "kr", "jp",
-            "sa", "ae", "kw", "il",
-            "de", "fr", "es", "it", "nl", "be", "at", "ch",
-            "se", "no", "dk", "fi", "pl", "cz", "ie", "pt", "gr",
-            "ru", "tr", "in", "th", "my", "ph", "id", "vn",
-            "br", "mx", "cl", "co", "ar",
-            "za", "eg", "ng", "ke",
-            "cn",
+            "us", "ca", "au", "nz", "sg", "hk", "tw", "kr", "jp", "sa", "ae", "kw", "il", "de",
+            "fr", "es", "it", "nl", "be", "at", "ch", "se", "no", "dk", "fi", "pl", "cz", "ie",
+            "pt", "gr", "ru", "tr", "in", "th", "my", "ph", "id", "vn", "br", "mx", "cl", "co",
+            "ar", "za", "eg", "ng", "ke", "cn",
         ];
         if !KNOWN_COUNTRIES.contains(&country) {
             return Err(IherbError::Navigation(format!(
@@ -112,7 +108,7 @@ impl AppConfig {
     }
 }
 
-fn load_config_file(config_dir: &PathBuf) -> ConfigFile {
+fn load_config_file(config_dir: &Path) -> ConfigFile {
     let config_path = config_dir.join("config.toml");
     if config_path.exists() {
         match std::fs::read_to_string(&config_path) {

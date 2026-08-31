@@ -1,11 +1,11 @@
 use crate::error::IherbError;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const CHROME_VERSIONS_URL: &str =
     "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 
-pub async fn download_chrome(data_dir: &PathBuf) -> Result<PathBuf, IherbError> {
+pub async fn download_chrome(data_dir: &Path) -> Result<PathBuf, IherbError> {
     let chrome_dir = data_dir.join("chrome");
     std::fs::create_dir_all(&chrome_dir)
         .map_err(|e| IherbError::ChromeDownload(format!("Failed to create dir: {}", e)))?;
@@ -96,7 +96,7 @@ fn get_platform() -> &'static str {
     }
 }
 
-fn extract_zip(data: &[u8], dest: &PathBuf) -> Result<(), IherbError> {
+fn extract_zip(data: &[u8], dest: &Path) -> Result<(), IherbError> {
     let cursor = std::io::Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|e| IherbError::ChromeDownload(format!("Failed to open zip: {}", e)))?;
@@ -120,7 +120,7 @@ fn extract_zip(data: &[u8], dest: &PathBuf) -> Result<(), IherbError> {
         let out_path = dest.join(stripped);
 
         // Protect against zip path traversal
-        if !out_path.starts_with(&dest) {
+        if !out_path.starts_with(dest) {
             tracing::warn!("Skipping zip entry with path traversal: {}", name);
             continue;
         }
