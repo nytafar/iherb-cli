@@ -7,7 +7,7 @@ iHerb has no official API. This CLI uses a headless browser to load pages (bypas
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SeverinAlexB/iherb-cli/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nytafar/iherb-cli/master/install.sh | bash
 ```
 
 This downloads the latest release binary for your platform and installs it to `/usr/local/bin`. Run the same command again to update.
@@ -17,7 +17,7 @@ This downloads the latest release binary for your platform and installs it to `/
 Requires [Rust](https://www.rust-lang.org/tools/install) (1.70+).
 
 ```bash
-git clone https://github.com/SeverinAlexB/iherb-cli.git
+git clone https://github.com/nytafar/iherb-cli.git
 cd iherb-cli
 cargo build --release
 ```
@@ -245,7 +245,7 @@ This repo includes a [Claude Code skill](https://code.claude.com/docs/en/skills)
 ### Install the skill
 
 ```bash
-/install-plugin iherb-agent@SeverinAlexB/iherb-cli
+/install-plugin iherb-agent@nytafar/iherb-cli
 ```
 
 ### What the agent can do

@@ -1,7 +1,7 @@
 {
   "name": "iherb-cli-skills",
   "owner": {
-    "name": "SeverinAlexB"
+    "name": "nytafar"
   },
   "metadata": {
     "description": "Skills for querying supplement and health product data from iHerb",

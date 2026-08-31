@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="SeverinAlexB/iherb-cli"
+REPO="nytafar/iherb-cli"
 BINARY="iherb-cli"
 INSTALL_DIR="/usr/local/bin"
 

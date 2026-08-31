@@ -3,6 +3,7 @@ name = "iherb-cli"
 version = "0.1.1"
 edition = "2021"
 description = "CLI tool for querying iHerb product data"
+repository = "https://github.com/nytafar/iherb-cli"
 
 [lib]
 name = "iherb_cli"
