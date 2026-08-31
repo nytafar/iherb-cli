@@ -1156,6 +1156,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "dirs",
+ "flate2",
  "futures",
  "hex",
  "libc",

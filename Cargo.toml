@@ -53,5 +53,9 @@ regex = "1"
 # Ctrl+C handling
 ctrlc = { version = "3", features = ["termination"] }
 
+[dev-dependencies]
+# Fixtures under tests/fixtures/ are stored gzipped; the loader inflates them.
+flate2 = "1"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

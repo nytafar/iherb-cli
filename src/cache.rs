@@ -23,8 +23,9 @@ pub enum CacheKey {
 
 impl CacheKey {
     /// The cache file name. The derivation is fixed: changing it orphans every
-    /// entry users already have on disk.
-    fn file_name(&self) -> String {
+    /// entry users already have on disk, which is why #8 pins it from `tests/`
+    /// and #1 will have to version the prefix rather than edit it in place.
+    pub fn file_name(&self) -> String {
         match self {
             CacheKey::Product { product_id } => format!("product_{}.json", product_id),
             CacheKey::Search {
