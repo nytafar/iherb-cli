@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use chromiumoxide::Page;
+use std::collections::HashSet;
 
 use crate::cache::CacheKey;
 use crate::cli::SortOrder;
@@ -27,6 +28,26 @@ pub struct SearchTarget {
 pub struct SearchPages {
     products: Vec<ProductSummary>,
     total_results: Option<u32>,
+    /// The product ids already gathered, so a product promoted onto one page
+    /// and listed again on the next is one product (#33). Deduplicating each
+    /// page in isolation would not catch that.
+    seen: HashSet<String>,
+    /// Result pages walked so far.
+    pages_fetched: usize,
+    /// Whether a page came back with no products, i.e. iHerb ran out.
+    exhausted: bool,
+}
+
+impl SearchPages {
+    /// How many distinct products have been gathered.
+    pub fn gathered(&self) -> usize {
+        self.products.len()
+    }
+
+    /// Result pages walked so far.
+    pub fn pages_fetched(&self) -> usize {
+        self.pages_fetched
+    }
 }
 
 impl SearchTarget {
@@ -66,6 +87,34 @@ impl SearchTarget {
 
     pub fn limit(&self) -> usize {
         self.limit
+    }
+
+    /// Fold one parsed result page into what has been gathered, and say whether
+    /// to ask for another.
+    ///
+    /// Split out of [`FetchTarget::extract`] so the paging rules — cross-page
+    /// deduplication (#33) and how a walk ends (#6) — can be exercised without
+    /// a browser. `extract` is this plus the parse.
+    pub fn absorb(&self, page_result: SearchResult, acc: &mut SearchPages) -> Paging {
+        acc.pages_fetched += 1;
+
+        // A page with no cards is iHerb saying there is nothing after this,
+        // which is the one signal that distinguishes "we have them all" from
+        // "we stopped early". #6 depends on the difference.
+        if page_result.products.is_empty() {
+            acc.exhausted = true;
+            return Paging::Done;
+        }
+
+        if acc.total_results.is_none() {
+            acc.total_results = page_result.total_results;
+        }
+        acc.products.extend(scraper::search::retain_first_seen(
+            page_result.products,
+            &mut acc.seen,
+        ));
+
+        Paging::More
     }
 }
 
@@ -119,16 +168,7 @@ impl FetchTarget for SearchTarget {
         .await
         .context("Failed to extract search results")?;
 
-        if page_result.products.is_empty() {
-            return Ok(Paging::Done);
-        }
-
-        if acc.total_results.is_none() {
-            acc.total_results = page_result.total_results;
-        }
-        acc.products.extend(page_result.products);
-
-        Ok(Paging::More)
+        Ok(self.absorb(page_result, acc))
     }
 
     /// Assemble the *full* result set. Truncation to `limit` is the caller's

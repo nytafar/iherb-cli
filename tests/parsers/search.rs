@@ -8,10 +8,11 @@
 use std::collections::BTreeMap;
 
 use iherb_cli::cli::SortOrder;
-use iherb_cli::fetch::FetchTarget;
+use iherb_cli::fetch::{FetchTarget, Paging};
 use iherb_cli::scraper::search::{
     build_search_url, pages_needed, parse_search_from_html, CategoryId, CATEGORY_ALIASES,
 };
+use iherb_cli::targets::search::SearchPages;
 use iherb_cli::targets::SearchTarget;
 use scraper::Selector;
 
@@ -27,8 +28,10 @@ fn search_page_yields_a_full_page_of_products() {
         .expect("the search page must parse");
 
     assert_eq!(result.query, "vitamin c");
-    // One result page is 48 cards; the header says "1 - 48 of 11,952 results".
-    assert_eq!(result.products.len(), 48);
+    // One result page is 48 cards and the header says "1 - 48 of 11,952
+    // results", but three of those cards repeat a product placed earlier in the
+    // grid, so the page is 45 products (#33).
+    assert_eq!(result.products.len(), 45);
     assert_eq!(result.total_results, Some(11_952));
 
     for product in &result.products {
@@ -69,17 +72,13 @@ fn search_cards_carry_brand_rating_and_discount() {
     assert_eq!(discounted.original_price, Some(15.42));
 }
 
-/// CHARACTERIZATION, NOT DESIRED: pins #33. One page of 48 cards contains only 45
-/// distinct products. Three of them are placed twice — sponsored slots repeated
-/// in the grid — and the parser returns each card as its own result, so a
-/// `--limit 48` search hands the caller three duplicates and three fewer
-/// products than it thinks. An agent ranking these counts the same product
-/// twice.
-///
-/// Adjacent to #6's "fewer results than you asked for", but a separate defect.
-/// #33 flips this to `seen.len() == result.products.len()`.
+/// #33, landed. One page of 48 cards contains only 45 distinct products: three
+/// of them are placed twice — promoted slots repeated in the grid — and the
+/// parser used to return each card as its own result, so a `--limit 48` search
+/// handed the caller three duplicates and three fewer products than it thought.
+/// An agent ranking these counted the same product twice.
 #[test]
-fn search_cards_repeat_the_same_product() {
+fn a_product_placed_twice_is_returned_once() {
     let result =
         parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD").unwrap();
 
@@ -93,9 +92,98 @@ fn search_cards_repeat_the_same_product() {
         .map(|(id, &n)| (*id, n))
         .collect();
 
-    assert_eq!(repeated, vec![("102616", 2), ("82188", 2), ("82189", 2)]);
+    assert!(repeated.is_empty(), "still repeated: {:?}", repeated);
     assert_eq!(seen.len(), 45);
-    assert_eq!(result.products.len(), 48);
+    assert_eq!(result.products.len(), 45);
+
+    // The three that used to repeat are each present exactly once, by name, so
+    // a dedup that quietly dropped them entirely would fail here too.
+    for id in ["102616", "82188", "82189"] {
+        assert_eq!(
+            seen.get(id),
+            Some(&1),
+            "{} appears {:?} times",
+            id,
+            seen.get(id)
+        );
+    }
+
+    // The page really does still carry 48 cards; the parser is what changed.
+    let card = Selector::parse("div.product-cell-container").unwrap();
+    assert_eq!(SEARCH_VITAMIN_C.doc().select(&card).count(), 48);
+}
+
+/// The first placement wins, so the order the caller sees is the order iHerb
+/// ranked. Dropping the first copy and keeping a later one would move a product
+/// down the list for no reason a caller could see.
+#[test]
+fn the_first_placement_of_a_repeated_product_is_the_one_kept() {
+    let result =
+        parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD").unwrap();
+
+    let card = Selector::parse("div.product-cell-container").unwrap();
+    let link = Selector::parse("a.absolute-link.product-link, a.product-link").unwrap();
+    let doc = SEARCH_VITAMIN_C.doc();
+    let mut first_seen_order = Vec::new();
+    for el in doc.select(&card) {
+        let Some(id) = el
+            .select(&link)
+            .next()
+            .and_then(|l| l.value().attr("data-product-id"))
+        else {
+            continue;
+        };
+        if !first_seen_order.iter().any(|seen| seen == id) {
+            first_seen_order.push(id.to_string());
+        }
+    }
+
+    let parsed: Vec<_> = result
+        .products
+        .iter()
+        .map(|p| p.product_id.clone())
+        .collect();
+    assert_eq!(parsed, first_seen_order);
+}
+
+/// The other half of #33: a product promoted onto one page and listed again on
+/// the next is one product. Deduplicating each page in isolation cannot see
+/// that, so the accumulator carries the set of ids across pages.
+///
+/// Driven through `SearchTarget::absorb` — the paging rules `extract` applies
+/// to every page production fetches — because the parser only ever sees one
+/// page and so cannot be asked this question at all.
+#[test]
+fn a_product_repeated_across_pages_is_returned_once() {
+    let config = search_config();
+    let target = SearchTarget::new(&config, "vitamin c", 200, SortOrder::Relevance, None).unwrap();
+
+    // The same captured page handed to the target twice: every product on the
+    // second page is one the first already yielded, so it must add none.
+    let mut acc = SearchPages::default();
+    assert_eq!(target.absorb(one_captured_page(), &mut acc), Paging::More);
+    assert_eq!(acc.gathered(), 45);
+    assert_eq!(target.absorb(one_captured_page(), &mut acc), Paging::More);
+    assert_eq!(
+        acc.gathered(),
+        45,
+        "a second page of the same products must add none"
+    );
+
+    let result = target.finish(acc).unwrap();
+    assert_eq!(result.products.len(), 45);
+    let distinct: std::collections::BTreeSet<_> = result
+        .products
+        .iter()
+        .map(|p| p.product_id.as_str())
+        .collect();
+    assert_eq!(distinct.len(), 45);
+}
+
+/// The captured results page, parsed exactly as `extract` parses each page it
+/// navigates to.
+fn one_captured_page() -> iherb_cli::model::SearchResult {
+    parse_search_from_html(SEARCH_VITAMIN_C.html(), "vitamin c", BASE_URL, "USD").unwrap()
 }
 
 /// CHARACTERIZATION, NOT DESIRED: the same #5 shape as the product page. The

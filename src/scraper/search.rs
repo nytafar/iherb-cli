@@ -3,6 +3,7 @@ use crate::error::IherbError;
 use crate::model::{ProductSummary, SearchResult};
 use chromiumoxide::Page;
 use scraper::{Html, Selector};
+use std::collections::HashSet;
 
 use super::helpers::{
     debug_dump_html, detect_currency_from_html, extract_element_text, parse_price_str,
@@ -183,17 +184,27 @@ pub fn parse_search_from_html(
     let total_results = extract_total_results(&doc);
     let detected_currency = detect_currency_from_html(&doc).unwrap_or_else(|| currency.to_string());
 
+    let mut cards_parsed = 0usize;
     let mut products = Vec::new();
+    let mut seen = HashSet::new();
     let card_sel = Selector::parse("div.product-cell-container").ok();
     let link_sel = Selector::parse("a.absolute-link.product-link, a.product-link").ok();
 
     if let (Some(card_sel), Some(link_sel)) = (card_sel, link_sel) {
         let cards: Vec<_> = doc.select(&card_sel).collect();
         tracing::debug!("Found {} product-cell-container cards", cards.len());
-        products.extend(
-            cards.iter().filter_map(|card| {
-                parse_product_card(card, &link_sel, &detected_currency, base_url)
-            }),
+        let parsed: Vec<_> = cards
+            .iter()
+            .filter_map(|card| parse_product_card(card, &link_sel, &detected_currency, base_url))
+            .collect();
+        cards_parsed = parsed.len();
+        products = retain_first_seen(parsed, &mut seen);
+    }
+
+    if cards_parsed > products.len() {
+        tracing::debug!(
+            "Dropped {} repeated cards from the results page",
+            cards_parsed - products.len()
         );
     }
 
@@ -311,6 +322,32 @@ fn extract_card_stock_status(
                 .map(|s| s.to_lowercase() != "true")
         })
         .unwrap_or(true)
+}
+
+/// Keep the first card seen for each product id, dropping the rest (#33).
+///
+/// iHerb places the same product more than once on a results page — promoted
+/// slots repeated in the grid, multi-variant listings — so the captured page's
+/// 48 cards are only 45 products, with `102616`, `82188` and `82189` each
+/// appearing twice. Returning a card per row hands a caller the same product
+/// several times, and an agent ranking or counting them counts it several
+/// times.
+///
+/// `seen` is the caller's, so the same set can span the pages of one search:
+/// a product promoted onto page 1 and listed again on page 2 is one product,
+/// not two, and only a set that outlives a single page can say so.
+///
+/// First seen wins. The cards are equal as products, but the first is the one
+/// in the position iHerb ranked it at, and preserving position is what makes
+/// the order the caller sees the order the site returned.
+pub fn retain_first_seen(
+    products: Vec<ProductSummary>,
+    seen: &mut HashSet<String>,
+) -> Vec<ProductSummary> {
+    products
+        .into_iter()
+        .filter(|p| seen.insert(p.product_id.clone()))
+        .collect()
 }
 
 /// Calculate how many pages needed for the desired limit.
