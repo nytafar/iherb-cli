@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "What `scraper::extract::extract_js_globals` would return for",
+    "product-12949-nordic-ultimate-omega.html.gz. Production reads these by",
+    "evaluating JS in the browser, so they cannot be lifted out of the captured",
+    "HTML by the fixture loader; every value below is transcribed verbatim from",
+    "the `window.PRODUCT_DETAILS` / `window.IHR_DL` script block in that page.",
+    "HTML entities are decoded, matching what the browser would hand back."
+  ],
+  "productDetails": {
+    "id": "12949",
+    "code": "NOR-03790",
+    "availableToPurchase": "True",
+    "brandCode": "NOR",
+    "currentUrl": "/pr/nordic-naturals-ultimate-omega-great-lemon-180-soft-gels-640-mg-per-soft-gel/12949"
+  },
+  "ihrProduct": {
+    "brndNm": "Nordic Naturals",
+    "brndCd": "NOR",
+    "prmryPrntCtgry": "Supplements",
+    "prdctNm": "Nordic Naturals, Ultimate Omega®, Great Lemon, 180 Soft Gels (640 mg per Soft Gel)",
+    "prdctTyp": "",
+    "prtNum": "NOR-03790",
+    "prdctId": "12949",
+    "prc": "$64.56",
+    "strId": 0,
+    "prmWkInd": "",
+    "stckInd": "InStock",
+    "upcCd": 768990037900,
+    "rvwCnt": ""
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "SYNTHETIC, for the same reason as next-data-product-synthetic.json:",
+    "iHerb serves no __NEXT_DATA__, so `parse_search_from_next_data` has no",
+    "captured input. Written to that parser's documented expectations."
+  ],
+  "props": {
+    "pageProps": {
+      "totalResults": 4321,
+      "products": [
+        {
+          "id": 61864,
+          "title": "Synthetic Brand, Vitamin C, 1,000 mg, 60 Veggie Capsules",
+          "brandName": "Synthetic Brand",
+          "price": 5.56,
+          "listPrice": 7.99,
+          "currency": "CHF",
+          "rating": 4.8,
+          "reviewCount": 381864,
+          "inStock": true,
+          "url": "/pr/synthetic/61864"
+        },
+        {
+          "id": "61865",
+          "name": "Synthetic Brand, Vitamin C, 1,000 mg, 240 Veggie Capsules",
+          "brand": { "name": "Synthetic Brand" },
+          "discountPrice": 13.11,
+          "inStock": false
+        }
+      ]
+    }
+  }
+}
