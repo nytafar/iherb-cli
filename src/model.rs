@@ -216,29 +216,71 @@ impl ProductDetail {
     ///
     /// Name and presence are declared together on purpose: one list, so the
     /// registry of tracked fields cannot drift out of step with the test for
-    /// whether each one is filled. `product_id` is absent from the list because
-    /// it is the caller's input, never extracted.
+    /// whether each one is filled.
+    ///
+    /// # This destructuring is load-bearing
+    ///
+    /// `self` is taken apart field by field rather than read through `self.x`,
+    /// and the pattern deliberately has **no `..` rest**. That makes the
+    /// compiler enforce the registry: add a field to [`ProductDetail`] and this
+    /// stops compiling with "pattern does not mention field", so the only way to
+    /// add a field is to decide, then and there, whether provenance tracks it.
+    /// Before this, a new field silently had no provenance and no source — the
+    /// failure mode the whole type exists to prevent, reintroduced one field at
+    /// a time.
+    ///
+    /// If you are here because the build broke: add your field to the list
+    /// below, or bind it as `your_field: _` with a line saying why it is not
+    /// extracted data. Do not add `..`.
     pub fn field_presence(&self) -> Vec<(&'static str, bool)> {
+        let Self {
+            name,
+            brand,
+            price,
+            original_price,
+            currency,
+            rating,
+            review_count,
+            product_url,
+            // Not tracked: the caller's input, echoed back. No strategy
+            // produces it and it is never absent, so a provenance entry for it
+            // would only ever say the same thing.
+            product_id: _,
+            in_stock,
+            description,
+            product_code,
+            upc,
+            ingredients,
+            supplement_facts,
+            suggested_use,
+            warnings,
+            shipping_weight,
+            category_breadcrumb,
+            review_distribution,
+            // Not tracked: the provenance record itself.
+            extraction: _,
+        } = self;
+
         vec![
-            ("name", !self.name.is_empty()),
-            ("brand", !self.brand.is_empty()),
-            ("price", self.price > 0.0),
-            ("original_price", self.original_price.is_some()),
-            ("currency", !self.currency.is_empty()),
-            ("rating", self.rating.is_some()),
-            ("review_count", self.review_count.is_some()),
-            ("product_url", !self.product_url.is_empty()),
-            ("in_stock", self.in_stock.is_some()),
-            ("description", self.description.is_some()),
-            ("product_code", self.product_code.is_some()),
-            ("upc", self.upc.is_some()),
-            ("ingredients", self.ingredients.is_some()),
-            ("supplement_facts", self.supplement_facts.is_some()),
-            ("suggested_use", self.suggested_use.is_some()),
-            ("warnings", self.warnings.is_some()),
-            ("shipping_weight", self.shipping_weight.is_some()),
-            ("category_breadcrumb", self.category_breadcrumb.is_some()),
-            ("review_distribution", self.review_distribution.is_some()),
+            ("name", !name.is_empty()),
+            ("brand", !brand.is_empty()),
+            ("price", *price > 0.0),
+            ("original_price", original_price.is_some()),
+            ("currency", !currency.is_empty()),
+            ("rating", rating.is_some()),
+            ("review_count", review_count.is_some()),
+            ("product_url", !product_url.is_empty()),
+            ("in_stock", in_stock.is_some()),
+            ("description", description.is_some()),
+            ("product_code", product_code.is_some()),
+            ("upc", upc.is_some()),
+            ("ingredients", ingredients.is_some()),
+            ("supplement_facts", supplement_facts.is_some()),
+            ("suggested_use", suggested_use.is_some()),
+            ("warnings", warnings.is_some()),
+            ("shipping_weight", shipping_weight.is_some()),
+            ("category_breadcrumb", category_breadcrumb.is_some()),
+            ("review_distribution", review_distribution.is_some()),
         ]
     }
 
