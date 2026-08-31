@@ -124,7 +124,7 @@ Take 1 capsule daily with or without food.
 | `--currency <code>` | Require the storefront to price in this currency (e.g., `USD`, `CHF`, `EUR`). Does **not** convert — see below | none |
 | `--no-cache` | Bypass local cache and fetch fresh data | — |
 | `--delay <ms>` | Delay between requests in milliseconds | `2000` |
-| `--debug` | Run browser in headed (visible) mode | — |
+| `--debug` | Run the browser headed (a visible window), log at debug level, and print the provenance table | — |
 
 ```bash
 # Swiss storefront, and refuse the results if it does not price in CHF

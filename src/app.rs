@@ -4,7 +4,11 @@
 //! cache/launch/navigate/store sequence they used to each carry a copy of lives
 //! in [`crate::fetch`].
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
+use tokio::sync::Notify;
 
 use crate::browser::session::BrowserSession;
 use crate::cli::{Cli, Commands, Section, SortOrder};
@@ -12,6 +16,13 @@ use crate::config::AppConfig;
 use crate::fetch::fetch;
 use crate::output;
 use crate::targets::{ProductTarget, SearchTarget};
+
+/// The exit status a process killed by SIGINT reports: 128 + SIGINT.
+const EXIT_INTERRUPTED: i32 = 130;
+
+/// How long a second Ctrl+C waits for Chrome's subprocesses to die before
+/// sweeping the profile directory they were writing into.
+const IMPATIENT_CLEANUP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Run the CLI: configure logging, load config, and dispatch the subcommand.
 pub async fn run(cli: Cli) -> Result<()> {
@@ -36,15 +47,116 @@ pub async fn run(cli: Cli) -> Result<()> {
         cli.debug,
     )?;
 
-    ctrlc::set_handler(|| {
-        eprintln!("\nInterrupted.");
-        std::process::exit(130);
-    })
-    .context("Failed to set Ctrl+C handler")?;
+    // The handler used to call `process::exit(130)`, which runs no destructors:
+    // the browser handle was never dropped, so Chrome was orphaned along with
+    // its temporary profile — 9 processes and 25 MB, measured (#46). It now
+    // only *asks* for shutdown, and the asking happens on the main task where
+    // the browser can actually be closed.
+    //
+    // Impatience is still honoured, in two steps. A second interrupt gives up
+    // on the graceful close and kills the browser; a third exits outright.
+    // Someone pressing Ctrl+C repeatedly is saying the polite path is not
+    // getting there, and a CLI that cannot be stopped is worse than a leak.
+    let interrupted = Arc::new(Notify::new());
+    let impatient = Arc::new(Notify::new());
+    {
+        let interrupted = Arc::clone(&interrupted);
+        let impatient = Arc::clone(&impatient);
+        let presses = AtomicUsize::new(0);
+        ctrlc::set_handler(move || {
+            // Two separate notifications rather than one counted twice: a
+            // `Notify` holds at most one permit, so a double tap during the
+            // command would otherwise arrive as a single request and cancel the
+            // shutdown it had just asked for.
+            match presses.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    eprintln!("\nInterrupted. Closing the browser...");
+                    // `notify_one`, not `notify_waiters`: the signal can arrive
+                    // before anything is waiting, and a permit that is stored
+                    // is a shutdown that happens.
+                    interrupted.notify_one();
+                }
+                1 => {
+                    eprintln!("\nInterrupted again. Killing the browser.");
+                    impatient.notify_one();
+                }
+                _ => std::process::exit(EXIT_INTERRUPTED),
+            }
+        })
+        .context("Failed to set Ctrl+C handler")?;
+    }
 
     let mut browser_session: Option<BrowserSession> = None;
 
-    match cli.command {
+    // The command's future borrows `browser_session`, so it has to be dropped
+    // before the shutdown below can take the session out of it. That is what
+    // the block is for.
+    let outcome = {
+        let command = dispatch(cli.command, &config, &mut browser_session);
+        tokio::pin!(command);
+
+        tokio::select! {
+            result = &mut command => Outcome::Ran(result),
+            _ = interrupted.notified() => Outcome::Interrupted,
+        }
+    };
+
+    // Reached on every path out of the command — success, error and interrupt
+    // alike. It used to sit after a `?`, so any failing fetch skipped it and
+    // left its profile directory behind.
+    //
+    // A second Ctrl+C abandons the graceful close, and abandoning it is not the
+    // same as skipping it: dropping the `close` future drops the session inside
+    // it, and *that* is what kills Chrome and removes the profile directory.
+    // The old handler's `process::exit` is the one thing that reaches neither.
+    if let Some(session) = browser_session.take() {
+        let profile_dir = session.profile_dir().to_path_buf();
+        tokio::select! {
+            result = session.close() => {
+                if let Err(e) = result {
+                    tracing::warn!("Failed to close browser: {}", e);
+                }
+            }
+            _ = impatient.notified() => {
+                // The session went with the cancelled future, and dropping it
+                // is what kills Chrome. Chrome's own subprocesses take a moment
+                // to follow, and they are still writing into the profile while
+                // `Drop` is trying to remove it — so it gets one more pass once
+                // they are gone. Bounded, because a third Ctrl+C exits outright.
+                tokio::time::sleep(IMPATIENT_CLEANUP_GRACE).await;
+                let _ = std::fs::remove_dir_all(&profile_dir);
+            }
+        }
+    }
+
+    match outcome {
+        Outcome::Ran(result) => result,
+        // Exiting here skips no cleanup: the browser is already closed and its
+        // profile directory already gone. What it buys is the 130 a caller
+        // reads to tell an interrupt from a failure.
+        Outcome::Interrupted => std::process::exit(EXIT_INTERRUPTED),
+    }
+}
+
+/// How [`run`]'s command ended.
+enum Outcome {
+    /// The command finished on its own, well or badly.
+    Ran(Result<()>),
+    /// Ctrl+C arrived first and the command was dropped where it stood.
+    Interrupted,
+}
+
+/// Run the subcommand the user asked for.
+///
+/// Separate from [`run`] so there is a single future to race against the
+/// interrupt, and so that the browser shutdown is not something a `?` in here
+/// can jump over.
+async fn dispatch(
+    command: Commands,
+    config: &AppConfig,
+    browser_session: &mut Option<BrowserSession>,
+) -> Result<()> {
+    match command {
         Commands::Search {
             query,
             limit,
@@ -52,27 +164,19 @@ pub async fn run(cli: Cli) -> Result<()> {
             category,
         } => {
             cmd_search(
-                &config,
-                &mut browser_session,
+                config,
+                browser_session,
                 &query,
                 limit,
                 sort,
                 category.as_deref(),
             )
-            .await?;
+            .await
         }
         Commands::Product { id_or_url, section } => {
-            cmd_product(&config, &mut browser_session, &id_or_url, section).await?;
+            cmd_product(config, browser_session, &id_or_url, section).await
         }
     }
-
-    if let Some(session) = browser_session.take() {
-        if let Err(e) = session.close().await {
-            tracing::warn!("Failed to close browser: {}", e);
-        }
-    }
-
-    Ok(())
 }
 
 pub async fn cmd_search(

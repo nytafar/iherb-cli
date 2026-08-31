@@ -57,6 +57,25 @@ impl BrowserSession {
             ))
         })?;
 
+        // Nothing else can clean this directory up if the launch fails: `close`
+        // and `Drop` both belong to a session that, in that case, never exists
+        // (#46). Chrome that will not start is exactly when a launch is retried,
+        // so this is the leak that repeats.
+        match Self::launch_into(chrome_path, config, user_data_dir.clone()).await {
+            Ok(session) => Ok(session),
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&user_data_dir);
+                Err(e)
+            }
+        }
+    }
+
+    /// The launch proper, on a profile directory that already exists.
+    async fn launch_into(
+        chrome_path: PathBuf,
+        config: &AppConfig,
+        user_data_dir: PathBuf,
+    ) -> Result<Self, IherbError> {
         let mut builder = BrowserConfig::builder()
             .chrome_executable(chrome_path)
             .user_data_dir(user_data_dir.clone())
@@ -70,9 +89,22 @@ impl BrowserSession {
             builder = builder.arg(*flag);
         }
 
-        if !config.debug {
-            builder = builder.arg(("headless", "new"));
-        }
+        // Headless is a *mode* on the builder, not a switch in `args`, and the
+        // mode defaults to `HeadlessMode::True` (#47). Setting `("headless",
+        // "new")` as an ordinary arg therefore never produced a headful
+        // browser: on the `--debug` path nothing was set, the default mode
+        // still appended `--headless`, and the flag only ever changed logging.
+        // It looked right on the headless path purely by accident — the mode
+        // appends a *valueless* `headless` key, which merges into the `new`
+        // value already under that key and comes out as `--headless=new`.
+        //
+        // `--debug` has to be genuinely headful: #12's `setup` command exists so
+        // a human can complete a Cloudflare challenge in a window they can see.
+        builder = if config.debug {
+            builder.with_head()
+        } else {
+            builder.new_headless_mode()
+        };
 
         // Chrome refuses to run as root without --no-sandbox
         #[cfg(target_os = "linux")]
@@ -131,6 +163,41 @@ impl BrowserSession {
             .await;
 
         Ok(page)
+    }
+
+    /// The temporary profile directory Chrome was launched against.
+    ///
+    /// Exposed so that a caller who abandons [`Self::close`] can still finish
+    /// what it started: dropping the session kills Chrome, but its subprocesses
+    /// keep writing here for a moment afterwards, and the removal `Drop`
+    /// attempts in that moment is the one that leaves a partial directory (#46).
+    pub fn profile_dir(&self) -> &std::path::Path {
+        &self.user_data_dir
+    }
+
+    /// The URL of every tab this browser currently has open.
+    ///
+    /// Read back over CDP rather than counted locally, so it is the browser's
+    /// answer and not ours. It exists because #45 could not be demonstrated any
+    /// other way: the fetch pipeline *said* it opened a page per target, and
+    /// nothing said how many were still open afterwards. #10 will want the same
+    /// answer once it runs targets concurrently.
+    ///
+    /// A tab Chrome is still tearing down can appear here for a moment after
+    /// `Page::close` returns, because closing is a request rather than an
+    /// answer. A caller that wants a settled count has to read twice.
+    pub async fn open_page_urls(&self) -> Result<Vec<String>, IherbError> {
+        let browser = self.browser.lock().await;
+        let pages = browser
+            .pages()
+            .await
+            .map_err(|e| IherbError::BrowserLaunch(format!("Failed to list pages: {}", e)))?;
+
+        let mut urls = Vec::with_capacity(pages.len());
+        for page in pages {
+            urls.push(page.url().await.ok().flatten().unwrap_or_default());
+        }
+        Ok(urls)
     }
 
     pub async fn close(self) -> Result<(), IherbError> {
