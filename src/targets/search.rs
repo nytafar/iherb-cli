@@ -21,8 +21,14 @@ pub struct SearchTarget {
     category: Option<CategoryId>,
     country: String,
     base_url: String,
-    /// What `--currency` requires the storefront to price in, or `None`.
-    expected_currency: Option<String>,
+    /// What `--currency` asked the storefront for, or `None` (#5).
+    ///
+    /// One value, three jobs, and they are the same job seen from three sides:
+    /// it goes on the preference cookies that make the storefront price in it,
+    /// it is part of the cache key because a different currency is a different
+    /// document, and it is what `check_currency` holds the answer to. Before
+    /// the cookie existed this was only the third of those.
+    requested_currency: Option<String>,
 }
 
 /// Products gathered so far, plus the result total from the first page that
@@ -81,7 +87,7 @@ impl SearchTarget {
             category,
             country: config.country.clone(),
             base_url: config.base_url(),
-            expected_currency: config.currency.clone(),
+            requested_currency: config.currency.clone(),
         })
     }
 
@@ -103,7 +109,7 @@ impl SearchTarget {
     fn currency_holds(&self, result: &SearchResult) -> Result<()> {
         for product in &result.products {
             check_currency(
-                self.expected_currency.as_deref(),
+                self.requested_currency.as_deref(),
                 product.currency.as_deref(),
                 &format!("the results for {:?}", self.query),
             )?;
@@ -147,6 +153,7 @@ impl FetchTarget for SearchTarget {
     fn cache_key(&self) -> CacheKey {
         CacheKey::Search {
             country: self.country.clone(),
+            currency: self.requested_currency.clone(),
             query: self.query.clone(),
             sort: self.sort,
             category: self.category.as_ref().map(|c| c.as_str().to_string()),

@@ -10,17 +10,27 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Country subdomain to use (e.g., us, ch, de). Note: iHerb may override based on your IP
-    #[arg(long, global = true)]
+    /// Country subdomain to use, e.g. us, ch, de.
+    ///
+    /// On its own this only picks the subdomain, and iHerb may still override
+    /// it from your IP — measured: from a Norwegian address,
+    /// `www.iherb.com` serves the Norwegian storefront. Pass `--currency` as
+    /// well to state the storefront as a preference iHerb honours (#5).
+    #[arg(long, global = true, verbatim_doc_comment)]
     pub country: Option<String>,
 
-    /// Require the storefront to price in this currency, e.g. USD, CHF, EUR.
+    /// Ask the storefront to price in this currency, e.g. USD, CHF, EUR.
     ///
-    /// Does not convert. iHerb prices in the currency of the storefront
-    /// `--country` selects, and this tool reports the currency that storefront
-    /// published; the flag says which one you were expecting, and a
-    /// disagreement is an error rather than a relabelling. Omit it to accept
-    /// whatever the storefront prices in.
+    /// This asks iHerb for the currency, using the same storefront preference
+    /// its own header picker uses, and then checks what came back: prices are
+    /// the storefront's own in that currency, and a storefront that prices in
+    /// something else is an error rather than a relabelling. Nothing is ever
+    /// converted, and no price is captioned with a currency the page did not
+    /// publish.
+    ///
+    /// It also pins the storefront against iHerb's IP geolocation, which is
+    /// otherwise free to override `--country`. Omit it to take whatever iHerb
+    /// serves.
     #[arg(long, global = true, verbatim_doc_comment)]
     pub currency: Option<String>,
 
@@ -32,8 +42,13 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub delay: Option<u64>,
 
-    /// Run browser in headed mode for troubleshooting
-    #[arg(long, global = true)]
+    /// Show a real browser window and log at debug level.
+    ///
+    /// Both, and the window is the half that used to be missing (#47): this
+    /// only turned the logging up, so "headed mode" described something that
+    /// did not happen and a wedged page could not be looked at. Debug logging
+    /// also dumps each fetched page to `/tmp/iherb_*.html`.
+    #[arg(long, global = true, verbatim_doc_comment)]
     pub debug: bool,
 }
 

@@ -275,6 +275,7 @@ impl FetchTarget for DataUrlTarget {
     fn cache_key(&self) -> CacheKey {
         CacheKey::Product {
             country: "us".to_string(),
+            currency: None,
             product_id: format!("test-{}", self.id),
         }
     }
@@ -321,6 +322,7 @@ impl FetchTarget for FailingTarget {
     fn cache_key(&self) -> CacheKey {
         CacheKey::Product {
             country: "us".to_string(),
+            currency: None,
             product_id: "test-failing".to_string(),
         }
     }

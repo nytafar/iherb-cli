@@ -3,9 +3,12 @@
 Real iHerb pages, used by the parser tests in `tests/parsers/`. Each
 `*.html.gz` is the page exactly as served, gzipped and renamed to an ASCII
 slug — nothing is trimmed, because a trim would quietly discard the markup some
-later bug turns out to be about. 20.5 MB of HTML compresses to 2.8 MB here.
+later bug turns out to be about. 23.4 MB of HTML compresses to 3.2 MB here.
 
-## Where they came from
+Seven came from an upstream fork; the eighth this repository captured itself.
+The two provenance stories are different and are kept apart below.
+
+## Where the seven upstream pages came from
 
 Upstream: **`https://github.com/caozhuozi/iherb-cli`**, committed under
 `fixtures/` by `caozhuozi <543481992@qq.com>` across three commits. That fork's
@@ -40,6 +43,49 @@ elements and `class="hydrated"` markers are present in the HTML.
 
 Upstream names contain spaces, commas and `®`; the slugs are the ASCII renames.
 
+## Where the eighth page came from
+
+`product-12949-nordic-ultimate-omega-nok` is **not** from the fork. This
+repository captured it, and it is the first fixture here that anything in this
+repository produced.
+
+| | |
+|---|---|
+| slug | `product-12949-nordic-ultimate-omega-nok` |
+| blob id | `f08f4d82443f304ac4dc121306547e32fd3e439f` |
+| URL | `https://no.iherb.com/pr/item/12949` (canonical: `https://no.iherb.com/pr/nordic-naturals-ultimate-omega-great-lemon-180-soft-gels-640-mg-per-soft-gel/12949`) |
+| captured | 2026-08-31 |
+| storefront | `NO` — `COUNTRY_CODE = "NO"` |
+| currency | `NOK` — `CURRENCY_CODE = "NOK"`, `"priceCurrency":"NOK"`, price 880.63 |
+| siteVersion | 1.0.22698 |
+| capture method | `iherb-cli product 12949 --country no --currency NOK --no-cache --debug`, then `gzip -9 -n` of the `/tmp/iherb_product_12949.html` dump that `--debug` writes |
+
+Same shape as the other seven: the whole page as served, after hydration,
+nothing trimmed. It is the **same product** as
+`product-12949-nordic-ultimate-omega`, which is the point — the two differ only
+in the storefront that priced them, so a test can hold the product constant and
+watch the currency and the price change.
+
+### What this file does and does not prove
+
+It proves the parsers read a non-USD page correctly. It does **not**, by itself,
+prove that `--currency` caused it: the machine that captured it is in Norway,
+and iHerb geolocates by IP, so `no.iherb.com` serves NOK to this address with or
+without the flag. A committed blob cannot record what produced it.
+
+What the cookie is proven by is the experiment recorded in
+`tests/storefront_cookie.rs`, run the same day from the same address against the
+same product:
+
+| request | `COUNTRY_CODE` | `CURRENCY_CODE` | price |
+|---|---|---|---|
+| no `--currency` at all | `NO` | `NOK` | NOK 880.63 |
+| `--country us --currency USD` | `US` | `USD` | $64.56 |
+| `--country de --currency EUR` | `DE` | `EUR` | €76.57 |
+
+The first row is the control: it is what this address gets when nothing is
+asked for, which is why the other two are evidence rather than coincidence.
+
 ### Verifying a file against its blob id
 
 The blob id is the identity of the *uncompressed* bytes, so it can be checked
@@ -66,6 +112,7 @@ git cat-file blob <blob id> | gzip -9 -n > <slug>.html.gz
 | `product-119174-olly-gummies` | the sparse one: out of stock, no review-histogram element at all, no `.prodOverviewIngred`, no overview sections |
 | `product-12949-nordic-ultimate-omega` | softgels; the page the JS-globals side fixture was transcribed from |
 | `product-59561-cgn-gold-c-powder` | powder; a one-nutrient supplement table; another empty histogram shell |
+| `product-12949-nordic-ultimate-omega-nok` | the only non-USD page, and the only one captured by this repository: the same product as the row above, priced by the Norwegian storefront. It is what stops a currency sweep from passing by assuming one storefront, and it is where the `shipping_weight` tooltip rot on the current site is pinned |
 | `search-vitamin-c` | 48 cards, 11,952 results, and the sort dropdown and category facets that #3 and #4 are about |
 | `category-supplements` | nothing parses it yet; kept for the catalog command in #21 |
 

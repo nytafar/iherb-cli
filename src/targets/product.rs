@@ -15,8 +15,14 @@ pub struct ProductTarget {
     product_id: String,
     country: String,
     base_url: String,
-    /// What `--currency` requires the storefront to price in, or `None`.
-    expected_currency: Option<String>,
+    /// What `--currency` asked the storefront for, or `None` (#5).
+    ///
+    /// One value, three jobs, and they are the same job seen from three sides:
+    /// it goes on the preference cookies that make the storefront price in it,
+    /// it is part of the cache key because a different currency is a different
+    /// document, and it is what `check_currency` holds the answer to. Before
+    /// the cookie existed this was only the third of those.
+    requested_currency: Option<String>,
 }
 
 impl ProductTarget {
@@ -26,7 +32,7 @@ impl ProductTarget {
             product_id: parse_product_identifier(id_or_url)?,
             country: config.country.clone(),
             base_url: config.base_url(),
-            expected_currency: config.currency.clone(),
+            requested_currency: config.currency.clone(),
         })
     }
 
@@ -42,6 +48,7 @@ impl FetchTarget for ProductTarget {
     fn cache_key(&self) -> CacheKey {
         CacheKey::Product {
             country: self.country.clone(),
+            currency: self.requested_currency.clone(),
             product_id: self.product_id.clone(),
         }
     }
@@ -62,7 +69,7 @@ impl FetchTarget for ProductTarget {
     /// `fetch::cached`, which does not run `validate`.
     fn cache_is_sufficient(&self, cached: &Self::Output) -> bool {
         check_currency(
-            self.expected_currency.as_deref(),
+            self.requested_currency.as_deref(),
             cached.currency.as_deref(),
             "the cached record",
         )
@@ -137,7 +144,7 @@ impl FetchTarget for ProductTarget {
         }
 
         check_currency(
-            self.expected_currency.as_deref(),
+            self.requested_currency.as_deref(),
             product.currency.as_deref(),
             &format!("product {}", self.product_id),
         )?;

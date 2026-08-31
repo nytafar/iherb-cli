@@ -19,7 +19,12 @@ fn json_ld_is_present_and_complete_on_every_product_page() {
         assert!(!product.name.is_empty(), "{}", f.slug());
         assert!(!product.brand.is_empty(), "{}", f.slug());
         assert!(product.price > 0.0, "{}", f.slug());
-        assert_eq!(product.currency.as_deref(), Some("USD"), "{}", f.slug());
+        assert_eq!(
+            product.currency.as_deref(),
+            Some(f.currency()),
+            "{}",
+            f.slug()
+        );
         assert!(product.rating.is_some(), "{}", f.slug());
         assert!(product.review_count.is_some(), "{}", f.slug());
         assert!(product.description.is_some(), "{}", f.slug());

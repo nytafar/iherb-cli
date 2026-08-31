@@ -651,11 +651,18 @@ fn a_search_in_the_wrong_currency_is_refused_rather_than_relabelled() {
         "a USD results page must not satisfy --currency CHF"
     );
 
-    // And the cached one, which `validate` never sees: a stored entry in the
-    // wrong currency does not answer the request, so it is refetched instead of
-    // being served past the check.
+    // And the cached path, which `validate` never sees. Two defences now, and
+    // the test wants both.
+    //
+    // The first is the key: since the cookie made `--currency` change the
+    // document, a CHF request and a USD request are different entries, so the
+    // CHF run cannot reach the USD run's file at all.
     let cache = Cache::new(dir.path(), false);
-    cache.set(&asked_chf.cache_key(), &walked).unwrap();
+    cache.set(&asked_usd.cache_key(), &walked).unwrap();
+    assert_ne!(
+        asked_usd.cache_key().file_name(),
+        asked_chf.cache_key().file_name()
+    );
     assert!(
         cached(&asked_chf, &chf_config).is_none(),
         "a cached USD entry was served to a --currency CHF request"
@@ -663,6 +670,16 @@ fn a_search_in_the_wrong_currency_is_refused_rather_than_relabelled() {
     assert!(
         cached(&asked_usd, &usd_config).is_some(),
         "...while the request the entry does answer still hits it"
+    );
+
+    // The second is `cache_is_sufficient`, which reads the entry rather than
+    // its name. It is behind the key rather than in front of it now, and it
+    // still has to hold: an entry whose contents disagree with the request it
+    // is filed under is not an answer, however it came to be there.
+    cache.set(&asked_chf.cache_key(), &walked).unwrap();
+    assert!(
+        cached(&asked_chf, &chf_config).is_none(),
+        "an entry holding USD prices answered a CHF request because its name matched"
     );
 
     // A card whose page published no currency confirms nothing, so it cannot

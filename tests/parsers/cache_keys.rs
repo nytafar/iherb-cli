@@ -21,16 +21,33 @@ use iherb_cli::targets::{ProductTarget, SearchTarget};
 use crate::fixture::TempDir;
 
 fn product(country: &str, id: &str) -> String {
+    product_in(country, None, id)
+}
+
+/// A product entry's name, for a run that asked for a particular currency (#5).
+fn product_in(country: &str, currency: Option<&str>, id: &str) -> String {
     CacheKey::Product {
         country: country.to_string(),
+        currency: currency.map(str::to_string),
         product_id: id.to_string(),
     }
     .file_name()
 }
 
 fn search(country: &str, query: &str, sort: SortOrder, category: Option<&str>) -> String {
+    search_in(country, None, query, sort, category)
+}
+
+fn search_in(
+    country: &str,
+    currency: Option<&str>,
+    query: &str,
+    sort: SortOrder,
+    category: Option<&str>,
+) -> String {
     CacheKey::Search {
         country: country.to_string(),
+        currency: currency.map(str::to_string),
         query: query.to_string(),
         sort,
         category: category.map(str::to_string),
@@ -59,7 +76,7 @@ fn config(country: &str, currency: &str, cache_dir: PathBuf) -> AppConfig {
 
 #[test]
 fn product_entries_are_named_after_the_storefront_and_the_product_id() {
-    assert_eq!(product("us", "61864"), "v3_product_us_61864.json");
+    assert_eq!(product("us", "61864"), "v4_product_us_any_61864.json");
     assert_ne!(product("us", "61864"), product("us", "61865"));
     assert_ne!(product("us", "61864"), product("ch", "61864"));
 }
@@ -76,36 +93,38 @@ fn entries_from_older_generations_can_never_be_named_by_the_current_key() {
     // Poisoned entries exactly as v1 and v2 wrote them, with a mtime of now so
     // the TTL cannot be what saves us.
     std::fs::create_dir_all(dir.path()).unwrap();
-    for stale in ["product_61864.json", "v2_product_us_61864.json"] {
+    for stale in [
+        "product_61864.json",
+        "v2_product_us_61864.json",
+        "v3_product_us_61864.json",
+    ] {
         std::fs::write(dir.path().join(stale), r#""stale""#).unwrap();
     }
 
     let key = ProductTarget::new(&us, "61864").unwrap().cache_key();
-    assert_eq!(key.file_name(), "v3_product_us_61864.json");
+    assert_eq!(key.file_name(), "v4_product_us_USD_61864.json");
     assert!(
         cache.get::<String>(&key).is_none(),
         "a stale entry was read"
     );
 }
 
-/// FOLDED INTO #5: the currency collision the review of #1 found, and why the
-/// key is not what fixes it.
+/// FLIPPED BY #5's second half: two currencies are two entries, because they
+/// are two documents.
 ///
-/// Two runs differing only in `--currency` shared an entry, and because every
-/// path substituted the label when the page published no currency, the second
-/// run was served a record asserting a currency it had never asked iHerb for.
-/// The obvious fix was to put the currency in the key. That would have been the
-/// wrong one: `--currency` never changed which document was fetched, so keying
-/// on it would file two names for one fetch and double the work to hide a
-/// fabrication rather than remove it.
+/// This test asserted the opposite one commit ago, and the reasoning was sound
+/// for the code that existed then. `--currency` was an assertion about the
+/// storefront: it could reject an answer but could not change which document
+/// was fetched, so keying on it would have filed one fetch under two names.
 ///
-/// What removes it is that no record carries a substituted currency any more,
-/// and the `v3_` generation is what stops the ones already on disk being
-/// served. So the two configs below still share an entry — deliberately, and
-/// now harmlessly, because the entry no longer says anything `--currency` could
-/// have changed.
+/// The cookie changed the fact the reasoning rested on. `--currency` now sets
+/// iHerb's own storefront preference before the request, so the same product id
+/// really does come back as a different document — NOK 880.63, €76.57 and
+/// $64.56 for product 12949. Two documents under one name is #1's bug, one
+/// dimension over, and the `v4_` generation is what abandons the `v3_` entries
+/// that were written under the old, currency-blind name.
 #[test]
-fn two_currencies_still_share_an_entry_because_neither_changes_the_fetch() {
+fn two_currencies_get_their_own_cache_file() {
     let dir = TempDir::new("currency-key");
     let usd = config("us", "USD", dir.path());
     let chf = config("us", "CHF", dir.path());
@@ -113,43 +132,62 @@ fn two_currencies_still_share_an_entry_because_neither_changes_the_fetch() {
     let from_usd = ProductTarget::new(&usd, "61864").unwrap();
     let from_chf = ProductTarget::new(&chf, "61864").unwrap();
 
-    // The same URL, because `--currency` is not part of the request.
+    // The URL is the same — the currency is carried on a cookie, not in the
+    // path — which is exactly why the key has to say it. Nothing about the
+    // request that reaches the network is visible in `url()`.
     assert_eq!(from_usd.url(1), from_chf.url(1));
-    assert_eq!(
+    assert_ne!(
         from_usd.cache_key().file_name(),
         from_chf.cache_key().file_name()
     );
+    assert_eq!(
+        from_usd.cache_key().file_name(),
+        "v4_product_us_USD_61864.json"
+    );
+    assert_eq!(
+        from_chf.cache_key().file_name(),
+        "v4_product_us_CHF_61864.json"
+    );
 
-    // A pre-#5 entry under the same country, holding the fabrication: a US
-    // price that a `--currency CHF` run labelled CHF. It is written under the
-    // name that run would have used, and it is never read again.
-    std::fs::create_dir_all(dir.path()).unwrap();
-    std::fs::write(
-        dir.path().join("v2_product_us_61864.json"),
-        r#"{"name":"Gold C","brand":"CGN","price":9.6,"original_price":null,
-            "currency":"CHF","rating":null,"review_count":null,
-            "product_url":"https://www.iherb.com/pr/item/61864","product_id":"61864",
-            "in_stock":null,"description":null,"product_code":null,"upc":null,
-            "ingredients":null,"supplement_facts":null,"suggested_use":null,
-            "warnings":null,"shipping_weight":null,"category_breadcrumb":null,
-            "review_distribution":null}"#,
-    )
-    .unwrap();
+    // And asking for nothing is its own request, distinct from asking for the
+    // currency the storefront happens to default to: one sets the preference
+    // cookies and one does not.
+    assert_eq!(product("us", "61864"), "v4_product_us_any_61864.json");
+    assert_ne!(product("us", "61864"), from_usd.cache_key().file_name());
 
-    let cache = Cache::new(dir.path(), false);
-    assert!(
-        cache.get::<ProductDetail>(&from_chf.cache_key()).is_none(),
-        "a v2 entry holding a fabricated currency was served"
+    // `any` is a sentinel, not a currency, and it cannot be spoofed: every
+    // currency that reaches the key has been upper-cased.
+    assert_ne!(
+        product_in("us", Some("ANY"), "61864"),
+        product("us", "61864")
+    );
+}
+
+/// The search half of the same thing.
+#[test]
+fn two_currencies_get_their_own_search_cache_file() {
+    let base = search("us", "magnesium", SortOrder::Relevance, None);
+    let in_usd = search_in("us", Some("USD"), "magnesium", SortOrder::Relevance, None);
+    let in_nok = search_in("us", Some("NOK"), "magnesium", SortOrder::Relevance, None);
+
+    assert_ne!(base, in_usd, "asking for nothing is not asking for USD");
+    assert_ne!(in_usd, in_nok);
+
+    // NUL-delimited like every other field, so no two distinct requests hash
+    // alike by running together at the boundary.
+    assert_ne!(
+        search_in("us", Some("USD"), "magnesium", SortOrder::Relevance, None),
+        search_in("u", Some("SUSD"), "magnesium", SortOrder::Relevance, None)
     );
 }
 
 #[test]
 fn search_entries_are_a_hash_of_country_query_sort_and_category() {
     let base = search("us", "magnesium", SortOrder::Relevance, None);
-    assert!(base.starts_with("v3_search_"));
+    assert!(base.starts_with("v4_search_"));
     assert!(base.ends_with(".json"));
     // 16 hex characters between the prefix and the extension.
-    assert_eq!(base.len(), "v3_search_".len() + 16 + ".json".len());
+    assert_eq!(base.len(), "v4_search_".len() + 16 + ".json".len());
 
     assert_eq!(base, search("us", "magnesium", SortOrder::Relevance, None));
     assert_ne!(base, search("ch", "magnesium", SortOrder::Relevance, None));
@@ -210,8 +248,14 @@ fn two_storefronts_get_their_own_product_cache_file() {
         from_us.cache_key().file_name(),
         from_ch.cache_key().file_name()
     );
-    assert_eq!(from_us.cache_key().file_name(), "v3_product_us_61864.json");
-    assert_eq!(from_ch.cache_key().file_name(), "v3_product_ch_61864.json");
+    assert_eq!(
+        from_us.cache_key().file_name(),
+        "v4_product_us_USD_61864.json"
+    );
+    assert_eq!(
+        from_ch.cache_key().file_name(),
+        "v4_product_ch_CHF_61864.json"
+    );
 }
 
 /// FLIPPED BY #1, and the one that matters: the failure a user actually hit

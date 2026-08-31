@@ -14,7 +14,7 @@ use std::time::SystemTime;
 use crate::browser::session::BrowserSession;
 use crate::cache::{Cache, CacheKey};
 use crate::config::AppConfig;
-use crate::scraper::navigation::Navigator;
+use crate::scraper::navigation::{Navigator, Storefront};
 
 /// Navigation attempts after the first, per page.
 const NAVIGATION_RETRIES: u32 = 2;
@@ -213,7 +213,10 @@ async fn read_target<T: FetchTarget>(
 ) -> Result<Fetched<T::Output>> {
     let cache = Cache::new(config.cache_dir.clone(), config.no_cache);
     let key = target.cache_key();
-    let navigator = Navigator::new(config.delay_ms);
+    // The storefront goes to the navigator because asking for one is part of
+    // making the request, not part of reading the answer: iHerb carries the
+    // preference in a cookie that has to be set before the page is fetched (#5).
+    let navigator = Navigator::new(config.delay_ms, Storefront::requested(config));
 
     // Exhaustive so that #11 has to decide what a new variant means here.
     // `Navigator` already implements DocumentComplete.

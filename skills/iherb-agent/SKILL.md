@@ -46,7 +46,7 @@ Output: Full Markdown with overview, supplement facts table, ingredients, sugges
 ### Global flags
 
 - `--country <code>`: localized storefront (e.g., `ch`, `de`, `jp`). Default: `us`
-- `--currency <code>`: require the storefront to price in this currency (e.g., `CHF`, `EUR`). It does **not** convert — a storefront that prices in something else is an error, not a relabelling. Default: unset, which accepts whatever the storefront prices in
+- `--currency <code>`: ask the storefront to price in this currency (e.g., `CHF`, `EUR`) and verify what came back. It does **not** convert — a storefront that prices in something else is an error, not a relabelling. Pass it whenever the currency matters: it is also what stops iHerb's IP geolocation overriding `--country`. Default: unset, which takes whatever iHerb serves
 - `--no-cache`: bypass cache
 - `--debug`: show browser window
 
@@ -99,18 +99,23 @@ Then verify quality by checking ingredients and ratings on the cheapest options.
 
 ### Localized pricing
 
-`--country` is what changes the prices; `--currency` only checks them. Prices
-come back in the storefront's own currency, and a price the page did not name a
-currency for is reported as `(currency unknown: the page published none)` rather
-than being captioned with one.
+Pass `--country` and `--currency` **together**. The pair is what iHerb honours:
+it geolocates by IP, and a preference naming only a currency is discarded, so
+`--country de` alone can still return whichever storefront your address suggests.
 
 ```bash
-# Swiss storefront; fail rather than report Swiss prices in anything but CHF
-iherb-cli search "omega 3" --country ch --currency CHF
-iherb-cli product 61864 --country de --currency EUR
+# The German storefront in euros, whatever the IP says
+iherb-cli search "omega 3" --country de --currency EUR
+iherb-cli product 61864 --country ch --currency CHF
 ```
 
-Never compare two prices without comparing their currencies. A number whose
+Prices come back in the storefront's own currency; nothing is converted. A price
+the page did not name a currency for is reported as
+`(currency unknown: the page published none)` rather than being captioned with
+one.
+
+Never compare two prices without comparing their currencies. The same product is
+NOK 880.63, €76.57 and $64.56 depending only on the storefront, so a number whose
 currency is unknown is not comparable to one whose currency is known.
 
 ## Tips

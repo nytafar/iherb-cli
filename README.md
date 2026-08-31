@@ -120,14 +120,14 @@ Take 1 capsule daily with or without food.
 
 | Flag | Description | Default |
 |---|---|---|
-| `--country <code>` | Country code for localized pricing (e.g., `us`, `ch`, `de`) | `us` |
-| `--currency <code>` | Require the storefront to price in this currency (e.g., `USD`, `CHF`, `EUR`). Does **not** convert — see below | none |
+| `--country <code>` | Country code for localized pricing (e.g., `us`, `ch`, `de`). On its own, iHerb may still override it from your IP | `us` |
+| `--currency <code>` | Ask the storefront to price in this currency (e.g., `USD`, `CHF`, `EUR`), and check what came back. Does **not** convert — see below | none |
 | `--no-cache` | Bypass local cache and fetch fresh data | — |
 | `--delay <ms>` | Delay between requests in milliseconds | `2000` |
 | `--debug` | Run the browser headed (a visible window), log at debug level, and print the provenance table | — |
 
 ```bash
-# Swiss storefront, and refuse the results if it does not price in CHF
+# Swiss storefront in Swiss francs, whatever your IP says you are
 iherb-cli search "magnesium" --country ch --currency CHF
 
 # Fast mode (shorter delay between requests)
@@ -139,15 +139,30 @@ iherb-cli product 61864 --debug
 
 ### What `--currency` does
 
-It asserts; it does not convert.
+It asks, then checks. It never converts.
 
-iHerb prices in the currency of the storefront that `--country` selects, and
-this tool reports whatever currency that storefront published. `--currency` says
-which one you were expecting: if the storefront prices in something else, or
-published no currency at all, the command fails with an error naming both. It
-never changes a price and never changes a label.
+iHerb prices in the currency of the storefront you are on, and it carries that
+choice in the cookies its own header picker writes. `--currency` sets them
+before the page is fetched, so the storefront really does price in what you
+asked for; the currency is then read back off the page, and a storefront that
+priced in something else is an error naming both. Nothing is converted and no
+price is captioned with a currency the page did not publish.
 
-Omit it — the default — to accept whatever the storefront prices in.
+So the same product genuinely differs by storefront — measured on 2026-08-31:
+
+```
+iherb-cli product 12949 --country no --currency NOK   # NOK 880.63
+iherb-cli product 12949 --country de --currency EUR   # €76.57
+iherb-cli product 12949 --country us --currency USD   # $64.56
+```
+
+**`--currency` is also what makes `--country` stick.** iHerb geolocates by IP,
+and the preference it honours names a country *and* a currency together — a
+currency on its own is discarded. Without `--currency`, `--country us` from a
+Norwegian address returns the Norwegian storefront in NOK. With it, you get the
+storefront you named.
+
+Omit it — the default — to take whatever iHerb serves.
 
 A price whose currency the page did not publish is reported as
 `9.60 (currency unknown: the page published none)`, never as `$9.60` or as the

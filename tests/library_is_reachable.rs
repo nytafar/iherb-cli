@@ -100,6 +100,7 @@ fn a_command_is_a_target_descriptor() {
         product.cache_key(),
         CacheKey::Product {
             country: "us".to_string(),
+            currency: None,
             product_id: "102110".to_string()
         }
     );
@@ -111,6 +112,7 @@ fn a_command_is_a_target_descriptor() {
         search.cache_key(),
         CacheKey::Search {
             country: "us".to_string(),
+            currency: None,
             query: "vitamin c".to_string(),
             sort: SortOrder::Relevance,
             category: None,

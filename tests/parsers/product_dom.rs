@@ -12,6 +12,7 @@ use iherb_cli::scraper::product::{
 
 use crate::fixture::{
     self, BASE_URL, B_COMPLEX, GOLD_C_POWDER, OLLY_GUMMIES, TWO_A_DAY, ULTIMATE_OMEGA,
+    ULTIMATE_OMEGA_NOK,
 };
 
 // ---------------------------------------------------------------------------
@@ -66,24 +67,115 @@ fn dom_fallback_agrees_with_json_ld_on_price_and_rating() {
 #[test]
 fn dom_fallback_reads_product_code_and_shipping_weight() {
     for f in fixture::products() {
-        let product = parse_from_html(f.html(), f.product_id(), BASE_URL).unwrap();
+        let product = parse_from_html(f.html(), f.product_id(), f.base_url()).unwrap();
         assert!(product.product_code.is_some(), "{}", f.slug());
         assert!(product.upc.is_some(), "{}", f.slug());
 
         let weight = product
             .shipping_weight
             .unwrap_or_else(|| panic!("{}: no shipping weight", f.slug()));
-        assert!(
-            weight.ends_with(" lb"),
-            "{}: shipping weight is a bare weight, not the tooltip too: {:?}",
-            f.slug(),
-            weight
-        );
+
+        // `lb` is the US storefront's unit, not a fact about the field: the
+        // Norwegian capture says `kg`. The tooltip check is the point of the
+        // assertion and applies to every page; the unit is asserted only where
+        // it is the page's own.
+        if f.base_url() == fixture::US_STOREFRONT {
+            assert!(
+                weight.ends_with(" lb"),
+                "{}: shipping weight is a bare weight, not the tooltip too: {:?}",
+                f.slug(),
+                weight
+            );
+        }
     }
 
     let nordic = parse_from_html(ULTIMATE_OMEGA.html(), "12949", BASE_URL).unwrap();
     assert_eq!(nordic.product_code.as_deref(), Some("NOR-03790"));
     assert_eq!(nordic.shipping_weight.as_deref(), Some("0.72 lb"));
+}
+
+/// The same product, two storefronts, two currencies, two prices (#5).
+///
+/// This is what `--currency` buys, asserted against the two real captures
+/// rather than against the flag. The pair is only obtainable because the
+/// preference cookies change the document iHerb serves: no URL selects a
+/// currency, and from the IP that captured these, both requests would otherwise
+/// have come back Norwegian.
+///
+/// It is also the test that would have caught the bug the whole issue is about.
+/// Before #5, the currency on a record was `--currency`'s label wherever
+/// detection fell through, so a US price and a Norwegian price could carry the
+/// same currency string. Here they cannot: each page states its own, and the
+/// numbers differ by more than a factor of ten.
+#[test]
+fn one_product_prices_differently_on_two_storefronts() {
+    let usd = parse_from_html(ULTIMATE_OMEGA.html(), "12949", ULTIMATE_OMEGA.base_url()).unwrap();
+    let nok = parse_from_html(
+        ULTIMATE_OMEGA_NOK.html(),
+        "12949",
+        ULTIMATE_OMEGA_NOK.base_url(),
+    )
+    .unwrap();
+
+    // The same product.
+    assert_eq!(usd.product_id, nok.product_id);
+    assert_eq!(usd.product_code, nok.product_code);
+    assert_eq!(usd.upc, nok.upc);
+
+    // Priced by two storefronts, each naming its own currency — read off the
+    // page on both, never substituted.
+    assert_eq!(usd.currency.as_deref(), Some("USD"));
+    assert_eq!(nok.currency.as_deref(), Some("NOK"));
+    assert_eq!(usd.source_of("currency"), Source::Dom);
+    assert_eq!(nok.source_of("currency"), Source::Dom);
+
+    // And the numbers are the storefronts' own, not one number relabelled.
+    assert!(
+        nok.price > usd.price * 5.0,
+        "{} vs {}",
+        nok.price,
+        usd.price
+    );
+    assert_eq!(nok.price, 880.63);
+
+    // A Norwegian price parses as a price: no thousands separator confusion, no
+    // currency prefix left in the number.
+    assert!(nok.price.fract() > 0.0);
+}
+
+/// CHARACTERIZATION, NOT DESIRED: `shipping_weight` on a page captured from the
+/// **current** site carries the info tooltip glued to the value.
+///
+/// Not a regression in our code and not a storefront difference — a change in
+/// iHerb's markup. The seven upstream captures are siteVersion 1.0.19891 to
+/// 1.0.20071 and give a bare `0.72 lb`; the NOK capture is 1.0.22698 and gives
+/// the weight followed by the whole "The Shipping Weight includes the product,
+/// protective packaging material…" tooltip. `extract_spec` takes the text of the
+/// value cell, and that cell now contains the tooltip too.
+///
+/// This is live: `iherb-cli product 12949 --country no` prints the paragraph
+/// today. #5 found it by capturing a page newer than the fixtures and is not
+/// fixing it — this pins it so that whoever does can see it go green, and so
+/// that the desired value is written down.
+///
+/// DESIRED: `Some("0.33 kg")`.
+#[test]
+fn shipping_weight_on_a_current_page_carries_the_tooltip_too() {
+    let nok = parse_from_html(
+        ULTIMATE_OMEGA_NOK.html(),
+        "12949",
+        ULTIMATE_OMEGA_NOK.base_url(),
+    )
+    .unwrap();
+    let weight = nok.shipping_weight.expect("the page publishes a weight");
+
+    assert!(weight.starts_with("0.33 kg"), "{:?}", weight);
+    assert!(
+        weight.contains("The Shipping Weight includes the product"),
+        "if this stopped being true the tooltip is gone and the DESIRED value \
+         above is what to assert instead: {:?}",
+        weight
+    );
 }
 
 /// #31, flipped. This was `dom_fallback_reports_the_gummies_as_in_stock`.
@@ -229,8 +321,13 @@ fn a_page_with_no_stock_signal_answers_unknown() {
 #[test]
 fn the_dom_path_reports_the_currency_the_page_published() {
     for f in fixture::products() {
-        let product = parse_from_html(f.html(), f.product_id(), BASE_URL).unwrap();
-        assert_eq!(product.currency.as_deref(), Some("USD"), "{}", f.slug());
+        let product = parse_from_html(f.html(), f.product_id(), f.base_url()).unwrap();
+        assert_eq!(
+            product.currency.as_deref(),
+            Some(f.currency()),
+            "{}",
+            f.slug()
+        );
         assert_eq!(product.source_of("currency"), Source::Dom, "{}", f.slug());
     }
 

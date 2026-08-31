@@ -1,6 +1,6 @@
 //! The fixture loader.
 //!
-//! Seven real iHerb pages live gzipped under `tests/fixtures/`. This module
+//! Eight real iHerb pages live gzipped under `tests/fixtures/`. This module
 //! inflates them once per test binary and hands each parser the shape it wants,
 //! because the parsers do not agree on one:
 //!
@@ -15,6 +15,13 @@
 //! and add a row to the [`registry!`] block below. The named constant, the
 //! `all()` and `products()` sweeps and the gzip bytes are all derived from that
 //! row — there is no second list to keep in step.
+//!
+//! A row also names the **storefront** the page came from. It used to be safe
+//! to assume one: every capture was `www.iherb.com` in USD, so the sweeps wrote
+//! `"USD"` and `BASE_URL` as literals. #5 added a Norwegian capture, and a
+//! literal in a sweep is a claim about every page rather than about the one it
+//! is looking at. [`Fixture::currency`] and [`Fixture::base_url`] are what the
+//! sweeps ask instead.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -31,6 +38,13 @@ pub struct Fixture {
     /// The iHerb product id the page was captured for, or `""` for pages that
     /// are not a single product.
     product_id: &'static str,
+    /// The ISO code the page's own storefront prices in — what
+    /// `detect_currency_from_html` must return for it, and what every parser
+    /// sweep compares against instead of a hardcoded `"USD"`.
+    currency: &'static str,
+    /// The storefront the page was served from, to pass parsers that build
+    /// absolute URLs. Not always `https://www.iherb.com` since #5.
+    base_url: &'static str,
     /// The page as committed. `include_bytes!` keeps the suite independent of
     /// the working directory.
     gz: &'static [u8],
@@ -39,12 +53,14 @@ pub struct Fixture {
 /// Declares each page once: a named constant, its slug, and its product id.
 /// Everything else about a fixture is derived from the row.
 macro_rules! registry {
-    ($( $(#[$meta:meta])* $name:ident = $slug:literal, $product_id:literal; )*) => {
+    ($( $(#[$meta:meta])* $name:ident = $slug:literal, $product_id:literal, $currency:literal, $base_url:expr; )*) => {
         $(
             $(#[$meta])*
             pub const $name: Fixture = Fixture {
                 slug: $slug,
                 product_id: $product_id,
+                currency: $currency,
+                base_url: $base_url,
                 gz: include_bytes!(concat!("../fixtures/", $slug, ".html.gz")),
             };
         )*
@@ -58,31 +74,42 @@ registry! {
     /// California Gold Nutrition Two a Day. JSON-LD prices arrive as a
     /// `priceSpecification` array with a strikethrough entry, and this is the
     /// only capture with a populated review histogram.
-    TWO_A_DAY = "product-104996-cgn-two-a-day", "104996";
+    TWO_A_DAY = "product-104996-cgn-two-a-day", "104996", "USD", US_STOREFRONT;
 
     /// California Gold Nutrition B Complex. JSON-LD carries a flat top-level
     /// price; its review-histogram element is an empty shell.
-    B_COMPLEX = "product-108255-cgn-b-complex", "108255";
+    B_COMPLEX = "product-108255-cgn-b-complex", "108255", "USD", US_STOREFRONT;
 
     /// OLLY Goodbye Stress gummies — the awkward one. Out of stock, no review
     /// histogram element at all, and no `.prodOverviewIngred`.
-    OLLY_GUMMIES = "product-119174-olly-gummies", "119174";
+    OLLY_GUMMIES = "product-119174-olly-gummies", "119174", "USD", US_STOREFRONT;
 
     /// Nordic Naturals Ultimate Omega softgels. The page the JS-globals side
     /// fixture was transcribed from.
-    ULTIMATE_OMEGA = "product-12949-nordic-ultimate-omega", "12949";
+    ULTIMATE_OMEGA = "product-12949-nordic-ultimate-omega", "12949", "USD", US_STOREFRONT;
+
+    /// The same product as [`ULTIMATE_OMEGA`], from the Norwegian storefront in
+    /// NOK (#5).
+    ///
+    /// The suite's only non-USD page, and the only one this repository captured
+    /// itself. It is here because every sweep that compared a currency to the
+    /// literal `"USD"` was really asserting that iHerb has one storefront: they
+    /// passed for seven pages that happened to agree, and could not have failed.
+    /// Being the *same product* as the USD capture is the point — the price
+    /// differs because the storefront differs, not because the product does.
+    ULTIMATE_OMEGA_NOK = "product-12949-nordic-ultimate-omega-nok", "12949", "NOK", NO_STOREFRONT;
 
     /// California Gold Nutrition Gold C powder. A one-nutrient supplement
     /// table; its review-histogram element is an empty shell.
-    GOLD_C_POWDER = "product-59561-cgn-gold-c-powder", "59561";
+    GOLD_C_POWDER = "product-59561-cgn-gold-c-powder", "59561", "USD", US_STOREFRONT;
 
     /// `/search?kw=vitamin+c`, 48 cards, "1 - 48 of 11,952 results", and the
     /// sort dropdown and category facets that #3 and #4 are about.
-    SEARCH_VITAMIN_C = "search-vitamin-c", "";
+    SEARCH_VITAMIN_C = "search-vitamin-c", "", "USD", US_STOREFRONT;
 
     /// `/c/supplements`, a category listing. Not parsed by anything yet; kept
     /// for the catalog command in #21.
-    CATEGORY_SUPPLEMENTS = "category-supplements", "";
+    CATEGORY_SUPPLEMENTS = "category-supplements", "", "USD", US_STOREFRONT;
 }
 
 /// Every page the suite can load, for tests that sweep all of them.
@@ -101,6 +128,16 @@ pub fn products() -> impl Iterator<Item = Fixture> {
 impl Fixture {
     pub fn slug(self) -> &'static str {
         self.slug
+    }
+
+    /// The currency this page's storefront prices in.
+    pub fn currency(self) -> &'static str {
+        self.currency
+    }
+
+    /// The storefront this page was served from.
+    pub fn base_url(self) -> &'static str {
+        self.base_url
     }
 
     /// The product id to hand parsers that take one.
@@ -140,10 +177,20 @@ pub fn empty_doc() -> Html {
     Html::parse_document("<html><body></body></html>")
 }
 
-/// The base URL every parser test passes, so expected URLs read the same way.
-/// It matches the storefront the fixtures were captured from: `countryCode`
-/// is `US` on all seven.
-pub const BASE_URL: &str = "https://www.iherb.com";
+/// The US storefront, which seven of the eight captures came from.
+pub const US_STOREFRONT: &str = "https://www.iherb.com";
+
+/// The Norwegian storefront, which the NOK capture came from (#5).
+pub const NO_STOREFRONT: &str = "https://no.iherb.com";
+
+/// The base URL a test passes when the storefront is not what it is testing, so
+/// expected URLs read the same way across the file.
+///
+/// Prefer [`Fixture::base_url`] wherever a test hands a *fixture* to a parser:
+/// this constant is right for the seven US pages and wrong for the Norwegian
+/// one, and a test that passes it anyway is asserting against a URL the page
+/// never had.
+pub const BASE_URL: &str = US_STOREFRONT;
 
 /// Load a JSON side-fixture from `tests/fixtures/<name>.json`.
 ///

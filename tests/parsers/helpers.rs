@@ -89,7 +89,7 @@ fn currency_is_detected_from_the_captured_pages() {
     for f in fixture::products() {
         assert_eq!(
             detect_currency_from_html(&f.doc()).as_deref(),
-            Some("USD"),
+            Some(f.currency()),
             "{}",
             f.slug()
         );
@@ -128,7 +128,7 @@ fn currency_comes_from_the_storefront_global_first() {
     for f in fixture::all() {
         assert_eq!(
             detect_currency_from_globals(&f.doc()).as_deref(),
-            Some("USD"),
+            Some(f.currency()),
             "{}",
             f.slug()
         );
