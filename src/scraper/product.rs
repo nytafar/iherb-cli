@@ -982,68 +982,103 @@ pub fn parse_supplement_facts_html(doc: &Html) -> Option<SupplementFacts> {
     })
 }
 
+/// Read the review histogram out of iHerb's `<ugc-review-progress-bar>`, or
+/// `None` when the page carries no histogram this can read.
+///
+/// The widget is a `<button class="item">` per star level, high to low, each
+/// holding the star level it stands for, a bar whose CSS width is the
+/// percentage, and an `each-count` span with the raw count.
+///
+/// # Two ways a button names its star level
+///
+/// This used to look only for the words `5 stars` in the button's text, and on
+/// the one capture whose widget is hydrated there is no such text: the level is
+/// drawn as a `<ugc-star>` full of SVG. Every bar was skipped and the function
+/// returned nothing (#32). Both readings are tried now, text first:
+///
+///  1. `"5 stars"` in the button's own text — the shape the widget's markup
+///     described, and the one a non-JS render would produce.
+///  2. The number of gold stars in the button's `<ugc-star>`. A filled star is
+///     an `<li class="ugc-star-item">` whose SVG carries a `#FAC627` path; an
+///     empty one has the outline paths and not that. On product-104996 the five
+///     buttons hold five, four, three, two and one gold star, which is the
+///     level each stands for.
+///
+/// # What it refuses to answer
+///
+/// A page with no widget, and the empty 68-byte shell two captures carry,
+/// both return `None` rather than a distribution of zeroes: absent data and a
+/// broken read have to stay distinguishable (#28).
+///
+/// So does a widget whose buttons do not resolve to *distinct* levels. Five
+/// buttons that all read as "5 stars" mean the star reading failed, not that
+/// every review was five stars, and filling `five_star` from the last one to
+/// win would be exactly the invention this codebase exists to avoid.
+///
+/// # How far the evidence goes
+///
+/// One captured page has a hydrated widget. That the gold-star reading is how
+/// iHerb encodes the level on *every* live page is an inference from that
+/// single sample, not an established fact — which is why the text reading is
+/// kept rather than replaced.
 pub fn parse_review_distribution_html(doc: &Html) -> Option<ReviewDistribution> {
-    // iHerb uses a <ugc-review-progress-bar> custom element containing
-    // a <button class="item"> for each star level (5 down to 1).
-    // Each button has:
-    //   - a <span> with text like "5 stars"
-    //   - a <span> with style="width: XX%;" showing the bar fill
-    //   - a <span class="... each-count"> with the raw review count
-    // We extract the bar width percentage for each star level.
     let container_sel =
         Selector::parse("ugc-review-progress-bar, .ugc-review-progress-wrap").ok()?;
     let container = doc.select(&container_sel).next()?;
 
     let button_sel = Selector::parse("button.item").ok()?;
-    let buttons: Vec<_> = container.select(&button_sel).collect();
-    if buttons.is_empty() {
-        return None;
-    }
+    let gold_star_sel = Selector::parse(r##"li.ugc-star-item path[fill="#FAC627"]"##).ok()?;
+    let bar_sel = Selector::parse(".percent-wrap span, span.block").ok()?;
 
     let mut star_pcts: [Option<f64>; 5] = [None; 5]; // index 0 = 5-star, 4 = 1-star
 
-    for button in &buttons {
-        // Find which star level this button represents
-        let button_text: String = button.text().collect::<Vec<_>>().join(" ");
-        let star_level: Option<usize> = button_text
-            .split_whitespace()
-            .zip(button_text.split_whitespace().skip(1))
-            .find(|(_, second)| second.starts_with("star"))
-            .and_then(|(num, _)| num.parse::<usize>().ok())
-            .filter(|&n| (1..=5).contains(&n));
-
-        let star_level = match star_level {
-            Some(n) => n,
+    for button in container.select(&button_sel) {
+        let star_level = match read_star_label(&button).or_else(|| {
+            let gold = button.select(&gold_star_sel).count();
+            (1..=5).contains(&gold).then_some(gold)
+        }) {
+            Some(level) => level,
             None => continue,
         };
 
-        // Extract the bar width percentage from the inner <span> style attribute.
-        // The bar is: <span class="block h-full bg-green-dark" style="width: 84%;"></span>
-        // inside a <div class="percent-wrap ...">
-        if let Ok(span_sel) = Selector::parse(".percent-wrap span, span.block") {
-            for span in button.select(&span_sel) {
-                if let Some(style) = span.value().attr("style") {
-                    if let Some(pct) = parse_width_percent(style) {
-                        star_pcts[5 - star_level] = Some(pct);
-                        break;
-                    }
-                }
-            }
+        let slot = &mut star_pcts[5 - star_level];
+        if slot.is_some() {
+            // Two bars claiming the same level means the level reading is
+            // wrong, and there is no way to tell which bar is which.
+            return None;
         }
+
+        let Some(pct) = button
+            .select(&bar_sel)
+            .filter_map(|span| span.value().attr("style"))
+            .find_map(parse_width_percent)
+        else {
+            continue;
+        };
+        *slot = Some(pct);
     }
 
-    // Only return if we found at least one star level
-    if star_pcts.iter().all(|p| p.is_none()) {
-        return None;
-    }
+    star_pcts
+        .iter()
+        .any(|p| p.is_some())
+        .then_some(ReviewDistribution {
+            five_star: star_pcts[0],
+            four_star: star_pcts[1],
+            three_star: star_pcts[2],
+            two_star: star_pcts[3],
+            one_star: star_pcts[4],
+        })
+}
 
-    Some(ReviewDistribution {
-        five_star: star_pcts[0],
-        four_star: star_pcts[1],
-        three_star: star_pcts[2],
-        two_star: star_pcts[3],
-        one_star: star_pcts[4],
-    })
+/// The star level written out in the button's text, as in `5 stars`.
+fn read_star_label(button: &scraper::ElementRef<'_>) -> Option<usize> {
+    let text: String = button.text().collect::<Vec<_>>().join(" ");
+    let words: Vec<&str> = text.split_whitespace().collect();
+    words
+        .windows(2)
+        .find(|pair| pair[1].starts_with("star"))
+        .and_then(|pair| pair[0].parse::<usize>().ok())
+        .filter(|n| (1..=5).contains(n))
 }
 
 /// Parse a percentage value from a CSS width style like "width: 84%;".

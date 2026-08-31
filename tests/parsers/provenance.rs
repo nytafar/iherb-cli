@@ -79,10 +79,19 @@ fn every_field_names_the_strategy_that_produced_it() {
     // publish. It now says `Dom`, which is where the page carries it.
     assert_eq!(product.source_of("shipping_weight"), Source::Dom);
 
-    // And the one nothing produced. `review_distribution` was here too until
-    // #32; it is `Dom` on this page now, and still `Absent` on the four
-    // captures whose histogram widget is an empty shell or missing entirely.
+    // `review_distribution` was in the list below until #32. It is `Dom` on
+    // this page — the only capture whose histogram widget is hydrated.
+    assert_eq!(product.source_of("review_distribution"), Source::Dom);
+
+    // And the one nothing produced. The gummies page, which has no histogram
+    // widget at all, still reports `review_distribution` absent — which is the
+    // point of the distinction: `Absent` is the page saying nothing, not the
+    // parser failing.
     assert_eq!(product.source_of("category_breadcrumb"), Source::Absent);
+    assert_eq!(
+        as_production_would(OLLY_GUMMIES).source_of("review_distribution"),
+        Source::Absent
+    );
 
     // And the one that has a value nobody read.
     assert_eq!(product.source_of("product_url"), Source::Defaulted);

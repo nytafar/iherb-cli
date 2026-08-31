@@ -56,3 +56,12 @@ Take 2 capsules daily, with food. Best when taken as directed by a qualified hea
 ## Warnings
 Keep out of reach of children.  Pregnant or lactating women, the chronically ill, elderly, individuals under the age of 18, those taking prescription medications (e.g., blood thinners) as well as those with a physician-diagnosed medical condition should consult with a physician, pharmacist, naturopath or other qualified healthcare professional prior to taking dietary supplements.  Sealed for your protection. Do not use if seal is missing or broken. Store in a cool, dry place. Protect from heat, light, and moisture.
 
+## Reviews
+- **Average:** 4.7/5
+- **Total:** 13,195 reviews
+- 5 stars: 79%
+- 4 stars: 14%
+- 3 stars: 5%
+- 2 stars: 1%
+- 1 star: 1%
+

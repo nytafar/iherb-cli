@@ -521,42 +521,50 @@ fn populated_bars(f: crate::fixture::Fixture) -> usize {
     doc.select(&sel).count()
 }
 
-/// CHARACTERIZATION, NOT DESIRED: pins #32. `parse_review_distribution_html`
-/// returns `None` on all five pages, so `## Reviews` never renders a histogram.
+/// #32, flipped. This was `review_distribution_is_never_found_on_a_real_page`.
 ///
-/// The five captures fall into three groups, and only the first is evidence of
-/// the bug:
+/// The five captures fall into three groups, and only the first was ever
+/// evidence of the bug:
 ///
 /// - **product-104996 alone** carries a populated `<ugc-review-progress-bar>`:
 ///   five `button.item` bars, five `each-count` spans, five `width: N%` values.
-///   The parser still returns `None`, and that is #32.
+///   The parser returned `None` on it, and that was #32.
 /// - **product-108255 and product-59561** carry the element as an empty
 ///   68-byte shell with no buttons at all — the widget had not filled in when
 ///   the page was captured. `None` is the correct answer there.
 /// - **product-119174 and product-12949** have no such element anywhere.
 ///   `None` is correct there too.
 ///
-/// So one page, not three, proves the bug. The parser identifies a bar's star
-/// level by looking for the words `"5 stars"` in the button's text; the real
-/// markup draws the stars as an `<ugc-star>` element full of SVG with no such
-/// text, so every bar is skipped and the function bails.
+/// So one page, not three, ever proved the bug, and one page is what this
+/// asserts. The parser identified a bar's star level by looking for the words
+/// `"5 stars"` in the button's text; the real markup draws the level as an
+/// `<ugc-star>` full of SVG with no such text, so every bar was skipped.
 ///
-/// #32 flips the 104996 case to a populated distribution and leaves the other
-/// four `None`. `review_distribution_parses_the_shape_the_parser_documents`
-/// below shows the arithmetic is fine once a star level can be found.
+/// The bar counts are asserted per fixture on purpose. If a later re-capture
+/// fills in the two empty shells, this test says so rather than letting the
+/// one-page claim quietly widen into a five-page one.
 #[test]
-fn review_distribution_is_never_found_on_a_real_page() {
-    for f in fixture::products() {
+fn review_distribution_is_found_on_the_one_page_that_has_one() {
+    let two_a_day =
+        parse_review_distribution_html(&TWO_A_DAY.doc()).expect("104996 has a hydrated widget");
+    assert_eq!(two_a_day.five_star, Some(79.0));
+    assert_eq!(two_a_day.four_star, Some(14.0));
+    assert_eq!(two_a_day.three_star, Some(5.0));
+    assert_eq!(two_a_day.two_star, Some(1.0));
+    assert_eq!(two_a_day.one_star, Some(1.0));
+
+    // The bars are read as percentages, and the widget's own `each-count`
+    // spans say what they are percentages of: 10,434 + 1,865 + 645 + 138 + 113
+    // is 13,195, the page's review count. That the level came from the right
+    // bar is not an assumption about DOM order — the arithmetic agrees.
+    for f in [B_COMPLEX, GOLD_C_POWDER, OLLY_GUMMIES, ULTIMATE_OMEGA] {
         assert!(
             parse_review_distribution_html(&f.doc()).is_none(),
-            "{} now yields a distribution — has the star-level lookup been fixed?",
+            "{} has no bars to read, so it must not yield a distribution",
             f.slug()
         );
     }
 
-    // Exactly one page has data for the parser to lose. Counting the bars
-    // keeps the three groups above honest: if a later re-capture fills in the
-    // empty shells, this test says so rather than quietly widening its claim.
     for (f, bars) in [
         (TWO_A_DAY, 5),
         (B_COMPLEX, 0),
@@ -573,8 +581,61 @@ fn review_distribution_is_never_found_on_a_real_page() {
     assert!(!OLLY_GUMMIES.html().contains("<ugc-review-progress-bar"));
 }
 
-/// The shape `parse_review_distribution_html`'s own doc comment describes: a
-/// `<span>` naming the star level, and a bar whose width carries the percentage.
+/// The star level a hydrated bar stands for is drawn, not written: an
+/// `<li class="ugc-star-item">` is gold when its SVG carries a `#FAC627` path.
+///
+/// This is the reading #32 turns on, so it is asserted directly rather than
+/// only through the distribution above. Five buttons, five, four, three, two
+/// and one gold star.
+#[test]
+fn a_hydrated_bar_names_its_star_level_in_gold_stars() {
+    let doc = TWO_A_DAY.doc();
+    let button_sel = scraper::Selector::parse("ugc-review-progress-bar button.item").unwrap();
+    let gold_sel = scraper::Selector::parse(r##"li.ugc-star-item path[fill="#FAC627"]"##).unwrap();
+
+    let levels: Vec<usize> = doc
+        .select(&button_sel)
+        .map(|b| b.select(&gold_sel).count())
+        .collect();
+    assert_eq!(levels, [5, 4, 3, 2, 1]);
+
+    // And no bar says so in words, which is what the old parser looked for.
+    for button in doc.select(&button_sel) {
+        let text: String = button.text().collect();
+        assert!(
+            !text.contains("star"),
+            "the hydrated widget writes no star-label text: {:?}",
+            text
+        );
+    }
+}
+
+/// Bars that cannot be told apart are not a distribution.
+///
+/// If the star reading fails and every button lands on the same level, the
+/// honest answer is `None`. Letting the last bar win would report a product
+/// whose reviews are 1% five-star as if that were the whole histogram — an
+/// invented number with a real number's shape.
+#[test]
+fn review_distribution_refuses_bars_it_cannot_tell_apart() {
+    let html = r#"
+        <ugc-review-progress-bar>
+          <button class="item"><span>5 stars</span>
+            <div class="percent-wrap"><span class="block" style="width: 84%;"></span></div></button>
+          <button class="item"><span>5 stars</span>
+            <div class="percent-wrap"><span class="block" style="width: 1%;"></span></div></button>
+        </ugc-review-progress-bar>
+    "#;
+    assert!(parse_review_distribution_html(&scraper::Html::parse_document(html)).is_none());
+}
+
+/// The other shape the parser reads: a `<span>` naming the star level in words,
+/// and a bar whose width carries the percentage.
+///
+/// No capture renders this, so it is asserted against hand-written markup. It
+/// is kept rather than replaced by the gold-star reading because only one
+/// captured page is hydrated, and one sample is not enough to declare the
+/// written form gone from every live page.
 #[test]
 fn review_distribution_parses_the_shape_the_parser_documents() {
     let html = r#"

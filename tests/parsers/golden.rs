@@ -5,13 +5,13 @@
 //! a checked-in file; run `UPDATE_GOLDEN=1 cargo test` to rewrite the goldens,
 //! then read the diff before committing it.
 //!
-//! The goldens are characterizations like everything else here, and one known
-//! bug is still visible in them: `## Reviews` never appears, because
-//! `parse_review_distribution_html` finds nothing on a real page (see
-//! `product_dom::review_distribution_is_never_found_on_a_real_page`). When it
-//! lands, the golden grows a section and that diff is the proof. The
-//! `Shipping Weight` line that #2 used to eat is there now, and its arrival was
-//! the same kind of diff.
+//! Both bugs the goldens used to characterize have landed, and each grew a
+//! golden: `product-104996` gained the `Shipping Weight` line #2 ate and the
+//! `## Reviews` histogram #32 could not read. Those diffs were the proof.
+//!
+//! `product-119174` still has neither section, and that is the page rather than
+//! us: the gummies capture carries no `<ugc-review-progress-bar>` at all, so
+//! `## Reviews` is genuinely absent and must not be rendered as zeroes.
 
 use iherb_cli::cli::Section;
 use iherb_cli::output::{format_product_detail, format_search_results};
@@ -39,7 +39,8 @@ fn product_renders_every_section() {
 
 /// The gummies page is missing most of what the formatter can print, so this
 /// golden is the shape of a sparse product: no ingredients, no suggested use,
-/// no warnings, no review histogram, and an out-of-stock line.
+/// no warnings, no review histogram — the page has no widget at all — and an
+/// out-of-stock line.
 #[test]
 fn product_renders_what_a_sparse_page_has() {
     let product = as_production_would(OLLY_GUMMIES);
