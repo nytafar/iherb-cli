@@ -81,6 +81,68 @@ impl Drop for Scratch {
     }
 }
 
+/// Removes every profile directory that has appeared since it was constructed,
+/// on the way out of the scope it lives in — *including* when an assertion
+/// panics on the way past it.
+///
+/// This is #53, and it is the same lesson as the production fix these tests
+/// guard (`9c455f9`): cleanup written after an assertion is cleanup that a
+/// failing run never reaches. The #46 tests below are designed to be run red —
+/// reverting the fix and watching them bite is this programme's required
+/// proof — so the failure path is the one exercised most often, and it was the
+/// one leaking the very directory the test exists to detect.
+///
+/// The guard removes nothing *before* an assertion has read the filesystem, so
+/// `!profile_dir.exists()` still fails when the production fix is gone, and the
+/// failure message still names the path. Cleanup happens after the verdict, not
+/// instead of it.
+struct SweepProfileDirs {
+    /// The profile directories that were already there, and are somebody
+    /// else's to remove.
+    before: Vec<PathBuf>,
+}
+
+impl SweepProfileDirs {
+    fn since(before: &[PathBuf]) -> Self {
+        Self {
+            before: before.to_vec(),
+        }
+    }
+
+    /// The profile directories that appeared since, and are still there.
+    fn outstanding(&self) -> Vec<PathBuf> {
+        profile_dirs()
+            .into_iter()
+            .filter(|d| !self.before.contains(d))
+            .collect()
+    }
+}
+
+impl Drop for SweepProfileDirs {
+    fn drop(&mut self) {
+        for dir in self.outstanding() {
+            // The same patience as `remove_profile_dir` in production, for the
+            // same reason: a session that was panicked past is a session whose
+            // Chrome is still being reaped, so a removal that fails right now
+            // usually means "not yet" rather than "never".
+            for attempt in 1..=SWEEP_ATTEMPTS {
+                if !dir.exists() || std::fs::remove_dir_all(&dir).is_ok() {
+                    break;
+                }
+                if attempt < SWEEP_ATTEMPTS {
+                    std::thread::sleep(SWEEP_SETTLE);
+                }
+            }
+        }
+    }
+}
+
+/// Mirrors `CLEANUP_ATTEMPTS`/`CLEANUP_SETTLE` in `browser::session`. Not
+/// imported: those are private, and a test that borrowed the production
+/// constants would go quiet in step with them.
+const SWEEP_ATTEMPTS: u32 = 4;
+const SWEEP_SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// Every test here reads process-wide state — the temp directory, and a real
 /// browser's tab list — so they run one at a time. Two of them concurrently
 /// would each see the other's profile directory as its own leak.
@@ -131,7 +193,7 @@ fn argv_recorder(dir: &Path) -> (PathBuf, PathBuf) {
 /// Launch against the recorder and return the argv Chrome would have received.
 async fn captured_argv(scratch: &Path, debug: bool) -> Vec<String> {
     let (exe, argv_file) = argv_recorder(scratch);
-    let before = profile_dirs();
+    let sweep = SweepProfileDirs::since(&profile_dirs());
 
     // Expected to fail: the recorder is not a browser. The argv it wrote down
     // on its way out is the whole point.
@@ -141,13 +203,7 @@ async fn captured_argv(scratch: &Path, debug: bool) -> Vec<String> {
     // else will ever clean it up — `close` and `Drop` both belong to a session
     // that in this case does not exist. Every call here fails, so every call
     // here is that path.
-    let left_behind: Vec<PathBuf> = profile_dirs()
-        .into_iter()
-        .filter(|d| !before.contains(d))
-        .collect();
-    for dir in &left_behind {
-        let _ = std::fs::remove_dir_all(dir);
-    }
+    let left_behind = sweep.outstanding();
     assert!(
         left_behind.is_empty(),
         "a failed launch left its profile directory behind: {:?}",
@@ -280,6 +336,10 @@ async fn an_interrupt_during_launch_leaves_no_profile_directory() {
     let scratch = Scratch::new("interrupt-launch");
     let config = test_config(scratch.path(), false);
     let before = profile_dirs();
+    // #53. Constructed before the assertions and read by none of them: its only
+    // job is to run on the unwind path, so that a red run of this test — the
+    // way it is meant to be exercised — does not leave the leak behind.
+    let sweep = SweepProfileDirs::since(&before);
 
     // Boxed so the future can be dropped on demand. This is what the `select!`
     // in `app.rs` does to the command future when Ctrl+C wins the race.
@@ -310,13 +370,7 @@ async fn an_interrupt_during_launch_leaves_no_profile_directory() {
 
     // And nothing else was left either, in case the launch had got far enough
     // to start a second one.
-    let left: Vec<PathBuf> = profile_dirs()
-        .into_iter()
-        .filter(|d| !before.contains(d))
-        .collect();
-    for dir in &left {
-        let _ = std::fs::remove_dir_all(dir);
-    }
+    let left = sweep.outstanding();
     assert!(
         left.is_empty(),
         "profile directories left behind: {:?}",
@@ -343,7 +397,9 @@ async fn a_panic_unwinding_past_a_session_leaves_no_profile_directory() {
 
     let scratch = Scratch::new("panic-unwind");
     let config = test_config(scratch.path(), false);
-    let before = profile_dirs();
+    // #53, as above: the cleanup has to be on the unwind path, because the
+    // assertions below are what does the unwinding.
+    let sweep = SweepProfileDirs::since(&profile_dirs());
 
     let (tell, hear) = tokio::sync::oneshot::channel();
     let panicked = tokio::spawn(async move {
@@ -377,13 +433,7 @@ async fn a_panic_unwinding_past_a_session_leaves_no_profile_directory() {
         profile_dir.display()
     );
 
-    let left: Vec<PathBuf> = profile_dirs()
-        .into_iter()
-        .filter(|d| !before.contains(d))
-        .collect();
-    for dir in &left {
-        let _ = std::fs::remove_dir_all(dir);
-    }
+    let left = sweep.outstanding();
     assert!(
         left.is_empty(),
         "profile directories left behind: {:?}",
@@ -542,6 +592,14 @@ async fn a_batch_does_not_accumulate_a_tab_per_target() {
 
     let scratch = Scratch::new("tabs");
     let config = test_config(scratch.path(), false);
+    // #53. This test is not one of the two the issue names, and under working
+    // production code it does not leak: every assertion below is upstream of
+    // `close`, but `session` is a live local, so an unwind drops it and the
+    // drop is the cleanup. It leaks in exactly one situation — a run with that
+    // production cleanup reverted, which is this programme's standard
+    // bite-proof and is therefore run often. Declared before `session` so it
+    // drops after it, i.e. after Chrome has been killed.
+    let sweep = SweepProfileDirs::since(&profile_dirs());
     let session = BrowserSession::launch(chrome, &config)
         .await
         .expect("failed to launch the browser");
@@ -590,5 +648,12 @@ async fn a_batch_does_not_accumulate_a_tab_per_target() {
         "tab count grew with target count: after each of six fetches {:?} (tabs: {:?})",
         counts,
         open_after_each
+    );
+
+    let left = sweep.outstanding();
+    assert!(
+        left.is_empty(),
+        "profile directories left behind: {:?}",
+        left
     );
 }
