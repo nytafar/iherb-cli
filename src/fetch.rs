@@ -129,6 +129,27 @@ pub async fn fetch<T: FetchTarget>(
     }
 
     let session = get_or_launch_browser(config, browser_session).await?;
+    fetch_on(target, config, session).await
+}
+
+/// Fetch a target on a session that is already running, without consulting the
+/// cache first.
+///
+/// This is the half of [`fetch`] that needs a browser. It takes `&BrowserSession`
+/// rather than `&mut Option<BrowserSession>`, so several of these can run against
+/// one session at once -- which is what #10's batch fetch with `--concurrency`
+/// needs, and why [`FetchTarget::extract`] declares a `Send` future.
+///
+/// Callers that want the cache consulted want [`fetch`]. A result is still
+/// *stored* here, so a batch populates the cache exactly as a single fetch does.
+pub async fn fetch_on<T: FetchTarget>(
+    target: &T,
+    config: &AppConfig,
+    session: &BrowserSession,
+) -> Result<Fetched<T::Output>> {
+    let cache = Cache::new(config.cache_dir.clone(), config.no_cache);
+    let key = target.cache_key();
+
     let page = session.new_page().await?;
     let navigator = Navigator::new(config.delay_ms);
 

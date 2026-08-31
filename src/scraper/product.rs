@@ -135,7 +135,7 @@ fn extract_prices_from_offers(offers: Option<&serde_json::Value>) -> (f64, Optio
 }
 
 /// Parse product from JSON-LD structured data.
-fn parse_from_json_ld(
+pub fn parse_from_json_ld(
     data: &serde_json::Value,
     product_id: &str,
     base_url: &str,
@@ -231,7 +231,7 @@ fn parse_from_json_ld(
 }
 
 /// Parse product from JS globals (window.PRODUCT_DETAILS, window.IHR_DL).
-fn parse_from_js_globals(
+pub fn parse_from_js_globals(
     globals: &serde_json::Value,
     product_id: &str,
     base_url: &str,
@@ -294,7 +294,7 @@ fn parse_from_js_globals(
 }
 
 /// Enrich a ProductDetail with fields only available in the DOM (ingredients, supplement facts, etc.)
-fn enrich_from_html(html: &str, product: &mut ProductDetail) {
+pub fn enrich_from_html(html: &str, product: &mut ProductDetail) {
     let doc = Html::parse_document(html);
 
     if product.brand.is_empty() {

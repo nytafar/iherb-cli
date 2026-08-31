@@ -2,9 +2,11 @@
 //! from `tests/` without invoking the binary. #8 builds the real fixture suite
 //! on top of this.
 
+use iherb_cli::browser::session::BrowserSession;
 use iherb_cli::cache::CacheKey;
 use iherb_cli::cli::SortOrder;
 use iherb_cli::config::AppConfig;
+use iherb_cli::fetch::fetch_on;
 use iherb_cli::fetch::FetchTarget;
 use iherb_cli::model::{ProductSummary, SearchResult};
 use iherb_cli::output::format_search_results;
@@ -114,4 +116,27 @@ fn a_command_is_a_target_descriptor() {
     assert!(SearchTarget::new(&config, "   ", 20, SortOrder::Relevance, None).is_err());
     assert!(SearchTarget::new(&config, "vitamin c", 0, SortOrder::Relevance, None).is_err());
     assert!(ProductTarget::new(&config, "not-a-product").is_err());
+}
+
+/// SF-2's whole point: `fetch_on` takes `&BrowserSession`, so #10 can drive
+/// several against one session concurrently. That only works if the future is
+/// `Send`, which is also why `FetchTarget::extract` declares one. Checked at
+/// compile time, so a later change that makes it non-`Send` fails the build
+/// rather than #10.
+#[test]
+fn fetch_on_futures_are_send_and_share_one_session() {
+    fn assert_send<F: Send>(_: F) {}
+
+    fn concurrent(config: &AppConfig, session: &BrowserSession) {
+        let a = ProductTarget::new(config, "102110").unwrap();
+        let b = ProductTarget::new(config, "858").unwrap();
+        // Both borrow the same session at the same time, and both are Send.
+        assert_send(futures::future::join(
+            fetch_on(&a, config, session),
+            fetch_on(&b, config, session),
+        ));
+    }
+
+    // Naming it is the whole test: the body above had to typecheck to get here.
+    let _: fn(&AppConfig, &BrowserSession) = concurrent;
 }
