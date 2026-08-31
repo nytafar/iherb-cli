@@ -108,10 +108,12 @@ fn format_overview(product: &ProductDetail, out: &mut String) {
         ));
     }
 
-    let stock_str = if product.in_stock {
-        "In Stock"
-    } else {
-        "Out of Stock"
+    // `None` is not "no": no signal on the page said either way, and printing
+    // "In Stock" for that is the fabrication #31 was filed about.
+    let stock_str = match product.in_stock {
+        Some(true) => "In Stock",
+        Some(false) => "Out of Stock",
+        None => "Unknown (no availability signal found on the page)",
     };
     out.push_str(&format!("- **Availability:** {}\n", stock_str));
 

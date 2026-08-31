@@ -78,7 +78,7 @@ fn dom_fallback_loses_product_code_and_shipping_weight() {
 #[test]
 fn dom_fallback_reports_the_gummies_as_in_stock() {
     let product = parse_from_html(OLLY_GUMMIES.html(), "119174", BASE_URL, "USD").unwrap();
-    assert!(product.in_stock);
+    assert_eq!(product.in_stock, Some(true));
     assert!(!OLLY_GUMMIES.html().contains("Out of Stock"));
 }
 
@@ -156,8 +156,9 @@ fn enrichment_adds_nothing_it_cannot_find() {
     assert!(product.ingredients.is_none());
     assert!(product.suggested_use.is_none());
     assert!(product.warnings.is_none());
-    assert!(
-        !product.in_stock,
+    assert_eq!(
+        product.in_stock,
+        Some(false),
         "JSON-LD's OutOfStock must survive enrichment"
     );
 }

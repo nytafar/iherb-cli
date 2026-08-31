@@ -63,7 +63,7 @@ fn json_ld_reads_both_offer_shapes() {
 #[test]
 fn json_ld_reads_out_of_stock() {
     let gummies = parse_from_json_ld(&OLLY_GUMMIES.json_ld(), "119174", BASE_URL).unwrap();
-    assert!(!gummies.in_stock);
+    assert_eq!(gummies.in_stock, Some(false));
     assert_eq!(
         gummies.name,
         "OLLY, Goodbye Stress®, Berry Verbena, 42 Gummies"
@@ -71,7 +71,12 @@ fn json_ld_reads_out_of_stock() {
     assert_eq!(gummies.brand, "OLLY");
 
     let in_stock = parse_from_json_ld(&B_COMPLEX.json_ld(), "108255", BASE_URL).unwrap();
-    assert!(in_stock.in_stock);
+    assert_eq!(in_stock.in_stock, Some(true));
+
+    // A block with no `availability` at all is unknown, not in stock.
+    let no_offers = serde_json::json!({ "@type": "Product", "name": "Thing" });
+    let unknown = parse_from_json_ld(&no_offers, "1", BASE_URL).unwrap();
+    assert_eq!(unknown.in_stock, None);
 }
 
 #[test]
@@ -82,44 +87,101 @@ fn json_ld_rejects_a_block_with_no_name() {
     assert!(parse_from_json_ld(&nameless, "1", BASE_URL).is_none());
 }
 
-/// CHARACTERIZATION, NOT DESIRED: pins #30. `parse_from_js_globals` cannot
-/// parse the real page. It reads `ihrProduct.prdNm`; every captured page writes
-/// `prdctNm`, so the name comes back empty and the whole strategy returns
-/// `None` — the JS-globals rung of the fallback ladder is dead in production,
-/// and the stock and UPC data it carries is discarded with it.
+/// #30, flipped. `parse_from_js_globals` reads the key the page actually
+/// writes. The fixture is transcribed verbatim from the Nordic page's inline
+/// `<script>`, so the spelling here is the page's spelling, not the parser's.
 ///
-/// #30 flips this to `is_some()`, plus the field checks in
-/// `js_globals_parse_when_the_expected_key_is_present` below.
+/// This was `js_globals_never_match_the_real_page_shape`, asserting `is_none()`.
 #[test]
-fn js_globals_never_match_the_real_page_shape() {
+fn js_globals_read_the_key_the_page_writes() {
     let globals = fixture::json("js-globals-12949");
     assert_eq!(
         globals["ihrProduct"]["prdctNm"].as_str(),
         Some("Nordic Naturals, Ultimate Omega®, Great Lemon, 180 Soft Gels (640 mg per Soft Gel)"),
         "the fixture must keep the page's real key, or this test proves nothing"
     );
-    assert!(globals["ihrProduct"].get("prdNm").is_none());
-
     assert!(
-        parse_from_js_globals(&globals, "12949", BASE_URL, "USD").is_none(),
-        "parse_from_js_globals unexpectedly succeeded — has the key been fixed?"
+        globals["ihrProduct"].get("prdNm").is_none(),
+        "no page has ever written prdNm; if one does, that is new information"
+    );
+
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "USD")
+        .expect("the JS-globals rung must parse the shape every page actually has");
+    assert_eq!(
+        product.name,
+        "Nordic Naturals, Ultimate Omega®, Great Lemon, 180 Soft Gels (640 mg per Soft Gel)"
     );
 }
 
-/// The parser does work when handed the key it asks for, which is what makes
-/// the test above a naming bug rather than a broken parser.
+/// The rung reads every field the blob answers, rather than hardcoding a value
+/// beside the data that would have supplied it. Stock, UPC and category all sat
+/// unread in the very JSON the parser was already holding (#30).
 #[test]
-fn js_globals_parse_when_the_expected_key_is_present() {
-    let mut globals = fixture::json("js-globals-12949");
-    let name = globals["ihrProduct"]["prdctNm"].clone();
-    globals["ihrProduct"]["prdNm"] = name;
-
+fn js_globals_fabricate_nothing_the_blob_can_answer() {
+    let globals = fixture::json("js-globals-12949");
     let product = parse_from_js_globals(&globals, "12949", BASE_URL, "CHF").unwrap();
+
     assert_eq!(product.brand, "Nordic Naturals");
     assert_eq!(product.price, 64.56);
     assert_eq!(product.product_code.as_deref(), Some("NOR-03790"));
     // JS globals carry no currency, so the config fallback label is used as-is.
     assert_eq!(product.currency, "CHF");
+
+    // `upcCd: 768990037900` — a JSON number, not a string.
+    assert_eq!(product.upc.as_deref(), Some("768990037900"));
+    // `stckInd: "InStock"`, previously hardcoded `true` whatever the blob said.
+    assert_eq!(product.in_stock, Some(true));
+    // `prmryPrntCtgry: "Supplements"`, previously hardcoded `None`.
+    assert_eq!(
+        product.category_breadcrumb.as_deref(),
+        Some(["Supplements".to_string()].as_slice())
+    );
+}
+
+/// The dangerous half of #30: a resurrected rung that hardcoded `in_stock: true`
+/// would report an out-of-stock product as purchasable. `stckInd` is read, so
+/// it does not.
+#[test]
+fn js_globals_report_out_of_stock_when_the_blob_says_so() {
+    let mut globals = fixture::json("js-globals-12949");
+    globals["ihrProduct"]["stckInd"] = serde_json::json!("OutOfStock");
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "USD").unwrap();
+    assert_eq!(product.in_stock, Some(false));
+
+    // A live fetch of product 119174 on 2026-08-31 returned this spelling.
+    globals["ihrProduct"]["stckInd"] = serde_json::json!("OutOfStockETA");
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "USD").unwrap();
+    assert_eq!(product.in_stock, Some(false));
+}
+
+/// A value the parser has no reading for is unknown, not `false`. The old code
+/// answered `false` for every label that did not contain the substring
+/// `InStock`, which reads `PreOrder` as out of stock.
+#[test]
+fn js_globals_leave_an_unreadable_stock_label_unknown() {
+    let mut globals = fixture::json("js-globals-12949");
+    globals["ihrProduct"]["stckInd"] = serde_json::json!("PreOrder");
+    // `productDetails.availableToPurchase` is still the second opinion here.
+    globals["productDetails"]["availableToPurchase"] = serde_json::json!("");
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "USD").unwrap();
+    assert_eq!(product.in_stock, None);
+}
+
+/// With no `stckInd` at all, `availableToPurchase` answers — `"False"` on the
+/// out-of-stock gummies page, `"True"` on this one.
+#[test]
+fn js_globals_fall_back_to_available_to_purchase() {
+    let mut globals = fixture::json("js-globals-12949");
+    globals["ihrProduct"]
+        .as_object_mut()
+        .unwrap()
+        .remove("stckInd");
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "USD").unwrap();
+    assert_eq!(product.in_stock, Some(true));
+
+    globals["productDetails"]["availableToPurchase"] = serde_json::json!("False");
+    let product = parse_from_js_globals(&globals, "12949", BASE_URL, "USD").unwrap();
+    assert_eq!(product.in_stock, Some(false));
 }
 
 /// #34 deleted the `__NEXT_DATA__` parsers. This is the guard that says so:

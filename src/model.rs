@@ -25,7 +25,15 @@ pub struct ProductDetail {
     pub review_count: Option<u32>,
     pub product_url: String,
     pub product_id: String,
-    pub in_stock: bool,
+    /// Whether the product can be bought, or `None` when no signal on the page
+    /// said either way.
+    ///
+    /// This is an `Option` rather than a `bool` on purpose (#30, #31, #28).
+    /// Every parser used to default it to `true`, so a product that was out of
+    /// stock — or a page whose stock markup we no longer understand — was
+    /// reported as purchasable. "We could not tell" is a different answer from
+    /// "yes", and a caller deciding whether to buy something needs them apart.
+    pub in_stock: Option<bool>,
     pub description: Option<String>,
     pub product_code: Option<String>,
     pub upc: Option<String>,

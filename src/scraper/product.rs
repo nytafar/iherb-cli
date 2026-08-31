@@ -127,6 +127,64 @@ fn extract_prices_from_offers(offers: Option<&serde_json::Value>) -> (f64, Optio
     (0.0, None, top_currency.unwrap_or_else(|| "USD".to_string()))
 }
 
+/// Read `window.PRODUCT_DETAILS.availableToPurchase`, which the page writes as
+/// the string `"True"` or `"False"`.
+///
+/// Anything else — an empty string, a shape we have not seen — says nothing and
+/// so answers nothing. Reading "not the word true" as `false` is how the
+/// fabrications in #30 and #31 got there in the first place.
+fn read_available_to_purchase(value: &serde_json::Value) -> Option<bool> {
+    if let Some(text) = value.as_str() {
+        if text.eq_ignore_ascii_case("true") {
+            return Some(true);
+        }
+        if text.eq_ignore_ascii_case("false") {
+            return Some(false);
+        }
+        return None;
+    }
+    value.as_bool()
+}
+
+/// Read a stock phrase written for a human ("In stock", "Out of stock") into a
+/// definite answer, or `None` when the phrase says neither.
+fn read_stock_text(text: &str) -> Option<bool> {
+    let lower = text.to_lowercase();
+    if lower.contains("out of stock") || lower.contains("sold out") {
+        Some(false)
+    } else if lower.contains("in stock") {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// Read a stock indicator into a definite answer, or `None` when the value is
+/// one we have no reading for.
+///
+/// Two vocabularies say the same thing on an iHerb page and both land here:
+/// JSON-LD's schema.org URLs (`https://schema.org/OutOfStock`) and the
+/// `window.IHR_DL.product.stckInd` label the page's own JS carries
+/// (`InStock`, `OutOfStock`, and `OutOfStockETA`, which a live fetch of
+/// product 119174 on 2026-08-31 returned).
+///
+/// Anything else is `None` rather than a guess. `LimitedAvailability` and
+/// `PreOrder` are real schema.org values and neither is a plain yes or no; the
+/// old code read them as "not in stock" purely because they do not contain the
+/// substring `InStock`.
+fn read_stock_indicator(raw: &str) -> Option<bool> {
+    // schema.org values arrive as URLs; iHerb's own arrive bare.
+    let token = raw.rsplit('/').next().unwrap_or(raw).trim();
+
+    if token.starts_with("OutOfStock") || token == "SoldOut" || token == "Discontinued" {
+        Some(false)
+    } else if token.starts_with("InStock") {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 /// Parse product from JSON-LD structured data.
 pub fn parse_from_json_ld(
     data: &serde_json::Value,
@@ -157,8 +215,7 @@ pub fn parse_from_json_ld(
     let in_stock = offers
         .and_then(|o| o.get("availability"))
         .and_then(|v| v.as_str())
-        .map(|s| s.contains("InStock"))
-        .unwrap_or(true);
+        .and_then(read_stock_indicator);
 
     let agg = data.get("aggregateRating");
     let rating = agg.and_then(|a| {
@@ -233,8 +290,12 @@ pub fn parse_from_js_globals(
     let pd = globals.get("productDetails");
     let ihr = globals.get("ihrProduct");
 
+    // The page writes `prdctNm`. `prdNm` appears on none of the seven captures
+    // and on no page fetched live, which is why this rung produced nothing for
+    // as long as it existed (#30). `productDetails.name` is kept as the
+    // documented second choice even though no capture carries it either.
     let name = ihr
-        .and_then(|p| p.get("prdNm"))
+        .and_then(|p| p.get("prdctNm"))
         .or_else(|| pd.and_then(|p| p.get("name")))
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -262,6 +323,36 @@ pub fn parse_from_js_globals(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    // The blob carries a UPC as a JSON number, not a string.
+    let upc = ihr.and_then(|p| p.get("upcCd")).and_then(|v| {
+        v.as_str()
+            .map(|s| s.to_string())
+            .or_else(|| v.as_u64().map(|n| n.to_string()))
+    });
+
+    // `stckInd` is the product's own answer. `availableToPurchase` is the
+    // weaker second opinion — it tracks buyability rather than stock, but the
+    // two agree on every page seen so far ("False" on the out-of-stock gummies,
+    // "True" on the in-stock Nordic page) and it is better than no answer.
+    let in_stock = ihr
+        .and_then(|p| p.get("stckInd"))
+        .and_then(|v| v.as_str())
+        .and_then(read_stock_indicator)
+        .or_else(|| {
+            pd.and_then(|p| p.get("availableToPurchase"))
+                .and_then(read_available_to_purchase)
+        });
+
+    // One level only: the blob names a single primary parent category, not a
+    // path. It is still the right field — `category_breadcrumb` is a `Vec`
+    // because the DOM can supply more, not because this must.
+    let category_breadcrumb = ihr
+        .and_then(|p| p.get("prmryPrntCtgry"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| vec![s.to_string()]);
+
     Some(ProductDetail {
         name,
         brand,
@@ -272,16 +363,16 @@ pub fn parse_from_js_globals(
         review_count: None,
         product_url: format!("{}/pr/p/{}", base_url, product_id),
         product_id: product_id.to_string(),
-        in_stock: true,
+        in_stock,
         description: None,
         product_code,
-        upc: None,
+        upc,
         ingredients: None,
         supplement_facts: None,
         suggested_use: None,
         warnings: None,
         shipping_weight: None,
-        category_breadcrumb: None,
+        category_breadcrumb,
         review_distribution: None,
     })
 }
@@ -302,8 +393,12 @@ pub fn enrich_from_html(html: &str, product: &mut ProductDetail) {
     enrich_pricing(&doc, product);
     enrich_rating_and_reviews(&doc, product);
 
-    if let Some(stock_text) = extract_text(&doc, "#stock-status .stock-status-content strong") {
-        product.in_stock = stock_text.to_lowercase().contains("in stock");
+    // Gap-fill only. A strategy that already read an availability signal has a
+    // better one than this heading: JSON-LD says `OutOfStock` on the gummies
+    // page, which carries no `#stock-status` element at all.
+    if product.in_stock.is_none() {
+        product.in_stock = extract_text(&doc, "#stock-status .stock-status-content strong")
+            .and_then(|text| read_stock_text(&text));
     }
 
     enrich_product_specs(&doc, product);
@@ -511,6 +606,7 @@ pub fn parse_from_html(
     let in_stock = extract_text(&doc, "#stock-status .stock-status-content strong")
         .map(|s| s.to_lowercase().contains("in stock"))
         .unwrap_or(!html.contains("Out of Stock"));
+    let in_stock = Some(in_stock);
 
     let product_code = extract_spec(&doc, "Product Code");
     let upc = extract_spec(&doc, "UPC");

@@ -138,7 +138,7 @@ fn a_swiss_fetch_is_served_the_us_price() {
         review_count: Some(381_864),
         product_url: "https://www.iherb.com/pr/item/61864".to_string(),
         product_id: "61864".to_string(),
-        in_stock: true,
+        in_stock: Some(true),
         description: None,
         product_code: None,
         upc: None,
