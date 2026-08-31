@@ -21,7 +21,10 @@ tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 
 # Browser automation
-chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
+# 0.9 dropped the `tokio-runtime` feature: tokio is now the only runtime and is
+# unconditional. `default-features = false` still turns off `bytes`, matching the
+# feature set we had under 0.7.
+chromiumoxide = { version = "0.9.1", default-features = false }
 
 # HTTP
 reqwest = { version = "0.12", features = ["json", "stream"] }

@@ -9,22 +9,27 @@ use tokio::sync::Mutex;
 
 const STEALTH_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-const STEALTH_ARGS: &[&str] = &[
-    "--disable-blink-features=AutomationControlled",
-    "--disable-features=IsolateOrigins,site-per-process",
-    "--disable-site-isolation-trials",
-    "--disable-web-security",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--disable-default-apps",
-    "--disable-extensions",
-    "--disable-popup-blocking",
-    "--disable-translate",
-    "--disable-background-timer-throttling",
-    "--disable-renderer-backgrounding",
-    "--disable-backgrounding-occluded-windows",
-    "--window-size=1920,1080",
+// chromiumoxide 0.9 parses switches into a key/value `Arg` rather than passing
+// the string through verbatim: it writes the leading `--` itself and joins
+// values with `,`. A whole switch handed over as one string therefore becomes
+// the *key*, and Chrome receives `----no-first-run`, which it ignores in
+// silence. So the switches are split here: bare flags without the `--`, and
+// anything with a value as a `(key, value)` or `(key, values)` tuple.
+const STEALTH_FLAGS: &[&str] = &[
+    "disable-site-isolation-trials",
+    "disable-web-security",
+    "no-first-run",
+    "no-default-browser-check",
+    "disable-default-apps",
+    "disable-extensions",
+    "disable-popup-blocking",
+    "disable-translate",
+    "disable-background-timer-throttling",
+    "disable-renderer-backgrounding",
+    "disable-backgrounding-occluded-windows",
 ];
+
+const STEALTH_DISABLED_FEATURES: &[&str] = &["IsolateOrigins", "site-per-process"];
 
 pub struct BrowserSession {
     browser: Arc<Mutex<Browser>>,
@@ -55,21 +60,24 @@ impl BrowserSession {
         let mut builder = BrowserConfig::builder()
             .chrome_executable(chrome_path)
             .user_data_dir(user_data_dir.clone())
-            .arg(format!("--user-agent={}", STEALTH_USER_AGENT))
+            .arg(("user-agent", STEALTH_USER_AGENT))
+            .arg(("disable-blink-features", "AutomationControlled"))
+            .arg(("disable-features", STEALTH_DISABLED_FEATURES))
+            .window_size(1920, 1080)
             .viewport(None);
 
-        for arg in STEALTH_ARGS {
-            builder = builder.arg(*arg);
+        for flag in STEALTH_FLAGS {
+            builder = builder.arg(*flag);
         }
 
         if !config.debug {
-            builder = builder.arg("--headless=new");
+            builder = builder.arg(("headless", "new"));
         }
 
         // Chrome refuses to run as root without --no-sandbox
         #[cfg(target_os = "linux")]
         if unsafe { libc::geteuid() } == 0 {
-            builder = builder.arg("--no-sandbox");
+            builder = builder.arg("no-sandbox");
         }
 
         let browser_config = builder
