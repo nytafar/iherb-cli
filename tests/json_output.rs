@@ -1546,6 +1546,46 @@ fn help_is_still_help_under_json() {
     assert!(versioned.stdout.contains(env!("CARGO_PKG_VERSION")));
 }
 
+/// **`--help` describes the tool, not its implementation.**
+///
+/// `Cli` set `about` but not `long_about`, so clap derived the long help from
+/// the doc comment of the flattened `GlobalArgs` — a maintainers' note about
+/// why that struct exists, opening `--help` with "The flags that apply to every
+/// subcommand. Flattened out of [`Cli`] rather than listed in it, because
+/// [`crate::config::AppConfig::load`] wants all of them...", rustdoc link
+/// syntax and all. `-h` was right the whole time, which is why it went unseen
+/// (#58).
+///
+/// The assertion is deliberately not "the long help equals this string": it is
+/// that both helps open on the same sentence, and that no rustdoc link markup
+/// reaches a terminal. That holds for any doc comment that leaks in this way,
+/// not only the one that did.
+#[test]
+fn long_help_opens_on_the_tool_not_on_a_doc_comment() {
+    let home = Home::new("long-help");
+
+    let short = home.run(&["-h"], None);
+    let long = home.run(&["--help"], None);
+    assert_eq!(short.code, 0);
+    assert_eq!(long.code, 0);
+
+    let first = |out: &str| out.lines().next().unwrap_or_default().to_string();
+    let opening = first(&short.stdout);
+    assert!(
+        first(&long.stdout).starts_with(opening.trim_end_matches('.')),
+        "long help opens on {:?}, short help on {:?}",
+        first(&long.stdout),
+        opening
+    );
+
+    // `[`Ident`]` renders as a link in rustdoc and as noise in a terminal.
+    assert!(
+        !long.stdout.contains("[`"),
+        "rustdoc link syntax reached the help output:\n{}",
+        long.stdout
+    );
+}
+
 /// **An interrupted run still emits one JSON document.**
 ///
 /// This is the promise `--json` makes — one document on stdout, always, success

@@ -4,7 +4,16 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(
     name = "iherb-cli",
     version,
-    about = "Query iHerb product data from the command line"
+    about = "Query iHerb product data from the command line",
+    // Stated rather than derived. Without it clap takes the long help from the
+    // doc comment of the flattened `GlobalArgs`, and `--help` opens with a
+    // maintainers' note about a refactor instead of a sentence about the tool
+    // (#58).
+    long_about = "Query iHerb product data from the command line.\n\n\
+                  Fetches a product page or a search results page through a \
+                  headless Chrome, parses it, and prints Markdown for a human \
+                  or `--json` for a program. Pages are cached on disk; see \
+                  `iherb-cli cache`."
 )]
 pub struct Cli {
     #[command(subcommand)]
