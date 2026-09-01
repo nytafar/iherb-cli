@@ -84,6 +84,25 @@ pub enum IherbError {
         what: String,
     },
 
+    /// The cache directory itself could not be listed, on a command that exists
+    /// to list it.
+    ///
+    /// **Reserved for `cache stats` and `cache clear`, and for the directory
+    /// rather than its contents.** A missing directory is an empty cache and
+    /// not this; an individual file that will not open is skipped with a
+    /// warning, and an individual file `clear` cannot remove is reported in the
+    /// payload. This is the case where the caller asked a question about the
+    /// cache and there is no honest answer — a directory that exists and cannot
+    /// be read.
+    ///
+    /// It is deliberately not the `cache_error` the taxonomy retired. That code
+    /// covered *incidental* cache failures during a fetch, which are not
+    /// failures at all: a read that fails is a miss and a write that fails is a
+    /// log line. See [`crate::cache::CacheWriteFailed`], which is still not an
+    /// [`IherbError`] and still cannot fail a run.
+    #[error("Cache directory could not be read: {0}")]
+    CacheUnreadable(String),
+
     /// Chrome could not be obtained: the version index, the download, the
     /// archive, or writing any of it to disk.
     ///
@@ -144,6 +163,15 @@ pub enum ErrorKind {
     BrowserLaunchFailed,
     /// Chrome could not be downloaded.
     ChromeDownloadFailed,
+    /// The cache directory could not be listed, on a command whose whole job is
+    /// to list it. The environment needs attention.
+    ///
+    /// In the `1x` group with the other two environment codes, because that is
+    /// what a caller does about it: look at the filesystem. It is **not** the
+    /// retired `cache_error` (32) coming back — that code claimed an incidental
+    /// cache failure during a fetch could end a run, and none can. This one has
+    /// a producer, `cache stats` and `cache clear`, and a test that reaches it.
+    CacheUnreadable,
     /// The page did not load in time. Worth retrying.
     NavigationTimeout,
     /// The page did not load, and not because of the clock.
@@ -197,6 +225,7 @@ impl ErrorKind {
             ErrorKind::InvalidInput => "invalid_input",
             ErrorKind::BrowserLaunchFailed => "browser_launch_failed",
             ErrorKind::ChromeDownloadFailed => "chrome_download_failed",
+            ErrorKind::CacheUnreadable => "cache_unreadable",
             ErrorKind::NavigationTimeout => "navigation_timeout",
             ErrorKind::NavigationFailed => "navigation_failed",
             ErrorKind::CloudflareBlocked => "cloudflare_blocked",
@@ -216,6 +245,7 @@ impl ErrorKind {
             ErrorKind::InvalidInput => 2,
             ErrorKind::BrowserLaunchFailed => 10,
             ErrorKind::ChromeDownloadFailed => 11,
+            ErrorKind::CacheUnreadable => 12,
             ErrorKind::NavigationTimeout => 20,
             ErrorKind::NavigationFailed => 21,
             ErrorKind::CloudflareBlocked => 22,
@@ -233,6 +263,7 @@ impl ErrorKind {
         ErrorKind::InvalidInput,
         ErrorKind::BrowserLaunchFailed,
         ErrorKind::ChromeDownloadFailed,
+        ErrorKind::CacheUnreadable,
         ErrorKind::NavigationTimeout,
         ErrorKind::NavigationFailed,
         ErrorKind::CloudflareBlocked,
@@ -257,6 +288,7 @@ impl IherbError {
             IherbError::InvalidInput(_) => ErrorKind::InvalidInput,
             IherbError::BrowserLaunch(_) => ErrorKind::BrowserLaunchFailed,
             IherbError::ChromeDownload(_) => ErrorKind::ChromeDownloadFailed,
+            IherbError::CacheUnreadable(_) => ErrorKind::CacheUnreadable,
             IherbError::Navigation(_) => ErrorKind::NavigationFailed,
             IherbError::NavigationTimeout(_) => ErrorKind::NavigationTimeout,
             IherbError::CloudflareBlocked(_) => ErrorKind::CloudflareBlocked,

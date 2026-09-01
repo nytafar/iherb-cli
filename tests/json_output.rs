@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime};
 
 use iherb_cli::app::wants_json;
 use iherb_cli::cache::CacheKey;
-use iherb_cli::cli::{Section, SortOrder};
+use iherb_cli::cli::{GlobalArgs, Section, SortOrder};
 use iherb_cli::config::AppConfig;
 use iherb_cli::error::{classify_error, ErrorKind, IherbError};
 use iherb_cli::fetch::{FetchTarget, Fetched, Provenance};
@@ -339,6 +339,7 @@ fn error_samples() -> Vec<(&'static str, IherbError)> {
             },
         ),
         ("ChromeDownload", IherbError::ChromeDownload("x".into())),
+        ("CacheUnreadable", IherbError::CacheUnreadable("x".into())),
     ]
 }
 
@@ -533,13 +534,11 @@ fn each_error_variant_maps_to_its_own_kind() {
 // ---------------------------------------------------------------------------
 
 fn config(country: &str, currency: Option<&str>) -> AppConfig {
-    AppConfig::load(
-        Some(country.to_string()),
-        currency.map(str::to_string),
-        false,
-        None,
-        false,
-    )
+    AppConfig::load(&GlobalArgs {
+        country: Some(country.to_string()),
+        currency: currency.map(str::to_string),
+        ..GlobalArgs::none()
+    })
     .expect("config with a known country")
 }
 
@@ -1639,6 +1638,106 @@ fn an_interrupted_run_still_answers_in_json() {
     // And nothing was read, which is a different claim from "read nothing".
     assert!(document["meta"]["fetched_at"].is_null());
     assert!(document["meta"]["from_cache"].is_null());
+}
+
+/// **The `cache` command speaks the same envelope as everything else** (#22).
+///
+/// A new command is where a second output convention gets introduced by
+/// accident: `cache stats` could easily have printed a line of its own under
+/// `--json` and left a consumer with two contracts. It carries `ok`,
+/// `schema_version` and the same `meta` — with `fetched_at` and `from_cache`
+/// `null`, because no page was read, which is exactly what those nulls already
+/// mean everywhere else.
+#[test]
+fn the_cache_command_answers_in_the_same_envelope() {
+    let home = Home::new("cache-json");
+    home.seed_product(&seeded_key(), &a_product());
+
+    let ran = home.run(&["cache", "stats", "--json"], None);
+    assert_eq!(ran.code, 0, "stderr was:\n{}", ran.stderr);
+    let document = ran.document();
+    assert_eq!(document["ok"], true);
+    assert_eq!(document["schema_version"], SCHEMA_VERSION);
+    assert_eq!(
+        document["meta"]["fetched_at"],
+        Value::Null,
+        "a cache report read no page and must not date itself as though it had"
+    );
+    assert_eq!(document["meta"]["from_cache"], Value::Null);
+    assert!(document["meta"]["emitted_at"].is_string());
+
+    assert_eq!(document["data"]["entries"], 1);
+    assert_eq!(
+        document["data"]["path"],
+        home.cache_dir().display().to_string()
+    );
+    assert_eq!(document["data"]["ttl_seconds"], 2_592_000);
+    assert!(document["data"]["oldest"].is_string());
+
+    // `cache path` is bare on the Markdown path so it can be substituted into
+    // another command, and a field in the envelope on the JSON one.
+    let path = home.run(&["cache", "path"], None);
+    assert_eq!(
+        path.stdout.trim_end(),
+        home.cache_dir().display().to_string()
+    );
+    let path_json = home.run(&["cache", "path", "--json"], None).document();
+    assert_eq!(
+        path_json["data"]["path"],
+        home.cache_dir().display().to_string()
+    );
+}
+
+/// **`cache clear` with no filter needs `--all`.**
+///
+/// It removes the whole cache, and an agent that types it by accident should
+/// not silently lose it. A prompt is the other way to do that and is the wrong
+/// one here: this tool is run by agents that cannot answer one, so a prompt
+/// would be a hang rather than a safeguard. `--all` is a thing a caller can
+/// type on purpose.
+#[test]
+fn an_unfiltered_cache_clear_has_to_be_asked_for() {
+    let home = Home::new("cache-clear-all");
+    home.seed_product(&seeded_key(), &a_product());
+    let entry = home.cache_dir().join(seeded_key().file_name());
+    assert!(entry.exists(), "the entry is there to lose");
+
+    let refused = home.run(&["cache", "clear", "--json"], None);
+    assert_eq!(
+        refused.code,
+        i32::from(ErrorKind::InvalidInput.exit_code()),
+        "stdout was:\n{}",
+        refused.stdout
+    );
+    let document = refused.document();
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["error_type"], "invalid_input");
+    assert!(
+        document["message"]
+            .as_str()
+            .expect("a message")
+            .contains("--all"),
+        "the refusal has to say how to get what was asked for: {}",
+        document["message"]
+    );
+    assert!(entry.exists(), "a refused clear removed the entry anyway");
+
+    // A filter is enough on its own; `--all` is only for the unfiltered case.
+    let filtered = home.run(&["cache", "clear", "--country", "no", "--json"], None);
+    assert_eq!(filtered.code, 0, "stderr was:\n{}", filtered.stderr);
+    let document = filtered.document();
+    assert_eq!(document["data"]["removed_count"], 1);
+    assert_eq!(
+        document["data"]["removed"][0],
+        seeded_key().file_name(),
+        "and it names what it removed"
+    );
+    assert!(!entry.exists());
+
+    // And `--all` on an empty cache is a successful no-op rather than a fault.
+    let empty = home.run(&["cache", "clear", "--all", "--json"], None);
+    assert_eq!(empty.code, 0);
+    assert_eq!(empty.document()["data"]["removed_count"], 0);
 }
 
 /// The seeded entry is where the run actually reads from — otherwise every

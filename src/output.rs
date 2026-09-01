@@ -1,9 +1,12 @@
+use crate::app::CacheReport;
+use crate::cache::{CacheClearReport, CacheStats};
 use crate::cli::Section;
 use crate::config::AppConfig;
 use crate::error::ErrorKind;
 use crate::model::{ExtractionHealth, ProductDetail, SearchResult, Source};
 use serde::Serialize;
 use serde_json::{Map, Value};
+use std::time::Duration as SystemTimeDuration;
 use std::time::SystemTime;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -732,6 +735,171 @@ pub fn format_extraction_health(health: &ExtractionHealth) -> String {
     out.push('\n');
 
     out
+}
+
+// ---------------------------------------------------------------------------
+// `cache` (#22)
+// ---------------------------------------------------------------------------
+
+/// The Markdown a `cache` invocation prints.
+///
+/// No freshness footer. The other two commands report data that was read at
+/// some instant, possibly weeks ago; this one describes the cache directory as
+/// it is right now, and stamping a "Data from" on it would be dating a fetch
+/// that never happened.
+pub fn format_cache_report(report: &CacheReport, config: &AppConfig) -> String {
+    match report {
+        // Bare, and no heading: `cache path` exists to be substituted into
+        // another command. `$(iherb-cli cache path)` should be the path.
+        CacheReport::Path { dir } => format!("{}\n", dir.display()),
+        CacheReport::Stats(stats) => format_cache_stats(stats, config),
+        CacheReport::Cleared(cleared) => format_cache_cleared(cleared),
+    }
+}
+
+fn format_cache_stats(stats: &CacheStats, config: &AppConfig) -> String {
+    let mut out = String::from("## Cache\n");
+    out.push_str(&format!("- **Path:** {}\n", stats.dir.display()));
+    out.push_str(&format!(
+        "- **Entries:** {}\n",
+        format_number_usize(stats.entries)
+    ));
+    out.push_str(&format!("- **Size:** {}\n", format_bytes(stats.bytes)));
+    // Both `None` exactly when the cache is empty, which is a fact rather than
+    // a missing value — an empty cache has no oldest entry.
+    out.push_str(&format!(
+        "- **Oldest entry:** {}\n",
+        stats
+            .oldest
+            .map(format_cached_at)
+            .unwrap_or_else(|| "none — the cache is empty".to_string())
+    ));
+    out.push_str(&format!(
+        "- **Newest entry:** {}\n",
+        stats
+            .newest
+            .map(format_cached_at)
+            .unwrap_or_else(|| "none — the cache is empty".to_string())
+    ));
+    out.push_str(&format!(
+        "- **TTL:** {} — an entry older than this is a miss and gets refetched.\n",
+        format_duration(config.cache_ttl)
+    ));
+    out
+}
+
+fn format_cache_cleared(cleared: &CacheClearReport) -> String {
+    let mut out = String::from("## Cache cleared\n");
+    out.push_str(&format!("- **Path:** {}\n", cleared.dir.display()));
+    out.push_str(&format!(
+        "- **Removed:** {}, {}\n",
+        pluralize_entries(cleared.removed.len()),
+        format_bytes(cleared.removed_bytes)
+    ));
+    out.push_str(&format!(
+        "- **Kept:** {}\n",
+        pluralize_entries(cleared.kept)
+    ));
+
+    // Said out loud rather than folded into `kept`. "Cleared the Norwegian
+    // cache" while leaving the Norwegian search results in place is exactly the
+    // half-truth a caller acts on.
+    if cleared.unattributable > 0 {
+        out.push_str(&format!(
+            "- **Could not be attributed to a country:** {} search {}, kept. A search \
+             entry is named by a hash of the whole request, so the country is inside \
+             the name and cannot be read off it. Clear them with `--older-than` or \
+             `--all`.\n",
+            format_number_usize(cleared.unattributable),
+            if cleared.unattributable == 1 {
+                "entry"
+            } else {
+                "entries"
+            }
+        ));
+    }
+    if !cleared.failed.is_empty() {
+        out.push_str(&format!(
+            "- **Could not be removed:** {}\n",
+            cleared.failed.join("; ")
+        ));
+    }
+    out
+}
+
+/// The same report as one JSON document, in the same envelope as everything
+/// else (#22, #44).
+pub fn format_cache_json(
+    report: &CacheReport,
+    config: &AppConfig,
+) -> Result<Value, serde_json::Error> {
+    let value = match report {
+        CacheReport::Path { dir } => serde_json::json!({
+            "path": dir.display().to_string(),
+        }),
+        CacheReport::Stats(stats) => serde_json::json!({
+            "path": stats.dir.display().to_string(),
+            "entries": stats.entries,
+            "bytes": stats.bytes,
+            // RFC 3339, like every other machine-readable instant this tool
+            // emits, and `null` for an empty cache because an empty cache has
+            // no oldest entry.
+            "oldest": stats.oldest.map(format_rfc3339),
+            "newest": stats.newest.map(format_rfc3339),
+            "ttl_seconds": config.cache_ttl.as_secs(),
+        }),
+        CacheReport::Cleared(cleared) => serde_json::json!({
+            "path": cleared.dir.display().to_string(),
+            "removed": cleared.removed,
+            "removed_count": cleared.removed.len(),
+            "removed_bytes": cleared.removed_bytes,
+            "kept": cleared.kept,
+            "unattributable": cleared.unattributable,
+            "failed": cleared.failed,
+        }),
+    };
+    Ok(value)
+}
+
+/// A byte count as a reader wants it, in SI units.
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} B", bytes)
+    } else {
+        format!("{:.1} {}", value, UNITS[unit])
+    }
+}
+
+/// A duration in the same spelling `--cache-ttl` accepts, so what is printed
+/// can be pasted back in.
+fn format_duration(d: SystemTimeDuration) -> String {
+    let secs = d.as_secs();
+    for (unit, size) in [("w", 604_800), ("d", 86_400), ("h", 3_600), ("m", 60)] {
+        if secs >= size && secs.is_multiple_of(size) {
+            return format!("{}{}", secs / size, unit);
+        }
+    }
+    format!("{}s", secs)
+}
+
+fn format_number_usize(n: usize) -> String {
+    format_number(u32::try_from(n).unwrap_or(u32::MAX))
+}
+
+/// `1 entry`, `0 entries`. A count a person reads, not a template.
+fn pluralize_entries(n: usize) -> String {
+    format!(
+        "{} {}",
+        format_number_usize(n),
+        if n == 1 { "entry" } else { "entries" }
+    )
 }
 
 // ---------------------------------------------------------------------------

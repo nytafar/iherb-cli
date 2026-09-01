@@ -61,7 +61,8 @@ fn config(country: &str, currency: &str, cache_dir: PathBuf) -> AppConfig {
     AppConfig {
         country: country.to_string(),
         currency: Some(currency.to_string()),
-        no_cache: false,
+        cache_mode: iherb_cli::config::CacheMode::ReadWrite,
+        cache_ttl: iherb_cli::config::DEFAULT_CACHE_TTL,
         delay_ms: 0,
         debug: false,
         browser_path: None,
@@ -88,7 +89,11 @@ fn product_entries_are_named_after_the_storefront_and_the_product_id() {
 fn entries_from_older_generations_can_never_be_named_by_the_current_key() {
     let dir = TempDir::new("older-generations-orphaned");
     let us = config("us", "USD", dir.path());
-    let cache = Cache::new(dir.path(), false);
+    let cache = Cache::new(
+        dir.path(),
+        iherb_cli::config::CacheMode::ReadWrite,
+        iherb_cli::config::DEFAULT_CACHE_TTL,
+    );
 
     // Poisoned entries exactly as v1 and v2 wrote them, with a mtime of now so
     // the TTL cannot be what saves us.
@@ -268,7 +273,11 @@ fn a_swiss_fetch_is_not_served_the_us_price() {
     let dir = TempDir::new("country-roundtrip");
     let us = config("us", "USD", dir.path());
     let ch = config("ch", "CHF", dir.path());
-    let cache = Cache::new(dir.path(), false);
+    let cache = Cache::new(
+        dir.path(),
+        iherb_cli::config::CacheMode::ReadWrite,
+        iherb_cli::config::DEFAULT_CACHE_TTL,
+    );
 
     let us_data = ProductDetail {
         name: "California Gold Nutrition, Gold C®, 1,000 mg, 60 Veggie Capsules".to_string(),
@@ -390,7 +399,11 @@ fn two_limits_share_one_search_cache_file() {
 fn a_widened_search_still_finds_the_narrow_entry() {
     let dir = TempDir::new("limit-roundtrip");
     let cfg = config("us", "USD", dir.path());
-    let cache = Cache::new(dir.path(), false);
+    let cache = Cache::new(
+        dir.path(),
+        iherb_cli::config::CacheMode::ReadWrite,
+        iherb_cli::config::DEFAULT_CACHE_TTL,
+    );
 
     // What one result page yields, which is what a `--limit 10` run fetches.
     let one_page = SearchResult {

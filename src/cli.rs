@@ -10,6 +10,18 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
+    #[command(flatten)]
+    pub global: GlobalArgs,
+}
+
+/// The flags that apply to every subcommand.
+///
+/// Flattened out of [`Cli`] rather than listed in it, because
+/// [`crate::config::AppConfig::load`] wants all of them and used to take them
+/// as five positional arguments — a signature nobody could read and that #22
+/// would have grown to eight.
+#[derive(clap::Args, Debug)]
+pub struct GlobalArgs {
     /// Country subdomain to use, e.g. us, ch, de.
     ///
     /// On its own this only picks the subdomain, and iHerb may still override
@@ -34,9 +46,56 @@ pub struct Cli {
     #[arg(long, global = true, verbatim_doc_comment)]
     pub currency: Option<String>,
 
-    /// Bypass the local cache and fetch fresh data
-    #[arg(long, global = true)]
+    /// Touch the cache for neither reads nor writes.
+    ///
+    /// **This changed meaning in #22 and there is no alias.** It used to
+    /// disable reads only and write the result anyway, so a caller asking not
+    /// to touch the cache still got files written. That behaviour is what
+    /// `--refresh` is now called; this flag now does what its name says.
+    ///
+    /// Nothing has been released, so the break costs no consumer anything
+    /// (#38). If you want the old behaviour, pass `--refresh`.
+    ///
+    /// Given together with `--refresh`, this one wins: it is the stronger of
+    /// the two requests.
+    #[arg(long, global = true, verbatim_doc_comment)]
     pub no_cache: bool,
+
+    /// Skip the cache on the way in, write the result on the way out.
+    ///
+    /// What you want to re-read a page whose price may have moved and keep the
+    /// new answer for next time. This is what `--no-cache` used to do.
+    #[arg(long, global = true, verbatim_doc_comment)]
+    pub refresh: bool,
+
+    /// How long a cache entry stays usable, e.g. `30d`, `12h`, `45m`, `90s`.
+    ///
+    /// Default `30d`. That is far too long for a price and about right for a
+    /// supplement facts panel, and both live in one cached record — so a
+    /// per-data-kind TTL is a change to the *model*, not to this flag, and
+    /// belongs with #15 and DECISION-01. One number for the whole record is
+    /// what this tool can honestly offer today.
+    #[arg(long, global = true, value_name = "DURATION", verbatim_doc_comment)]
+    pub cache_ttl: Option<String>,
+
+    /// Path to the Chrome or Chromium executable.
+    ///
+    /// Highest priority in the chain: this flag, then `IHERB_BROWSER_PATH`,
+    /// then `browser_path` in the config file. Without any of them the tool
+    /// downloads Chrome for Testing on first use — which is a slow surprise for
+    /// an agent that cannot set an environment variable on a subprocess and had
+    /// no flag to reach for (#22).
+    #[arg(long, global = true, value_name = "PATH", verbatim_doc_comment)]
+    pub browser_path: Option<std::path::PathBuf>,
+
+    /// Read this config file instead of the one under the user's config dir.
+    ///
+    /// A path given here must exist and must parse; a missing or malformed file
+    /// is an error rather than a silent fallback to the defaults, because you
+    /// asked for that file by name. The default path stays optional — most runs
+    /// have no config file at all.
+    #[arg(long, global = true, value_name = "PATH", verbatim_doc_comment)]
+    pub config: Option<std::path::PathBuf>,
 
     /// Delay between requests in milliseconds (default: 2000)
     #[arg(long, global = true)]
@@ -62,6 +121,30 @@ pub struct Cli {
     /// also dumps each fetched page to `/tmp/iherb_*.html`.
     #[arg(long, global = true, verbatim_doc_comment)]
     pub debug: bool,
+}
+
+impl GlobalArgs {
+    /// The globals as a command line that passed none of them.
+    ///
+    /// Not `Default`, because "default" is what the *configuration* resolves to
+    /// — country `us`, a 30-day TTL — and this is the absence of a flag, which
+    /// is a different thing: `country: None` means the environment and the
+    /// config file still get a say. Handy for tests and for a library caller
+    /// that has no `argv`.
+    pub fn none() -> Self {
+        Self {
+            country: None,
+            currency: None,
+            no_cache: false,
+            refresh: false,
+            cache_ttl: None,
+            browser_path: None,
+            config: None,
+            delay: None,
+            json: false,
+            debug: false,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -93,6 +176,58 @@ pub enum Commands {
         /// Only show a specific section: overview, description, ingredients, nutrition, suggested-use, warnings, reviews
         #[arg(long, value_enum)]
         section: Option<Section>,
+    },
+
+    /// Inspect and manage the local cache
+    Cache {
+        #[command(subcommand)]
+        action: CacheCommand,
+    },
+}
+
+/// What `cache` can be asked to do.
+///
+/// File operations over the existing cache directory, and nothing more. #27
+/// considers a SQLite-backed cache and is parked; none of this is a step
+/// towards one.
+#[derive(Subcommand, Debug)]
+pub enum CacheCommand {
+    /// Print the resolved cache directory
+    Path,
+
+    /// Count the entries, their bytes, and the oldest and newest
+    Stats,
+
+    /// Remove cache entries
+    ///
+    /// **This deletes files.** It only ever removes regular `.json` files
+    /// sitting directly in the resolved cache directory: never a symlink, never
+    /// anything in a subdirectory, and never anything outside it. Whatever it
+    /// removed is reported.
+    ///
+    /// With no filter it removes everything, and that needs `--all` said out
+    /// loud — an agent that types `cache clear` by accident should not silently
+    /// lose the cache.
+    #[command(verbatim_doc_comment)]
+    Clear {
+        /// Only entries older than this, e.g. `7d`, `12h`, `45m`
+        #[arg(long, value_name = "DURATION")]
+        older_than: Option<String>,
+
+        /// Only entries for this storefront, e.g. `no`
+        ///
+        /// Product entries name their country in the file name and are matched
+        /// exactly. **Search entries cannot be matched**: their name is a hash
+        /// of the whole request, so the country is inside it and not readable
+        /// off the file. They are left alone and counted, so the report says
+        /// how many could not be attributed rather than implying the storefront
+        /// is now clear.
+        #[arg(long, value_name = "COUNTRY", verbatim_doc_comment)]
+        country: Option<String>,
+
+        /// Required to remove everything, when no other filter is given
+        #[arg(long)]
+        all: bool,
     },
 }
 

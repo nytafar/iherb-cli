@@ -5,7 +5,7 @@ description: Query supplement and health product data from iHerb using the iherb
 
 # iherb-agent
 
-Use the `iherb-cli` binary to query iHerb product data. It uses a headless browser (first run may take a moment to download Chrome). Results are cached for 30 days. Every Markdown result ends with a freshness footer — `*Data read from iHerb during this run, at ...*` or `*Data from the local cache, written ...*` — and under `--json` the same two facts are `meta.fetched_at` and `meta.from_cache`. The timestamp is when the **page** was read, not when the document was printed. Use `--no-cache` if the data is stale.
+Use the `iherb-cli` binary to query iHerb product data. It uses a headless browser (first run may take a moment to download Chrome). Results are cached for 30 days by default (`--cache-ttl` changes it; `iherb-cli cache` inspects and clears it). Every Markdown result ends with a freshness footer — `*Data read from iHerb during this run, at ...*` or `*Data from the local cache, written ...*` — and under `--json` the same two facts are `meta.fetched_at` and `meta.from_cache`. The timestamp is when the **page** was read, not when the document was printed. Use `--no-cache` if the data is stale.
 
 ## Commands
 
@@ -48,8 +48,35 @@ Output: Full Markdown with overview, supplement facts table, ingredients, sugges
 - `--country <code>`: localized storefront (e.g., `ch`, `de`, `jp`). Default: `us`
 - `--currency <code>`: ask the storefront to price in this currency (e.g., `CHF`, `EUR`) and verify what came back. It does **not** convert — a storefront that prices in something else is an error, not a relabelling. Pass it whenever the currency matters: it is also what stops iHerb's IP geolocation overriding `--country`. Default: unset, which takes whatever iHerb serves
 - `--json`: emit one JSON document on stdout instead of Markdown — see below
-- `--no-cache`: bypass cache
+- `--no-cache`: touch the cache for neither reads nor writes. **This changed meaning:** it used to skip reads and write anyway, which is now `--refresh`
+- `--refresh`: skip the cache on the way in, write the result on the way out. What you want when a price may have moved
+- `--cache-ttl <duration>`: how long an entry stays usable — `30d`, `12h`, `45m`, `90s`. Default `30d`
+- `--browser-path <path>`: the Chrome or Chromium executable. Outranks `IHERB_BROWSER_PATH` and the config file. **Use this if you cannot set an environment variable on a subprocess** — without it the tool downloads Chrome for Testing on first run
+- `--config <path>`: read this config file instead of the one under the user's config dir. The path must exist and parse
 - `--debug`: show browser window
+
+### `cache`
+
+```bash
+iherb-cli cache path                  # just the path, nothing else
+iherb-cli cache stats                 # entries, bytes, oldest, newest, TTL
+iherb-cli cache clear --older-than 7d
+iherb-cli cache clear --country no
+iherb-cli cache clear --all
+```
+
+All of these take `--json` and answer in the same envelope, with
+`meta.fetched_at` and `meta.from_cache` `null` because no page was read.
+
+`cache clear` deletes files. It only ever removes regular `.json` files directly
+in the cache directory — never a symlink, never a subdirectory, never anything
+outside it — and it names what it removed. With no `--older-than` and no
+`--country` it needs `--all`; there is no prompt, so a bare `cache clear` exits
+2 and tells you.
+
+`--country` matches product entries only. A search entry's name is a hash of the
+whole request, so its country is not readable off the file; those are kept and
+the report counts them. Use `--older-than` or `--all` to reach them.
 
 ## `--json`: reading this tool programmatically
 
@@ -105,6 +132,7 @@ Branch on the exit code rather than on the message text.
 | 2 | `invalid_input` | fix the arguments — empty query, `--limit 0`, unknown `--category` or `--country`, or an unusable product id |
 | 10 | `browser_launch_failed` | the environment is broken; tell the user, do not retry |
 | 11 | `chrome_download_failed` | the environment is broken; tell the user, do not retry |
+| 12 | `cache_unreadable` | the cache directory will not open; check its permissions, do not retry |
 | 20 | `navigation_timeout` | the page was slow; retry |
 | 21 | `navigation_failed` | the page did not load and the clock was not why; usually the URL is wrong |
 | 22 | `cloudflare_blocked` | back off and retry later; do not hammer |

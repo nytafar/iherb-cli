@@ -505,7 +505,11 @@ fn a_card_out_of_stock() -> String {
 fn a_cached_search_short_of_the_limit_is_refetched() {
     let dir = TempDir::new("limit-refetch");
     let config = cache_config(dir.path());
-    let cache = Cache::new(dir.path(), false);
+    let cache = Cache::new(
+        dir.path(),
+        iherb_cli::config::CacheMode::ReadWrite,
+        iherb_cli::config::DEFAULT_CACHE_TTL,
+    );
 
     let narrow = SearchTarget::new(&config, "vitamin c", 10, SortOrder::Relevance, None).unwrap();
     cache
@@ -537,7 +541,11 @@ fn a_cached_search_short_of_the_limit_is_refetched() {
 fn a_cached_search_that_exhausted_the_results_answers_any_limit() {
     let dir = TempDir::new("limit-exhausted");
     let config = cache_config(dir.path());
-    let cache = Cache::new(dir.path(), false);
+    let cache = Cache::new(
+        dir.path(),
+        iherb_cli::config::CacheMode::ReadWrite,
+        iherb_cli::config::DEFAULT_CACHE_TTL,
+    );
 
     let mut all_there_is = one_page_walked();
     all_there_is.total_results = Some(45);
@@ -558,7 +566,11 @@ fn a_cached_search_that_exhausted_the_results_answers_any_limit() {
 fn an_entry_that_does_not_say_how_it_was_fetched_is_not_assumed_complete() {
     let dir = TempDir::new("limit-unrecorded");
     let config = cache_config(dir.path());
-    let cache = Cache::new(dir.path(), false);
+    let cache = Cache::new(
+        dir.path(),
+        iherb_cli::config::CacheMode::ReadWrite,
+        iherb_cli::config::DEFAULT_CACHE_TTL,
+    );
 
     let mut old_entry = one_page_walked();
     old_entry.fetch = Default::default();
@@ -657,7 +669,11 @@ fn a_search_in_the_wrong_currency_is_refused_rather_than_relabelled() {
     // The first is the key: since the cookie made `--currency` change the
     // document, a CHF request and a USD request are different entries, so the
     // CHF run cannot reach the USD run's file at all.
-    let cache = Cache::new(dir.path(), false);
+    let cache = Cache::new(
+        dir.path(),
+        iherb_cli::config::CacheMode::ReadWrite,
+        iherb_cli::config::DEFAULT_CACHE_TTL,
+    );
     cache.set(&asked_usd.cache_key(), &walked).unwrap();
     assert_ne!(
         asked_usd.cache_key().file_name(),
@@ -1052,7 +1068,8 @@ fn search_config() -> iherb_cli::config::AppConfig {
         country: "us".to_string(),
         // No `--currency`, so nothing is required of the storefront (#5).
         currency: None,
-        no_cache: false,
+        cache_mode: iherb_cli::config::CacheMode::ReadWrite,
+        cache_ttl: iherb_cli::config::DEFAULT_CACHE_TTL,
         delay_ms: 0,
         debug: false,
         browser_path: None,

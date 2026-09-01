@@ -251,7 +251,11 @@ pub async fn fetch<T: FetchTarget>(
 /// [`FetchTarget::cache_is_sufficient`] is behaviour, and behaviour that only
 /// runs inside a function that launches Chrome is behaviour nothing tests.
 pub fn cached<T: FetchTarget>(target: &T, config: &AppConfig) -> Option<Fetched<T::Output>> {
-    let cache = Cache::new(config.cache_dir.clone(), config.no_cache);
+    let cache = Cache::new(
+        config.cache_dir.clone(),
+        config.cache_mode,
+        config.cache_ttl,
+    );
     let key = target.cache_key();
     let hit = cache.get::<T::Output>(&key)?;
 
@@ -310,7 +314,11 @@ async fn read_target<T: FetchTarget>(
     config: &AppConfig,
     page: &Page,
 ) -> Result<Fetched<T::Output>, Failure> {
-    let cache = Cache::new(config.cache_dir.clone(), config.no_cache);
+    let cache = Cache::new(
+        config.cache_dir.clone(),
+        config.cache_mode,
+        config.cache_ttl,
+    );
     let key = target.cache_key();
     // The storefront goes to the navigator because asking for one is part of
     // making the request, not part of reading the answer: iHerb carries the

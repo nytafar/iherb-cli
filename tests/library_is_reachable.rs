@@ -80,7 +80,8 @@ fn test_config() -> AppConfig {
         country: "us".to_string(),
         // No `--currency`, so nothing is required of the storefront (#5).
         currency: None,
-        no_cache: false,
+        cache_mode: iherb_cli::config::CacheMode::ReadWrite,
+        cache_ttl: iherb_cli::config::DEFAULT_CACHE_TTL,
         delay_ms: 0,
         debug: false,
         browser_path: None,

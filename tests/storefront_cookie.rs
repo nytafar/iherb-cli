@@ -41,7 +41,8 @@ fn config(country: &str, currency: Option<&str>) -> AppConfig {
     AppConfig {
         country: country.to_string(),
         currency: currency.map(str::to_string),
-        no_cache: true,
+        cache_mode: iherb_cli::config::CacheMode::Off,
+        cache_ttl: iherb_cli::config::DEFAULT_CACHE_TTL,
         delay_ms: 0,
         debug: false,
         browser_path: None,

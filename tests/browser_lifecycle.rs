@@ -41,7 +41,8 @@ fn test_config(scratch: &Path, debug: bool) -> AppConfig {
         // #5 made this Option<String>; None is the new default and asserts nothing,
         // which is what a browser-lifecycle test wants.
         currency: None,
-        no_cache: true,
+        cache_mode: iherb_cli::config::CacheMode::Off,
+        cache_ttl: iherb_cli::config::DEFAULT_CACHE_TTL,
         delay_ms: 0,
         debug,
         browser_path: None,

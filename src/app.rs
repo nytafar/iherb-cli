@@ -23,9 +23,10 @@ use serde_json::Value;
 use tokio::sync::Notify;
 
 use crate::browser::session::BrowserSession;
-use crate::cli::{Cli, Commands, Section, SortOrder};
-use crate::config::AppConfig;
-use crate::error::{classify_error, ErrorKind};
+use crate::cache::{Cache, CacheClearReport, CacheStats, ClearFilter};
+use crate::cli::{CacheCommand, Cli, Commands, Section, SortOrder};
+use crate::config::{parse_duration, AppConfig};
+use crate::error::{classify_error, ErrorKind, IherbError};
 use crate::fetch::{fetch, Failure, Provenance};
 use crate::model::{ProductDetail, SearchResult};
 use crate::output::{self, Envelope, Freshness, Meta, ProductView};
@@ -40,9 +41,9 @@ use crate::targets::{ProductTarget, SearchTarget};
 /// different responses — skip the id, retry later, fix the environment, file a
 /// bug — were indistinguishable.
 pub async fn run(cli: Cli) -> ExitCode {
-    let json = cli.json;
+    let json = cli.global.json;
 
-    let filter = if cli.debug {
+    let filter = if cli.global.debug {
         "iherb_cli=debug"
     } else {
         "iherb_cli=warn"
@@ -61,13 +62,7 @@ pub async fn run(cli: Cli) -> ExitCode {
         .with_target(false)
         .init();
 
-    let config = match AppConfig::load(
-        cli.country,
-        cli.currency,
-        cli.no_cache,
-        cli.delay,
-        cli.debug,
-    ) {
+    let config = match AppConfig::load(&cli.global) {
         Ok(config) => config,
         // No config, so no storefront to name in the envelope. Reported
         // honestly as nulls rather than as a guess — see [`Meta`].
@@ -227,7 +222,80 @@ async fn dispatch(
         Commands::Product { id_or_url, section } => {
             cmd_product(config, browser_session, &id_or_url, section).await
         }
+        // No browser, no network, no page. `cache` is file operations over the
+        // directory `config` resolved, and the failure it can produce has
+        // nothing to do with a fetch — so it carries no provenance, and the
+        // envelope's `fetched_at` is `null` because no page was read.
+        Commands::Cache { action } => cmd_cache(config, action).map_err(Failure::from),
     }
+}
+
+/// Inspect or manage the cache directory (#22).
+pub fn cmd_cache(
+    config: &AppConfig,
+    action: CacheCommand,
+) -> Result<CommandOutcome, anyhow::Error> {
+    let cache = Cache::new(
+        config.cache_dir.clone(),
+        config.cache_mode,
+        config.cache_ttl,
+    );
+
+    let report = match action {
+        CacheCommand::Path => CacheReport::Path {
+            dir: cache.dir().to_path_buf(),
+        },
+        CacheCommand::Stats => CacheReport::Stats(cache.stats()?),
+        CacheCommand::Clear {
+            older_than,
+            country,
+            all,
+        } => {
+            let filter = ClearFilter {
+                older_than: match older_than.as_deref() {
+                    Some(text) => Some(
+                        SystemTime::now()
+                            .checked_sub(parse_duration(text)?)
+                            .ok_or_else(|| {
+                                IherbError::InvalidInput(format!(
+                                    "'{}' is further back than the clock goes.",
+                                    text
+                                ))
+                            })?,
+                    ),
+                    None => None,
+                },
+                country: match country {
+                    Some(country) => {
+                        let country = country.trim().to_lowercase();
+                        AppConfig::validate_country(&country)?;
+                        Some(country)
+                    }
+                    None => None,
+                },
+            };
+
+            // An unfiltered clear removes the whole cache, so it has to be
+            // asked for. A prompt would be the other way to do it and is the
+            // wrong one here: this tool is run by agents that cannot answer
+            // one, and a prompt they cannot answer is a hang rather than a
+            // safeguard.
+            if filter.is_empty() && !all {
+                return Err(IherbError::InvalidInput(
+                    "`cache clear` with no --older-than and no --country removes every \
+                     entry. Say --all if that is what you want."
+                        .to_string(),
+                )
+                .into());
+            }
+
+            CacheReport::Cleared(cache.clear(&filter)?)
+        }
+    };
+
+    Ok(CommandOutcome::Cache {
+        report: Box::new(report),
+    })
 }
 
 pub async fn cmd_search(
@@ -292,13 +360,33 @@ pub enum CommandOutcome {
         view: ProductView,
         provenance: Provenance,
     },
+    /// A `cache` invocation. Boxed for the same reason the product record is:
+    /// an enum is as wide as its widest variant, and a clear report carries a
+    /// list of file names.
+    Cache { report: Box<CacheReport> },
+}
+
+/// What a `cache` invocation produced.
+pub enum CacheReport {
+    Path { dir: std::path::PathBuf },
+    Stats(CacheStats),
+    Cleared(CacheClearReport),
 }
 
 impl CommandOutcome {
-    fn provenance(&self) -> Provenance {
+    /// When and where this outcome's data was read, for the outcomes that read
+    /// a page.
+    ///
+    /// `None` for `cache`, which reads no page: the envelope's `fetched_at` and
+    /// `from_cache` are `null` there, which is what they already mean
+    /// everywhere else — no page was read. Dating a `cache stats` document as
+    /// though it had scraped something would be the same fabrication the
+    /// `Data from:` bullet used to commit (#7, #44).
+    fn provenance(&self) -> Option<Provenance> {
         match self {
-            CommandOutcome::Search { provenance, .. } => *provenance,
-            CommandOutcome::Product { provenance, .. } => *provenance,
+            CommandOutcome::Search { provenance, .. } => Some(*provenance),
+            CommandOutcome::Product { provenance, .. } => Some(*provenance),
+            CommandOutcome::Cache { .. } => None,
         }
     }
 }
@@ -333,15 +421,27 @@ fn render(
 /// heading at all. Where the line belongs is a layout decision; layout is what
 /// the formatter is for. See [`Freshness`].
 fn render_markdown(outcome: &CommandOutcome, config: &AppConfig, emitted_at: SystemTime) -> String {
-    let freshness = Freshness::of(outcome.provenance(), emitted_at);
-
     match outcome {
-        CommandOutcome::Search { result, limit, .. } => {
-            output::format_search_document(result, *limit, freshness)
-        }
-        CommandOutcome::Product { product, view, .. } => {
-            output::format_product_document(product, view, freshness, config.debug)
-        }
+        CommandOutcome::Search { result, limit, .. } => output::format_search_document(
+            result,
+            *limit,
+            Freshness::of(
+                outcome.provenance().expect("a search read a page"),
+                emitted_at,
+            ),
+        ),
+        CommandOutcome::Product { product, view, .. } => output::format_product_document(
+            product,
+            view,
+            Freshness::of(
+                outcome.provenance().expect("a product read a page"),
+                emitted_at,
+            ),
+            config.debug,
+        ),
+        // No freshness footer: a `cache` document describes the cache
+        // directory as it is right now, and there is no fetch for it to date.
+        CommandOutcome::Cache { report } => output::format_cache_report(report, config),
     }
 }
 
@@ -356,11 +456,14 @@ fn render_json(
     config: &AppConfig,
     emitted_at: SystemTime,
 ) -> (String, u8) {
-    let meta = Meta::new(config, Some(outcome.provenance()), emitted_at);
+    let meta = Meta::new(config, outcome.provenance(), emitted_at);
 
     let data = match outcome {
         CommandOutcome::Search { result, .. } => output::format_search_json(result),
         CommandOutcome::Product { product, view, .. } => output::format_product_json(product, view),
+        // The same envelope, because a new command that invented a second
+        // output convention would make `--json` two contracts (#22).
+        CommandOutcome::Cache { report } => output::format_cache_json(report, config),
     };
 
     json_document(meta, data)

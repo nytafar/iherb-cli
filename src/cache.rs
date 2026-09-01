@@ -1,4 +1,6 @@
 use crate::cli::SortOrder;
+use crate::config::CacheMode;
+use crate::error::IherbError;
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -195,7 +197,8 @@ pub struct CacheWriteFailed(String);
 
 pub struct Cache {
     dir: PathBuf,
-    read_enabled: bool,
+    mode: CacheMode,
+    ttl: Duration,
 }
 
 /// Result from a cache read, including the data and when it was cached.
@@ -204,30 +207,44 @@ pub struct CacheHit<T> {
     pub cached_at: SystemTime,
 }
 
-const CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60); // 30 days
-
 impl Cache {
-    /// Create a cache. When `no_cache` is true, reads are skipped but writes still happen.
-    pub fn new(cache_dir: PathBuf, no_cache: bool) -> Self {
+    /// Create a cache with an explicit policy.
+    ///
+    /// The mode used to be a `no_cache: bool` that disabled reads and left
+    /// writes alone, so the flag named after "no cache" wrote files (#22). See
+    /// [`CacheMode`].
+    pub fn new(cache_dir: PathBuf, mode: CacheMode, ttl: Duration) -> Self {
         Self {
             dir: cache_dir,
-            read_enabled: !no_cache,
+            mode,
+            ttl,
         }
+    }
+
+    /// The directory this cache lives in.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// Read an entry, or `None` if it is missing, stale, unreadable, or reads
-    /// are disabled by `--no-cache`.
+    /// are disabled by `--refresh` or `--no-cache`.
     pub fn get<T: DeserializeOwned>(&self, key: &CacheKey) -> Option<CacheHit<T>> {
-        if !self.read_enabled {
+        if !self.mode.reads() {
             return None;
         }
         let path = self.dir.join(key.file_name());
-        self.read_cached(&path, CACHE_TTL)
+        self.read_cached(&path, self.ttl)
     }
 
-    /// Write an entry. Writes happen even under `--no-cache`, which only
-    /// suppresses reads.
+    /// Write an entry, unless `--no-cache` asked for the cache to be left
+    /// alone entirely.
+    ///
+    /// `--refresh` still writes: skipping the read and keeping the answer is
+    /// the whole point of it.
     pub fn set<T: Serialize>(&self, key: &CacheKey, data: &T) -> Result<(), CacheWriteFailed> {
+        if !self.mode.writes() {
+            return Ok(());
+        }
         let path = self.dir.join(key.file_name());
         self.write_cached(&path, data)
     }
@@ -265,5 +282,216 @@ impl Cache {
             .map_err(|e| CacheWriteFailed(format!("Failed to write cache: {}", e)))?;
         tracing::debug!("Cached to {}", path.display());
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cache management: `cache path`, `cache stats`, `cache clear` (#22)
+// ---------------------------------------------------------------------------
+
+/// One file in the cache directory, as the management commands see it.
+///
+/// Enumerated rather than deserialized. `stats` and `clear` are file operations
+/// over a directory of JSON blobs; opening every entry to read a country out of
+/// it would make `cache stats` cost as much as a fetch, and #27 — a database
+/// that could answer such questions cheaply — is parked.
+#[derive(Debug, Clone)]
+pub struct CacheEntry {
+    pub name: String,
+    pub bytes: u64,
+    pub modified: SystemTime,
+    /// The storefront this entry belongs to, when the file name says.
+    ///
+    /// `None` for a search entry, and that is a property of the key rather than
+    /// a gap here: a product entry is named
+    /// `v4_product_<country>_<currency>_<id>.json`, but a search entry is
+    /// `v4_search_<hash>.json` — the country went into the hash and cannot be
+    /// read back out. `clear --country` reports these as unattributable instead
+    /// of guessing or quietly skipping them.
+    pub country: Option<String>,
+}
+
+impl CacheEntry {
+    /// The country a cache file name states, if it states one.
+    fn country_from_name(name: &str) -> Option<String> {
+        // `v4_product_no_NOK_12949.json`
+        let rest = name.split_once("_product_")?.1;
+        let country = rest.split('_').next()?;
+        (!country.is_empty()).then(|| country.to_string())
+    }
+}
+
+/// What the cache directory holds.
+#[derive(Debug, Clone)]
+pub struct CacheStats {
+    pub dir: PathBuf,
+    pub entries: usize,
+    pub bytes: u64,
+    pub oldest: Option<SystemTime>,
+    pub newest: Option<SystemTime>,
+}
+
+/// Which entries `cache clear` should remove.
+#[derive(Debug, Clone, Default)]
+pub struct ClearFilter {
+    /// Only entries last written before this instant.
+    pub older_than: Option<SystemTime>,
+    /// Only entries whose file name names this country.
+    pub country: Option<String>,
+}
+
+impl ClearFilter {
+    /// Whether any filter was given at all. An unfiltered clear removes
+    /// everything and the caller has to say `--all` to get one.
+    pub fn is_empty(&self) -> bool {
+        self.older_than.is_none() && self.country.is_none()
+    }
+
+    fn matches(&self, entry: &CacheEntry) -> bool {
+        if let Some(cutoff) = self.older_than {
+            if entry.modified >= cutoff {
+                return false;
+            }
+        }
+        if let Some(ref country) = self.country {
+            if entry.country.as_deref() != Some(country.as_str()) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// What `cache clear` did.
+#[derive(Debug, Clone, Default)]
+pub struct CacheClearReport {
+    pub dir: PathBuf,
+    pub removed: Vec<String>,
+    pub removed_bytes: u64,
+    pub kept: usize,
+    /// Entries the filter could not decide about, with the reason.
+    ///
+    /// Only ever populated by `--country`, and only ever with search entries.
+    /// Reported rather than silently skipped: "cleared the Norwegian cache"
+    /// while leaving the Norwegian search results in place is the kind of
+    /// half-truth a caller acts on.
+    pub unattributable: usize,
+    /// Entries the filter chose and the filesystem refused, with the reason.
+    pub failed: Vec<String>,
+}
+
+impl Cache {
+    /// Every cache file in the directory.
+    ///
+    /// **The only place either management command decides what a cache file
+    /// is,** so `stats` counts exactly what `clear` can remove. A regular
+    /// `.json` file sitting directly in the resolved directory: not a
+    /// directory, not a symlink, and nothing one level down. A missing
+    /// directory is an empty cache rather than a failure — that is the state a
+    /// machine that has never run this tool is in.
+    pub fn entries(&self) -> Result<Vec<CacheEntry>, IherbError> {
+        let read = match std::fs::read_dir(&self.dir) {
+            Ok(read) => read,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(IherbError::CacheUnreadable(format!(
+                    "{}: {}",
+                    self.dir.display(),
+                    e
+                )))
+            }
+        };
+
+        let mut entries = Vec::new();
+        for item in read {
+            let item = match item {
+                Ok(item) => item,
+                Err(e) => {
+                    tracing::warn!("Skipping an unreadable cache directory entry: {}", e);
+                    continue;
+                }
+            };
+            let path = item.path();
+
+            // `symlink_metadata`, not `metadata`: a symlink in here points
+            // somewhere else, and `clear` must never follow one out of the
+            // directory it was told to work in.
+            let meta = match std::fs::symlink_metadata(&path) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    tracing::warn!("Skipping {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+            if !meta.is_file() || meta.file_type().is_symlink() {
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+
+            entries.push(CacheEntry {
+                name: name.to_string(),
+                bytes: meta.len(),
+                modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                country: CacheEntry::country_from_name(name),
+            });
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
+    }
+
+    /// What the cache directory holds.
+    pub fn stats(&self) -> Result<CacheStats, IherbError> {
+        let entries = self.entries()?;
+        Ok(CacheStats {
+            dir: self.dir.clone(),
+            entries: entries.len(),
+            bytes: entries.iter().map(|e| e.bytes).sum(),
+            oldest: entries.iter().map(|e| e.modified).min(),
+            newest: entries.iter().map(|e| e.modified).max(),
+        })
+    }
+
+    /// Remove the entries the filter chooses, and say what happened.
+    ///
+    /// Every path removed is `self.dir.join(entry.name)`, where `entry.name` is
+    /// a single file component this cache itself enumerated — so a removal
+    /// cannot address anything outside the directory even if a file in it is
+    /// named strangely. Symlinks never reach here; [`Cache::entries`] drops
+    /// them.
+    pub fn clear(&self, filter: &ClearFilter) -> Result<CacheClearReport, IherbError> {
+        let entries = self.entries()?;
+        let mut report = CacheClearReport {
+            dir: self.dir.clone(),
+            ..Default::default()
+        };
+
+        for entry in entries {
+            if filter.country.is_some() && entry.country.is_none() {
+                report.unattributable += 1;
+                report.kept += 1;
+                continue;
+            }
+            if !filter.matches(&entry) {
+                report.kept += 1;
+                continue;
+            }
+            let path = self.dir.join(&entry.name);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    report.removed.push(entry.name);
+                    report.removed_bytes += entry.bytes;
+                }
+                Err(e) => {
+                    report.kept += 1;
+                    report.failed.push(format!("{}: {}", entry.name, e));
+                }
+            }
+        }
+        Ok(report)
     }
 }

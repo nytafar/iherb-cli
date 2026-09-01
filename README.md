@@ -28,9 +28,18 @@ The binary will be at `target/release/iherb-cli`.
 
 iherb-cli needs a Chromium-based browser. It resolves one automatically:
 
-1. User-configured path (`IHERB_BROWSER_PATH` env var or config file)
+1. User-configured path — `--browser-path`, then `IHERB_BROWSER_PATH`, then
+   `browser_path` in the config file
 2. System-installed Chrome/Chromium (auto-detected)
 3. Auto-downloads [Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/) on first run
+
+```bash
+iherb-cli product 12949 --browser-path /usr/bin/chromium
+```
+
+`--browser-path` is there because step 3 is a slow surprise. An agent that
+cannot set an environment variable on a subprocess had no way to reach steps 1
+or 2 and fell through to a download (#22).
 
 ## Usage
 
@@ -122,7 +131,11 @@ Take 1 capsule daily with or without food.
 |---|---|---|
 | `--country <code>` | Country code for localized pricing (e.g., `us`, `ch`, `de`). On its own, iHerb may still override it from your IP | `us` |
 | `--currency <code>` | Ask the storefront to price in this currency (e.g., `USD`, `CHF`, `EUR`), and check what came back. Does **not** convert — see below | none |
-| `--no-cache` | Bypass local cache and fetch fresh data | — |
+| `--no-cache` | Touch the cache for neither reads nor writes | — |
+| `--refresh` | Skip the cache on the way in, write the result on the way out | — |
+| `--cache-ttl <duration>` | How long an entry stays usable: `30d`, `12h`, `45m`, `90s`, `2w` | `30d` |
+| `--browser-path <path>` | Chrome or Chromium executable. Outranks `IHERB_BROWSER_PATH` and the config file | — |
+| `--config <path>` | Read this config file instead of the one under the user's config dir | — |
 | `--delay <ms>` | Delay between requests in milliseconds | `2000` |
 | `--json` | Emit one JSON document on stdout instead of Markdown — see below | — |
 | `--debug` | Run the browser headed (a visible window), log at debug level, and print the provenance table | — |
@@ -136,7 +149,20 @@ iherb-cli search "zinc" --delay 500
 
 # Debug with visible browser
 iherb-cli product 61864 --debug
+
+# Re-read the page and keep the new answer
+iherb-cli product 61864 --refresh
+
+# A config file this run reads instead of ~/.config
+iherb-cli product 61864 --config ./ci.toml
 ```
+
+> **`--no-cache` changed meaning.** It used to disable cache *reads* and write
+> the result anyway, so a caller asking not to touch the cache still got files
+> on disk. That behaviour is now `--refresh`, and `--no-cache` does what its
+> name says. There is no alias and no deprecation period: nothing has been
+> released (#38), so the break costs no consumer anything.
+
 
 ### What `--currency` does
 
@@ -329,11 +355,21 @@ operation that already has a code; the cache is an optimization, so a read that
 fails is a miss and a write that fails is a log line; and a record of ours that
 will not serialize is a bug in this tool, which is `internal_error`.
 
+`cache_unreadable` (12), added with the `cache` command in #22, is not the
+retired `cache_error` (32) under a new number. That code claimed an *incidental*
+cache failure during a fetch could end a run, and none can — a full disk is
+still a log line beside a perfectly good page. This one covers the case where
+the caller asked a question *about the cache* and the directory will not open,
+which is the only situation in which there is no honest answer to give. A
+missing directory is an empty cache and exits 0; a single file `clear` cannot
+remove is reported in the payload.
+
 | exit | `error_type` | what it means | produced by |
 |---|---|---|---|
 | 2 | `invalid_input` | The arguments cannot produce a request. Fix them. | an empty query, `--limit 0`, an unknown `--category`, an identifier that is neither an id nor a URL, and an unknown `--country` |
 | 10 | `browser_launch_failed` | Chrome would not start. The environment needs attention. | browser launch, including its temporary profile directory |
 | 11 | `chrome_download_failed` | Chrome could not be obtained. | the first-run browser download: the version index, the transfer, the archive, and writing any of it to disk |
+| 12 | `cache_unreadable` | The cache directory could not be listed, on a command whose job is to list it. | `cache stats` and `cache clear` against a directory that exists and will not open |
 | 20 | `navigation_timeout` | The page did not load in time. Worth retrying. | a navigation the driver itself reported as a timeout |
 | 21 | `navigation_failed` | The page did not load, and not because of the clock. | any other navigation failure |
 | 22 | `cloudflare_blocked` | Cloudflare would not let us through. Retry later, from elsewhere. | the challenge loop giving up |
@@ -373,14 +409,25 @@ Settings are resolved in order of priority:
 
 ### Config file
 
-Location: `~/.config/iherb-cli/config.toml`
+Location: `~/.config/iherb-cli/config.toml`, or wherever `--config` points.
 
 ```toml
 [defaults]
 country = "ch"
 # Optional. Same meaning as `--currency`: a requirement, not a conversion.
 currency = "CHF"
+# Optional. Same spelling as --cache-ttl.
+cache_ttl = "12h"
+# Optional. Outranked by --browser-path and IHERB_BROWSER_PATH.
+browser_path = "/usr/bin/chromium"
+delay_ms = 2000
 ```
+
+`--config <path>` reads exactly that file. A path given there must exist and
+must parse — a missing or malformed file is `invalid_input` (2), not a silent
+fall-through to the defaults, because you asked for that file by name. The
+default location stays optional, since most runs have no config file at all;
+one that exists and will not parse is reported on stderr and then ignored.
 
 ## Caching
 
@@ -389,7 +436,53 @@ Scraped data is cached locally to reduce redundant requests. The cache directory
 - **macOS:** `~/Library/Caches/iherb-cli/`
 - **Linux:** `~/.cache/iherb-cli/`
 
-All cached data expires after **30 days**.
+Entries expire after **30 days** by default; `--cache-ttl` changes it:
+
+```bash
+iherb-cli product 12949 --cache-ttl 12h
+```
+
+One number for the whole record, deliberately. Thirty days is far too long for
+a price and about right for a supplement facts panel — but both live in *one*
+cached record, so telling them apart is a change to the model rather than a
+second flag here. That is #15 and DECISION-01's work, not this flag's.
+
+### Managing the cache
+
+```bash
+iherb-cli cache path                        # just the path, for $(...)
+iherb-cli cache stats                       # entries, bytes, oldest, newest
+iherb-cli cache clear --older-than 7d
+iherb-cli cache clear --country no
+iherb-cli cache clear --all
+```
+
+All three carry `--json` and answer in the same envelope as everything else,
+with `meta.fetched_at` and `meta.from_cache` `null` — no page was read, which is
+what those nulls already mean.
+
+**`cache clear` deletes files, so here is exactly what it touches.** Regular
+`.json` files sitting directly in the resolved cache directory: never a symlink,
+never anything in a subdirectory, never anything outside it. `cache stats`
+counts the same set, so what it reports is what `clear` can remove. Whatever was
+removed is named in the report.
+
+With no `--older-than` and no `--country` it removes everything, and that has to
+be asked for with `--all`. There is no interactive prompt: this tool is run by
+agents that cannot answer one, so a prompt would be a hang rather than a
+safeguard.
+
+**`--country` cannot reach search entries, and says so.** A product entry is
+named `v4_product_<country>_<currency>_<id>.json` and is matched exactly. A
+search entry is `v4_search_<hash>.json` — the country went into the hash and
+cannot be read back off the name. Those entries are kept and counted, and the
+report says how many, rather than letting "cleared the Norwegian cache" mean
+something it does not. Clear them with `--older-than` or `--all`.
+
+Per-data-kind TTLs are future work for the same reason the single TTL is: prices
+and facts share a record. So is putting the country in a search entry's file
+name, which would need a cache-generation bump and would abandon every entry
+users already have.
 
 ### Freshness
 
