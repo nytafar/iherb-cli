@@ -20,7 +20,9 @@ use iherb_cli::targets::SearchTarget;
 use scraper::Selector;
 
 use crate::fixture::TempDir;
-use crate::fixture::{BASE_URL, CATEGORY_SUPPLEMENTS, SEARCH_VITAMIN_C};
+use crate::fixture::{
+    BASE_URL, CATEGORY_SUPPLEMENTS, NO_STOREFRONT, SEARCH_VITAMIN_C, SEARCH_VITAMIN_D3_PRICE_ASC,
+};
 
 // ---------------------------------------------------------------------------
 // parse_search_from_html
@@ -1154,4 +1156,123 @@ fn category_ids_on_the_page() -> Vec<String> {
         })
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// #56 / #57: iHerb's unpriced listings
+// ---------------------------------------------------------------------------
+
+/// A card's `data-ga-discount-price="0"` is iHerb's absent-marker, not a price.
+///
+/// #49 stopped the search path *inventing* a price when neither source parsed.
+/// This is the other direction: the page published `0`, it parsed, and it sailed
+/// past that guard to render as `NOK0.00` — free. iHerb sells nothing for zero,
+/// and every card carrying it here also carries `data-ga-is-discontinued="True"`.
+#[test]
+fn a_discontinued_card_has_no_price_rather_than_a_price_of_zero() {
+    let result = parse_search_from_html(
+        SEARCH_VITAMIN_D3_PRICE_ASC.html(),
+        "vitamin d3",
+        NO_STOREFRONT,
+    )
+    .expect("the search page must parse");
+
+    // Read the truth off the captured page rather than hardcoding ids: every
+    // card iHerb marks discontinued must have come through with no price.
+    let discontinued: Vec<String> = {
+        let doc = SEARCH_VITAMIN_D3_PRICE_ASC.doc();
+        let sel = Selector::parse("a[data-ga-is-discontinued='True']").unwrap();
+        doc.select(&sel)
+            .filter_map(|el| {
+                el.value()
+                    .attr("data-ga-product-id")
+                    .or_else(|| el.value().attr("data-product-id"))
+            })
+            .map(|s| s.to_string())
+            .collect()
+    };
+    assert!(
+        !discontinued.is_empty(),
+        "the fixture must contain discontinued cards or it pins nothing"
+    );
+
+    for id in &discontinued {
+        let Some(product) = result.products.iter().find(|p| &p.product_id == id) else {
+            continue;
+        };
+        assert_eq!(
+            product.price, None,
+            "product {id} is discontinued and must have no price, got {:?}",
+            product.price
+        );
+    }
+
+    // And nothing anywhere in the result is priced at zero.
+    for product in &result.products {
+        assert!(
+            product.price != Some(0.0),
+            "{} came through priced at zero",
+            product.name
+        );
+    }
+}
+
+/// The search view says when a row is not purchasable (#57).
+///
+/// `in_stock` was already read off the card and carried in `--json`; the
+/// Markdown formatter never rendered it, so an out-of-stock row looked exactly
+/// like the purchasable ones beside it — #31's fabrication produced by silence.
+#[test]
+fn search_markdown_says_when_a_row_is_out_of_stock() {
+    let result = parse_search_from_html(
+        SEARCH_VITAMIN_D3_PRICE_ASC.html(),
+        "vitamin d3",
+        NO_STOREFRONT,
+    )
+    .expect("the search page must parse");
+
+    let out_of_stock = result
+        .products
+        .iter()
+        .filter(|p| p.in_stock == Some(false))
+        .count();
+    assert!(
+        out_of_stock > 0,
+        "the fixture must contain out-of-stock cards or it pins nothing"
+    );
+
+    let rendered = format_search_results(&result);
+    assert_eq!(
+        rendered.matches("- **Availability:** Out of Stock").count(),
+        out_of_stock,
+        "every out-of-stock row must carry the line, and only those rows"
+    );
+
+    // In stock is the overwhelming majority and stays silent: twenty rows of
+    // "In Stock" is noise, and its absence is what the wording above is for.
+    assert!(
+        !rendered.contains("**Availability:** In Stock"),
+        "a plain in-stock row must not carry the line"
+    );
+}
+
+/// `None` is not "no", in the search view as in the product view (#31, #57).
+#[test]
+fn a_card_with_no_stock_signal_is_unknown_rather_than_out_of_stock() {
+    let mut result = parse_search_from_html(
+        SEARCH_VITAMIN_D3_PRICE_ASC.html(),
+        "vitamin d3",
+        NO_STOREFRONT,
+    )
+    .expect("the search page must parse");
+
+    result.products.truncate(1);
+    result.products[0].in_stock = None;
+
+    let rendered = format_search_results(&result);
+    assert!(
+        rendered.contains("- **Availability:** Unknown (no availability signal found on the card)"),
+        "an unread signal must not be reported as out of stock:\n{rendered}"
+    );
+    assert!(!rendered.contains("Out of Stock"));
 }

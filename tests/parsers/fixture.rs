@@ -118,6 +118,19 @@ registry! {
     /// for the catalog command in #21.
     CATEGORY_SUPPLEMENTS = "category-supplements", "", "USD", US_STOREFRONT;
 
+    /// `/search?kw=vitamin+d3&sr=4` on the Norwegian storefront — price
+    /// ascending, which is the ordering that puts iHerb's unpriced listings
+    /// first.
+    ///
+    /// Captured for #56 and #57. Nine of its cards are discontinued and carry
+    /// `data-ga-discount-price="0"` beside `data-ga-is-discontinued="True"`,
+    /// and the first three of them are the whole grid's opening rows. It is the
+    /// only page in the corpus with an out-of-stock *card* — [`OLLY_GUMMIES`]
+    /// is an out-of-stock product page, which is a different extractor — so it
+    /// is what pins both the zero-as-absent rule and the search view's
+    /// availability line against something iHerb actually served.
+    SEARCH_VITAMIN_D3_PRICE_ASC = "search-vitamin-d3-price-asc-nok", "", "NOK", NO_STOREFRONT;
+
     // -----------------------------------------------------------------------
     // The current corpus (#8): the Norwegian storefront, and the products this
     // tool is actually used for. Twelve pages captured 2026-09-01 at
