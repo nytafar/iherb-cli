@@ -40,6 +40,21 @@ pub fn format_search_results(result: &SearchResult) -> String {
         };
         out.push_str(&format!("- **Price:** {}\n", price_str));
 
+        // Only when it is *not* a plain in-stock. Nearly every card in a result
+        // set is purchasable, so an unconditional line would be twenty rows of
+        // "In Stock" telling a caller nothing — but omitting it entirely reads
+        // as in-stock for the rows where that is false, which is #31's
+        // fabrication produced by silence (#57). `None` keeps its own wording:
+        // no signal on the card said either way, which is not the same claim as
+        // out of stock. `--json` carries `in_stock` unconditionally regardless.
+        match product.in_stock {
+            Some(true) => {}
+            Some(false) => out.push_str("- **Availability:** Out of Stock\n"),
+            None => out.push_str(
+                "- **Availability:** Unknown (no availability signal found on the card)\n",
+            ),
+        }
+
         if let (Some(rating), Some(count)) = (product.rating, product.review_count) {
             out.push_str(&format!(
                 "- **Rating:** {:.1}/5 ({} reviews)\n",

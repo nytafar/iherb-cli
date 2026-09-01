@@ -29,11 +29,19 @@ use std::time::{Duration, SystemTime};
 /// three storefronts. A key that leaves the currency out claims those are the
 /// same document, which is #1's bug in a second dimension.
 ///
-/// Older files — `product_61864.json`, `v2_…` and `v3_…` alike — are never read
-/// again and are left where they are; nothing deletes them, so a stale entry
-/// costs disk until the user clears the cache directory (#22 adds the command
-/// for that).
-const CACHE_GENERATION: &str = "v4";
+/// `v5` is #56, and it is `v3`'s reason again rather than a key change: **the
+/// records themselves hold a price nobody read**. A discontinued card publishes
+/// `data-ga-discount-price="0"`, which every `v4` entry stored as a price of
+/// `0.0` and rendered as free. The key that fetched such an entry is still the
+/// right key; what is on disk under it is a fabrication, and serving it for the
+/// remaining 30 days of its TTL would keep printing `NOK0.00` from a binary
+/// that no longer produces one.
+///
+/// Older files — `product_61864.json`, `v2_…`, `v3_…` and `v4_…` alike — are
+/// never read again and are left where they are; nothing deletes them, so a
+/// stale entry costs disk until the user clears the cache directory (#22 adds
+/// the command for that).
+const CACHE_GENERATION: &str = "v5";
 
 /// What a cache file name says in place of a currency when `--currency` was not
 /// given.
@@ -304,8 +312,8 @@ pub struct CacheEntry {
     ///
     /// `None` for a search entry, and that is a property of the key rather than
     /// a gap here: a product entry is named
-    /// `v4_product_<country>_<currency>_<id>.json`, but a search entry is
-    /// `v4_search_<hash>.json` — the country went into the hash and cannot be
+    /// `v5_product_<country>_<currency>_<id>.json`, but a search entry is
+    /// `v5_search_<hash>.json` — the country went into the hash and cannot be
     /// read back out. `clear --country` reports these as unattributable instead
     /// of guessing or quietly skipping them.
     pub country: Option<String>,
@@ -314,7 +322,7 @@ pub struct CacheEntry {
 impl CacheEntry {
     /// The country a cache file name states, if it states one.
     fn country_from_name(name: &str) -> Option<String> {
-        // `v4_product_no_NOK_12949.json`
+        // `v5_product_no_NOK_12949.json`
         let rest = name.split_once("_product_")?.1;
         let country = rest.split('_').next()?;
         (!country.is_empty()).then(|| country.to_string())

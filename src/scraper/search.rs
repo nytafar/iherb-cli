@@ -293,13 +293,23 @@ fn parse_product_card(
     // No `unwrap_or(0.0)`. A card whose price neither source could parse has no
     // price, and `0.0` said "free" — indistinguishable from a genuinely free
     // product and from a selector that had stopped matching (#49).
+    //
+    // Zero is dropped from both sources, because on a card it is iHerb's own
+    // marker for "no price applies", not a price. A discontinued listing
+    // publishes `data-ga-discount-price="0"` beside
+    // `data-ga-is-discontinued="True"`, and iHerb sells nothing for zero — so
+    // the value parses, sails past the `None` guard above, and renders as free
+    // (#56). The filter is here rather than in `parse_price_str` on purpose:
+    // that helper is shared with the product path, where #50 wants room to make
+    // a genuine `0.00` representable.
     let price = extract_card_attr(card_el, "meta[itemprop='price']", "content")
         .and_then(|s| parse_price_str(&s))
         .or_else(|| {
             link_attrs
                 .and_then(|a| a.attr("data-ga-discount-price"))
                 .and_then(parse_price_str)
-        });
+        })
+        .filter(|&p| p > 0.0);
 
     // A strikethrough price is only an original price if it is above the price
     // being charged. With no price to compare against there is no discount to

@@ -77,7 +77,7 @@ fn config(country: &str, currency: &str, cache_dir: PathBuf) -> AppConfig {
 
 #[test]
 fn product_entries_are_named_after_the_storefront_and_the_product_id() {
-    assert_eq!(product("us", "61864"), "v4_product_us_any_61864.json");
+    assert_eq!(product("us", "61864"), "v5_product_us_any_61864.json");
     assert_ne!(product("us", "61864"), product("us", "61865"));
     assert_ne!(product("us", "61864"), product("ch", "61864"));
 }
@@ -95,19 +95,23 @@ fn entries_from_older_generations_can_never_be_named_by_the_current_key() {
         iherb_cli::config::DEFAULT_CACHE_TTL,
     );
 
-    // Poisoned entries exactly as v1 and v2 wrote them, with a mtime of now so
-    // the TTL cannot be what saves us.
+    // Poisoned entries exactly as each older generation wrote them, with a mtime
+    // of now so the TTL cannot be what saves us. `v4_` is the newest of them:
+    // #56 abandoned it because those records store a discontinued card's
+    // `data-ga-discount-price="0"` as a price of `0.0`, and a key that reads
+    // one back would print `NOK0.00` from a binary that no longer produces one.
     std::fs::create_dir_all(dir.path()).unwrap();
     for stale in [
         "product_61864.json",
         "v2_product_us_61864.json",
         "v3_product_us_61864.json",
+        "v4_product_us_USD_61864.json",
     ] {
         std::fs::write(dir.path().join(stale), r#""stale""#).unwrap();
     }
 
     let key = ProductTarget::new(&us, "61864").unwrap().cache_key();
-    assert_eq!(key.file_name(), "v4_product_us_USD_61864.json");
+    assert_eq!(key.file_name(), "v5_product_us_USD_61864.json");
     assert!(
         cache.get::<String>(&key).is_none(),
         "a stale entry was read"
@@ -147,17 +151,17 @@ fn two_currencies_get_their_own_cache_file() {
     );
     assert_eq!(
         from_usd.cache_key().file_name(),
-        "v4_product_us_USD_61864.json"
+        "v5_product_us_USD_61864.json"
     );
     assert_eq!(
         from_chf.cache_key().file_name(),
-        "v4_product_us_CHF_61864.json"
+        "v5_product_us_CHF_61864.json"
     );
 
     // And asking for nothing is its own request, distinct from asking for the
     // currency the storefront happens to default to: one sets the preference
     // cookies and one does not.
-    assert_eq!(product("us", "61864"), "v4_product_us_any_61864.json");
+    assert_eq!(product("us", "61864"), "v5_product_us_any_61864.json");
     assert_ne!(product("us", "61864"), from_usd.cache_key().file_name());
 
     // `any` is a sentinel, not a currency, and it cannot be spoofed: every
@@ -189,10 +193,10 @@ fn two_currencies_get_their_own_search_cache_file() {
 #[test]
 fn search_entries_are_a_hash_of_country_query_sort_and_category() {
     let base = search("us", "magnesium", SortOrder::Relevance, None);
-    assert!(base.starts_with("v4_search_"));
+    assert!(base.starts_with("v5_search_"));
     assert!(base.ends_with(".json"));
     // 16 hex characters between the prefix and the extension.
-    assert_eq!(base.len(), "v4_search_".len() + 16 + ".json".len());
+    assert_eq!(base.len(), "v5_search_".len() + 16 + ".json".len());
 
     assert_eq!(base, search("us", "magnesium", SortOrder::Relevance, None));
     assert_ne!(base, search("ch", "magnesium", SortOrder::Relevance, None));
@@ -255,11 +259,11 @@ fn two_storefronts_get_their_own_product_cache_file() {
     );
     assert_eq!(
         from_us.cache_key().file_name(),
-        "v4_product_us_USD_61864.json"
+        "v5_product_us_USD_61864.json"
     );
     assert_eq!(
         from_ch.cache_key().file_name(),
-        "v4_product_ch_CHF_61864.json"
+        "v5_product_ch_CHF_61864.json"
     );
 }
 

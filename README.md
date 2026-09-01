@@ -85,6 +85,19 @@ iherb-cli search "protein" --category supplements --sort best-selling
 - **URL:** https://www.iherb.com/pr/now-foods-c-1000-250-tablets/479
 ```
 
+**A row says when it is not purchasable, and stays quiet when it is.** Nearly
+every card in a result set is in stock, so a line on all twenty rows would carry
+no information — but omitting it entirely reads as in-stock for the rows where
+that is false. `Out of Stock` and `Unknown (no availability signal found on the
+card)` are printed; a plain in-stock row is silent. `--json` carries `in_stock`
+on every product either way.
+
+**A listing iHerb does not price has no price.** Discontinued cards publish a
+literal `0`, which is iHerb's marker for "no price applies" rather than a price —
+so the row reads `Unknown (no price could be read from the card)` beside its
+availability, not `$0.00`. This is most visible under `--sort price-asc`, which
+orders those listings first.
+
 ### Get product details
 
 ```bash
@@ -473,8 +486,8 @@ agents that cannot answer one, so a prompt would be a hang rather than a
 safeguard.
 
 **`--country` cannot reach search entries, and says so.** A product entry is
-named `v4_product_<country>_<currency>_<id>.json` and is matched exactly. A
-search entry is `v4_search_<hash>.json` — the country went into the hash and
+named `v5_product_<country>_<currency>_<id>.json` and is matched exactly. A
+search entry is `v5_search_<hash>.json` — the country went into the hash and
 cannot be read back off the name. Those entries are kept and counted, and the
 report says how many, rather than letting "cleared the Norwegian cache" mean
 something it does not. Clear them with `--older-than` or `--all`.
