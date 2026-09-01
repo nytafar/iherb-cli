@@ -6,3 +6,6 @@
 - **Product Code:** CGN-01990
 - **Shipping Weight:** 0.2 lb
 
+---
+
+*Data read from iHerb during this run, at 2026-09-01 12:34 UTC.*

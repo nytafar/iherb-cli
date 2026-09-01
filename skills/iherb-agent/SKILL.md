@@ -5,7 +5,7 @@ description: Query supplement and health product data from iHerb using the iherb
 
 # iherb-agent
 
-Use the `iherb-cli` binary to query iHerb product data. It uses a headless browser (first run may take a moment to download Chrome). Results are cached for 30 days. Every result includes a `Data from:` timestamp — use `--no-cache` if the data is stale.
+Use the `iherb-cli` binary to query iHerb product data. It uses a headless browser (first run may take a moment to download Chrome). Results are cached for 30 days. Every Markdown result ends with a freshness footer — `*Data read from iHerb during this run, at ...*` or `*Data from the local cache, written ...*` — and under `--json` the same two facts are `meta.fetched_at` and `meta.from_cache`. The timestamp is when the **page** was read, not when the document was printed. Use `--no-cache` if the data is stale.
 
 ## Commands
 

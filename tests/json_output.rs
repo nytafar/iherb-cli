@@ -1356,6 +1356,80 @@ fn markdown_output_keeps_its_logging_off_stdout() {
     assert!(ran.stderr.contains("Cache hit"));
 }
 
+/// The Markdown path reports freshness the same way `--json` does, end to end
+/// (#7).
+///
+/// The formatter's own tests pin the two footers; this pins the *wiring*, which
+/// is the half that was wrong. `app.rs` used to append
+/// `- **Data from:** {SystemTime::now()}` after the formatter returned — a
+/// top-level bullet outside every section, dated to the instant the document was
+/// printed. So this run reads a record off a seeded cache file and asserts the
+/// footer says a cache file is what it read: a run that passed
+/// `Provenance::Fresh` through, or that sampled the clock here, produces the
+/// other sentence and fails.
+#[test]
+fn a_markdown_cache_hit_says_it_read_a_cache_file() {
+    let home = Home::new("markdown-freshness");
+    home.seed_product(&seeded_key(), &a_product());
+
+    let ran = home.run(
+        &["product", "143499", "--country", "no", "--currency", "NOK"],
+        None,
+    );
+
+    assert_eq!(ran.code, 0, "stderr was:\n{}", ran.stderr);
+    assert!(
+        ran.stdout
+            .contains("\n---\n\n*Data from the local cache, written "),
+        "the footer must name the cache and be set off from the body:\n{}",
+        ran.stdout
+    );
+    // The bullet is gone, and gone from the whole document rather than moved.
+    assert!(
+        !ran.stdout.contains("- **Data from:**"),
+        "the freshness line is a bullet again:\n{}",
+        ran.stdout
+    );
+    assert!(
+        ran.stdout.trim_end().ends_with("during this run.*"),
+        "the footer is the last thing in the document:\n{}",
+        ran.stdout
+    );
+
+    // The same run under `--section`, which is where the orphan bullet showed.
+    let sectioned = home.run(
+        &[
+            "product",
+            "143499",
+            "--section",
+            "ingredients",
+            "--country",
+            "no",
+            "--currency",
+            "NOK",
+        ],
+        None,
+    );
+    assert_eq!(sectioned.code, 0, "stderr was:\n{}", sectioned.stderr);
+    assert!(
+        sectioned.stdout.starts_with("## Other Ingredients"),
+        "stdout was:\n{}",
+        sectioned.stdout
+    );
+    assert!(
+        !sectioned.stdout.contains("- **Data from:**"),
+        "a section block followed by a bullet belonging to no section:\n{}",
+        sectioned.stdout
+    );
+    assert!(
+        sectioned
+            .stdout
+            .contains("\n---\n\n*Data from the local cache, written "),
+        "stdout was:\n{}",
+        sectioned.stdout
+    );
+}
+
 /// `meta.requested_country` is the value the run *resolved* to, not the flag it was
 /// passed — asserted with a config file and no flags at all, because that is
 /// the case a record produced by an unattended run is written under.

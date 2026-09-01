@@ -5,6 +5,8 @@ use crate::model::{ExtractionHealth, ProductDetail, SearchResult, Source};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::time::SystemTime;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 pub fn format_search_results(result: &SearchResult) -> String {
     let mut out = String::new();
@@ -162,7 +164,158 @@ impl ProductView {
     }
 }
 
-pub fn format_product_detail(product: &ProductDetail, view: &ProductView) -> String {
+/// When the data in a document was read, and off what (#7).
+///
+/// # Why the formatter is handed this at all
+///
+/// Because the alternative was a `println!` after it. The freshness line used
+/// to be appended by `app.rs` once `format_product_detail` had returned, which
+/// made it a bullet that belonged to no section: with `--section ingredients`
+/// the output was an `## Other Ingredients` block followed by a stray
+/// top-level `- **Data from:**`, and with a section the page has no data for it
+/// was a bullet under no heading at all. Neither is Markdown a caller can
+/// parse, and neither could be fixed from outside the formatter, because
+/// *where the line belongs* is a layout decision and the formatter is what
+/// makes those.
+///
+/// It also said the wrong thing. The instant was `SystemTime::now()` — when the
+/// document was *printed* — so a 29-day-old cache entry dated itself to the
+/// second the command ran. That half is already fixed upstream: the instant
+/// here comes from [`Provenance`], which distinguishes a page read during this
+/// run from a cache file written three weeks ago (#44).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Freshness {
+    fetched_at: SystemTime,
+    from_cache: bool,
+}
+
+impl Freshness {
+    /// What a run reporting itself at `emitted_at` should say about its data.
+    pub fn of(provenance: Provenance, emitted_at: SystemTime) -> Self {
+        Self {
+            fetched_at: provenance.fetched_at(emitted_at),
+            from_cache: provenance.from_cache(),
+        }
+    }
+
+    /// The document footer, set off from the body by a thematic break.
+    ///
+    /// **Not a list item.** A bullet is a member of whatever list or section it
+    /// follows, and this is a statement about the whole document; rendering it
+    /// as one is what made `--section` output malformed. A rule and an emphasis
+    /// span are the two things Markdown has that mean "this is not part of the
+    /// body above".
+    ///
+    /// The two cases read differently on purpose. "Read from iHerb during this
+    /// run" and "read off a file written some weeks ago" are the difference
+    /// between a price and a guess, and a reader should not have to subtract
+    /// two timestamps to find out which they have.
+    fn footer(&self) -> String {
+        if self.from_cache {
+            format!(
+                "\n---\n\n*Data from the local cache, written {}. Nothing was read from \
+                 iHerb during this run.*\n",
+                format_cached_at(self.fetched_at)
+            )
+        } else {
+            format!(
+                "\n---\n\n*Data read from iHerb during this run, at {}.*\n",
+                format_cached_at(self.fetched_at)
+            )
+        }
+    }
+
+    /// The sentence that dates an *absence*.
+    ///
+    /// "No ingredients data available for this product." followed by a
+    /// timestamp reads as an absence observed just now, and on a cache hit it is
+    /// nothing of the kind: the page was read weeks ago, may have gained the
+    /// section since, and nothing in this run went and looked. An absence is the
+    /// one claim whose meaning changes with age — a price that is three weeks
+    /// old is at least a price that existed — so it says its own age rather than
+    /// leaving it to the footer.
+    fn as_observed(&self) -> String {
+        if self.from_cache {
+            format!(
+                " That is what the cached record says, and it was read on {} — \
+                 the page may have gained one since, and nothing in this run went \
+                 back to look.",
+                format_cached_at(self.fetched_at)
+            )
+        } else {
+            " The page was read during this run and published none.".to_string()
+        }
+    }
+}
+
+/// The whole Markdown document a `product` invocation prints.
+///
+/// Body, then the provenance table if `--debug` asked for it, then the
+/// freshness footer — in that order, and assembled here rather than in
+/// `app.rs`, so there is one place that knows what a finished document looks
+/// like. See [`Freshness`] for what the caller used to do instead.
+pub fn format_product_document(
+    product: &ProductDetail,
+    view: &ProductView,
+    freshness: Freshness,
+    with_extraction_health: bool,
+) -> String {
+    let mut out = format_product_detail(product, view, freshness);
+
+    // The provenance table is reachable from a caller, on demand. `--json`
+    // carries the same block unconditionally, because there it costs a consumer
+    // nothing to ignore and costs it everything to be unable to ask.
+    if with_extraction_health {
+        out.push_str(&format!(
+            "\n{}",
+            format_extraction_health(&product.health())
+        ));
+    }
+
+    close_document(out, freshness)
+}
+
+/// The whole Markdown document a `search` invocation prints.
+pub fn format_search_document(result: &SearchResult, limit: usize, freshness: Freshness) -> String {
+    let mut out = format_search_results(result);
+
+    // `--limit` counts distinct products, so falling short of it is a fact
+    // about the fetch and has to be said out loud (#6, #33). A caller counting
+    // rows cannot otherwise tell "iHerb has no more" from "we stopped walking".
+    if let Some(note) = format_search_shortfall(result, limit) {
+        out.push_str(&format!("\n{}", note));
+    }
+
+    close_document(out, freshness)
+}
+
+/// Trim the body's trailing blank lines and stamp the footer on.
+///
+/// The trim is not cosmetic. Sections end with a blank line so they stack
+/// legibly, and a footer appended after one leaves two blank lines before the
+/// rule — enough that some renderers stop treating the rule as a break from the
+/// paragraph above it.
+fn close_document(mut out: String, freshness: Freshness) -> String {
+    let body = out.trim_end().len();
+    out.truncate(body);
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(&freshness.footer());
+    out
+}
+
+/// The body of a product document: the sections `--section` resolved to, and
+/// nothing else.
+///
+/// `freshness` reaches only one line here — the one that reports an *absence*,
+/// whose meaning depends on when it was observed. The footer is
+/// [`format_product_document`]'s.
+pub fn format_product_detail(
+    product: &ProductDetail,
+    view: &ProductView,
+    freshness: Freshness,
+) -> String {
     let mut out = String::new();
 
     if view.titled {
@@ -183,9 +336,13 @@ pub fn format_product_detail(product: &ProductDetail, view: &ProductView) -> Str
 
     if out.is_empty() {
         if let Some(sec) = view.requested() {
+            // The absence is dated. See [`Freshness::as_observed`]: a cached
+            // "no ingredients" is a claim about a page nobody looked at during
+            // this run.
             out.push_str(&format!(
-                "No {} data available for this product.\n",
-                sec.label()
+                "No {} data available for this product.{}\n",
+                sec.label(),
+                freshness.as_observed()
             ));
         }
     }
@@ -444,11 +601,21 @@ fn format_price(price: f64, original: Option<&f64>, currency: Option<&str>) -> S
     }
 }
 
+/// An instant as a human reads it: `2026-09-01 12:34 UTC`.
+///
+/// Minute resolution, because that is what a reader wants off a footer. The
+/// machine-readable rendering is [`format_rfc3339`], and the two must not
+/// disagree about which day it is — which is why they share one
+/// [`OffsetDateTime`] conversion rather than two arithmetics.
 pub fn format_cached_at(cached_at: SystemTime) -> String {
-    let t = Utc::from(cached_at);
+    let t = OffsetDateTime::from(cached_at);
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02} UTC",
-        t.year, t.month, t.day, t.hour, t.minute
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute()
     )
 }
 
@@ -458,88 +625,19 @@ pub fn format_cached_at(cached_at: SystemTime) -> String {
 /// minute, which is the right resolution to read and the wrong one to store: a
 /// consumer comparing two records needs the seconds, and needs a format it can
 /// parse rather than one it has to recognise.
-pub fn format_rfc3339(at: SystemTime) -> String {
-    let t = Utc::from(at);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        t.year, t.month, t.day, t.hour, t.minute, t.second
-    )
-}
-
-/// A civil date and time in UTC, broken out of a [`SystemTime`].
 ///
-/// Hand-rolled rather than pulled from a date crate, which is the choice this
-/// file already made; it is factored out here only because there are now two
-/// renderings of one instant and they must not disagree about which day it is.
-struct Utc {
-    year: i64,
-    month: usize,
-    day: i64,
-    hour: i64,
-    minute: i64,
-    second: i64,
-}
-
-impl From<SystemTime> for Utc {
-    fn from(at: SystemTime) -> Self {
-        let secs = at
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-
-        let days = secs / 86400;
-        let remaining = secs % 86400;
-        let hour = remaining / 3600;
-        let minute = (remaining % 3600) / 60;
-        let second = remaining % 60;
-
-        // Calculate year/month/day from epoch days
-        let mut y = 1970i64;
-        let mut d = days;
-        loop {
-            let days_in_year = if is_leap(y) { 366 } else { 365 };
-            if d < days_in_year {
-                break;
-            }
-            d -= days_in_year;
-            y += 1;
-        }
-        let month_days = [
-            31,
-            if is_leap(y) { 29 } else { 28 },
-            31,
-            30,
-            31,
-            30,
-            31,
-            31,
-            30,
-            31,
-            30,
-            31,
-        ];
-        let mut m = 0usize;
-        for (i, &md) in month_days.iter().enumerate() {
-            if d < md {
-                m = i;
-                break;
-            }
-            d -= md;
-        }
-
-        Utc {
-            year: y,
-            month: m + 1,
-            day: d + 1,
-            hour,
-            minute,
-            second,
-        }
-    }
-}
-
-fn is_leap(year: i64) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+/// Seconds and no finer, deliberately. A cache entry's instant is a file
+/// mtime, which carries nanoseconds on every filesystem this runs on, and
+/// `Rfc3339` renders a non-zero nanosecond as a fractional part. That would put
+/// two different shapes of timestamp in one field depending on where the
+/// instant came from — a fresh record's clock sample against a cached record's
+/// mtime — for a precision nothing in this tool has a use for.
+pub fn format_rfc3339(at: SystemTime) -> String {
+    OffsetDateTime::from(at)
+        .replace_nanosecond(0)
+        .expect("0 is a valid nanosecond")
+        .format(&Rfc3339)
+        .expect("a UTC OffsetDateTime always formats as RFC 3339")
 }
 
 fn format_number(n: u32) -> String {

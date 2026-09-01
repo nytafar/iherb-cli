@@ -28,7 +28,7 @@ use crate::config::AppConfig;
 use crate::error::{classify_error, ErrorKind};
 use crate::fetch::{fetch, Failure, Provenance};
 use crate::model::{ProductDetail, SearchResult};
-use crate::output::{self, Envelope, Meta, ProductView};
+use crate::output::{self, Envelope, Freshness, Meta, ProductView};
 use crate::targets::{ProductTarget, SearchTarget};
 
 /// Run the CLI: configure logging, load config, dispatch the subcommand, and
@@ -324,42 +324,25 @@ fn render(
 }
 
 /// The Markdown a human — or an agent reading prose — gets.
+///
+/// This function no longer appends anything after the formatter has run, and
+/// that is the whole of #7's first half. It used to `push_str` a
+/// `- **Data from:**` bullet here, outside every section — which under
+/// `--section` produced a section block followed by a top-level bullet
+/// belonging to nothing, and under a section with no data a bullet under no
+/// heading at all. Where the line belongs is a layout decision; layout is what
+/// the formatter is for. See [`Freshness`].
 fn render_markdown(outcome: &CommandOutcome, config: &AppConfig, emitted_at: SystemTime) -> String {
-    let mut out = String::new();
+    let freshness = Freshness::of(outcome.provenance(), emitted_at);
 
     match outcome {
         CommandOutcome::Search { result, limit, .. } => {
-            out.push_str(&output::format_search_results(result));
-
-            // `--limit` counts distinct products, so falling short of it is a
-            // fact about the fetch and has to be said out loud (#6, #33). A
-            // caller counting rows cannot otherwise tell "iHerb has no more"
-            // from "we stopped walking".
-            if let Some(note) = output::format_search_shortfall(result, *limit) {
-                out.push_str(&format!("\n{}", note));
-            }
+            output::format_search_document(result, *limit, freshness)
         }
         CommandOutcome::Product { product, view, .. } => {
-            out.push_str(&output::format_product_detail(product, view));
-
-            // The provenance table is reachable from a caller, on demand.
-            // `--json` carries the same block unconditionally, because there it
-            // costs a consumer nothing to ignore and costs it everything to be
-            // unable to ask.
-            if config.debug {
-                out.push_str(&format!(
-                    "\n{}",
-                    output::format_extraction_health(&product.health())
-                ));
-            }
+            output::format_product_document(product, view, freshness, config.debug)
         }
     }
-
-    out.push_str(&format!(
-        "\n- **Data from:** {}\n",
-        output::format_cached_at(outcome.provenance().fetched_at(emitted_at))
-    ));
-    out
 }
 
 /// The single JSON document a machine gets: one envelope, whatever the command.

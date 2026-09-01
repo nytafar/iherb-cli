@@ -42,3 +42,7 @@
 - **Rating:** 4.8/5 (35,031 reviews)
 - **ID:** 61866
 - **URL:** https://www.iherb.com/pr/california-gold-nutrition-gold-c-usp-grade-vitamin-c-500-mg-240-veggie-capsules/61866
+
+---
+
+*Data read from iHerb during this run, at 2026-09-01 12:34 UTC.*

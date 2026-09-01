@@ -25,3 +25,6 @@ Keep Calm & Stay Alert GABA, L-Theanine & Lemon Balm Dietary Supplement With Oth
 - **Serving Size:** 2 Gummies
 - **Servings Per Container:** 21
 
+---
+
+*Data read from iHerb during this run, at 2026-09-01 12:34 UTC.*

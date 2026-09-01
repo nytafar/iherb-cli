@@ -391,7 +391,42 @@ Scraped data is cached locally to reduce redundant requests. The cache directory
 
 All cached data expires after **30 days**.
 
-Every result includes a `Data from:` timestamp so you know how fresh the data is. Use `--no-cache` to bypass the cache and fetch fresh data.
+### Freshness
+
+Every Markdown document ends with a footer saying where its data came from and
+when, set off from the body by a rule:
+
+```markdown
+---
+
+*Data from the local cache, written 2026-08-23 12:34 UTC. Nothing was read from iHerb during this run.*
+```
+
+A fresh fetch says so instead: `*Data read from iHerb during this run, at
+2026-09-01 12:34 UTC.*` Under `--json` the same two facts are `meta.fetched_at`
+and `meta.from_cache`.
+
+**The timestamp is when the page was read, not when the document was printed.**
+That distinction only shows up on a cache hit, and on a cache hit it is the
+whole point: a price read three weeks ago is not stale, it is wrong.
+
+It is a footer rather than a bullet because a bullet belongs to whatever section
+it follows, and this belongs to the document. `--section ingredients` used to
+emit an `## Other Ingredients` block trailed by a top-level `- **Data from:**`
+bullet that was part of nothing, and a section the page has no data for emitted
+that bullet under no heading at all (#7).
+
+**An absent section says when it was absent.** "No ingredients data available
+for this product." on its own reads as something looked just now and found
+nothing; off a cache hit, nothing looked at all. So it carries its own date:
+
+```
+No review data available for this product. That is what the cached record says,
+and it was read on 2026-08-23 12:34 UTC — the page may have gained one since,
+and nothing in this run went back to look.
+```
+
+Use `--no-cache` to bypass the cache and fetch fresh data.
 
 ## How it works
 

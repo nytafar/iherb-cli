@@ -1,16 +1,3 @@
-# California Gold Nutrition, Multivitamin and Mineral with Methyl B12, Vitamin C, L-MethylFolate and Quercetin, Two-A-Day, 60 Veggie Capsules
-
-## Overview
-- **Brand:** California Gold Nutrition
-- **Price:** $12.38 ~~$17.69~~ (30% off)
-- **Rating:** 4.7/5 (13,195 reviews)
-- **Availability:** In Stock
-- **Product Code:** CGN-01990
-- **Shipping Weight:** 0.2 lb
-
-## Description
-Over 25 Vitamins and Minerals Featuring Methyl B12, L-MethylFolate, and Quercetin Helps Support a Healthy Lifestyle* California Gold Nutrition® Multivitamin and Mineral Two-A-Day can help you get your daily dose of numerous vitamins and minerals, helping to support a healthier lifestyle.* Our high-potency formula contains vitamins A, C, D, E, B6, and B12, which can help promote antioxidant activity and support your cells and numerous systems, including the immune system.* You’ll also find high levels of important minerals, like zinc and magnesium, which can help support brain, muscle, and nerve function.* iTested Verified
-
 ## Supplement Facts
 | Nutrient | Amount | % Daily Value |
 |---|---|---|
@@ -50,21 +37,6 @@ Over 25 Vitamins and Minerals Featuring Methyl B12, L-MethylFolate, and Querceti
 ## Other Ingredients
 Main Ingredients Vitamin A (as Retinyl Acetate and as Beta-Carotene), Vitamin C (as Ascorbic Acid and Calcium Ascorbate), Vitamin D (as D3, Cholecalciferol), Vitamin E (as d-Alpha Tocopheryl Succinate), Thiamin (as Thiamine Hydrochloride), Riboflavin (as Riboflavin and Riboflavin 5’-Phosphate), Niacin (as Niacinamide), Vitamin B6 (as Pyridoxine Hydrochloride and Pyridoxal 5’-Phosphate), Folate (as 5-MTHF, L-5-Methyltetrahydrofolate Calcium), Vitamin B12 (as Methylcobalamin), Biotin, Pantothenic Acid (as d-Calcium Pantothenate), Iodine (as Potassium Iodide), Magnesium (as Magnesium Oxide), Zinc (as Zinc Citrate and Zinc Mono-L-Methionine Sulfate), Selenium (as Sodium Selenite and High Selenium Yeast), Manganese (as Manganese Citrate and Manganese Gluconate), Chromium (as Chromium Chloride), Molybdenum (as Molybdenum Amino Acid Chelate), Inositol, Alpha Lipoic Acid, Mixed Tocopherols, Quercetin Phospholipid Matrix Quercetin from Japanese Sophora Extract (flower), Sunflower Lecithin (Phospholipids), Apigenin, Boron (as Boron Chelate), Amla Extract (Phyllanthus emblica)(fruit), Lycopene (from Tomato Fruit Extract), Zeaxanthin (from Marigold Extract) (Tagetes erecta) (flower) Other Ingredients Modified Cellulose (Hypromellose Veggie Capsule), Modified Food Starch, Dicalcium Phosphate, Magnesium Stearate, Microcrystalline Cellulose, Silicon Dioxide (Silica), Maltodextrin, and Rice Hull Concentrate. Not manufactured with milk, eggs, fish, crustacean shellfish, tree nuts, peanuts, wheat, soy, sesame, or gluten. Produced in an FDA-registered, third-party audited, and cGMP-compliant facility that may process other products that contain these allergens or ingredients. Formulated with Magnafolate® Pro Calcium L-5 Methyltetrahydrofolate and SelenoExcell® Selenium. Magnafolate® C is a registered trademark of Lianyungang Jinkang Pharmaceutical Technology Co., Ltd. SelenoExcell® is a Federally Registered Trademark of Cypress Systems, Inc.
 
-## Suggested Use
-Take 2 capsules daily, with food. Best when taken as directed by a qualified healthcare professional.
-
-## Warnings
-Keep out of reach of children.  Pregnant or lactating women, the chronically ill, elderly, individuals under the age of 18, those taking prescription medications (e.g., blood thinners) as well as those with a physician-diagnosed medical condition should consult with a physician, pharmacist, naturopath or other qualified healthcare professional prior to taking dietary supplements.  Sealed for your protection. Do not use if seal is missing or broken. Store in a cool, dry place. Protect from heat, light, and moisture.
-
-## Reviews
-- **Average:** 4.7/5
-- **Total:** 13,195 reviews
-- 5 stars: 79%
-- 4 stars: 14%
-- 3 stars: 5%
-- 2 stars: 1%
-- 1 star: 1%
-
 ---
 
-*Data read from iHerb during this run, at 2026-09-01 12:34 UTC.*
+*Data from the local cache, written 2026-08-23 12:34 UTC. Nothing was read from iHerb during this run.*

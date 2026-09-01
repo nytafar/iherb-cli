@@ -34,3 +34,6 @@
 - **Serving Size:** 2 Capsules
 - **Servings Per Container:** 30
 
+---
+
+*Data read from iHerb during this run, at 2026-09-01 12:34 UTC.*

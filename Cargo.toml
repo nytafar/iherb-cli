@@ -46,6 +46,16 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Dates
+#
+# Already in the tree as a transitive dependency of `zip`; naming it here adds
+# the `formatting` feature and nothing else. It replaces the hand-rolled civil-
+# date arithmetic `output.rs` used to carry — an epoch-day loop, a leap-year
+# rule and a month table — for two formatted strings (#7). `chrono` is the
+# other obvious candidate and is *not* in the tree, so it would be a new
+# dependency; this one is not.
+time = { version = "0.3", features = ["formatting"] }
+
 # Utilities
 dirs = "6"
 sha2 = "0.10"

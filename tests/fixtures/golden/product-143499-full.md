@@ -20,3 +20,6 @@ A Little Goes a Long Way  Brush with Dentalcidin® 2-3 times daily. Formulated 
 ## Warnings
 Do not use if safety seal is broken.
 
+---
+
+*Data from the local cache, written 2026-08-23 12:34 UTC. Nothing was read from iHerb during this run.*
