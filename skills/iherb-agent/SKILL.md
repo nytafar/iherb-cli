@@ -60,8 +60,8 @@ document, success or failure, and nothing else — logging goes to stderr.
 { "ok": true, "schema_version": 1,
   "meta": { "tool_version": "0.1.1",
             "fetched_at": "2026-08-31T09:14:22Z", "emitted_at": "2026-08-31T11:02:05Z",
-            "from_cache": true, "country": "no", "currency": "NOK",
-            "storefront": "https://no.iherb.com" },
+            "from_cache": true, "requested_country": "no", "requested_currency": "NOK",
+            "requested_storefront": "https://no.iherb.com" },
   "data": { } }
 ```
 
@@ -70,15 +70,18 @@ would be, in the same envelope.
 
 Four things to know before acting on the output.
 
-1. **`meta` is the record's provenance and it travels with it.** `fetched_at` is
-   when the page was read, `emitted_at` is when the command ran; when
-   `from_cache` is true they differ, and a price read weeks ago is not stale, it
-   is wrong. `country`, `currency` and `storefront` are what the run resolved
-   to, so a stored document is still interpretable on its own. Never compare two
-   prices without comparing their `meta.storefront`.
-2. **`meta.currency` is what the run *asked* for, not what a price is in.** The
-   currency of a price is `data.currency`, and `null` there means the page
-   published none. Do not substitute one for the other.
+1. **`meta` describes the request; the record describes the answer.**
+   `fetched_at` is when the page was read, `emitted_at` is when the command ran;
+   when `from_cache` is true they differ, and a price read weeks ago is not
+   stale, it is wrong. The three `requested_` fields are what the run resolved
+   to after flag → env → config file, so a stored document still says what it
+   asked for. Never compare two prices without comparing their
+   `meta.requested_storefront` **and** their `data.currency`.
+2. **`meta.requested_currency` is what the run asked for, not what a price is
+   in.** iHerb geolocates by IP and will override a `--country` you did not
+   state, so the two genuinely differ: the currency of a price is
+   `data.currency`, and `null` there means the page published none. Do not
+   substitute one for the other.
 3. **`data.extraction` says whether to trust the record.** Same block on a
    product and on every search card. `degraded: true` means a field every
    product page publishes was not read, or a field the page carried could not be
@@ -99,16 +102,22 @@ Branch on the exit code rather than on the message text.
 | exit | `error_type` | what to do |
 |---|---|---|
 | 0 | — | succeeded |
-| 2 | `invalid_input` | fix the arguments — empty query, `--limit 0`, unknown `--category` or `--country`, an unusable product id, or a `--currency` this storefront does not price in |
-| 10 / 11 | `browser_launch_failed`, `chrome_download_failed` | the environment is broken; tell the user, do not retry |
-| 20 / 21 | `navigation_timeout`, `navigation_failed` | retry `20`; `21` usually means the URL is wrong |
+| 2 | `invalid_input` | fix the arguments — empty query, `--limit 0`, unknown `--category` or `--country`, or an unusable product id |
+| 10 | `browser_launch_failed` | the environment is broken; tell the user, do not retry |
+| 11 | `chrome_download_failed` | the environment is broken; tell the user, do not retry |
+| 20 | `navigation_timeout` | the page was slow; retry |
+| 21 | `navigation_failed` | the page did not load and the clock was not why; usually the URL is wrong |
 | 22 | `cloudflare_blocked` | back off and retry later; do not hammer |
 | 23 | `product_not_found` | the id is gone — stop asking about it |
 | 24 | `empty_page_or_catalog_end` | the search matched nothing; try a different query |
-| 30 / 31 / 32 / 40 | `network_error`, `io_error`, `cache_error`, `json_error` | local or transient; retry once, then report |
+| 25 | `currency_mismatch` | the storefront prices in something else and nothing here converts; change `--country` or drop `--currency`. **Not** an argument typo — the command line was fine and the storefront answered |
 | 41 | `parse_failed` | **the page loaded and the scraper could not read it.** The site changed shape. Report it to the user as a tool bug, do not retry the same id in a loop |
 | 70 | `internal_error` | a bug in the tool; report it with the message |
-| 130 | — | interrupted |
+| 130 | `interrupted` | Ctrl+C. You still get a document — the envelope says so |
+
+Every code above has a producer. There is no `network_error`, `io_error`,
+`cache_error` or `json_error`: an earlier draft documented all four and could
+produce none of them, so branching on them was branching on nothing.
 
 `--help` and `--version` still print normally and exit `0` under `--json`.
 

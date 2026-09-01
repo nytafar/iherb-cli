@@ -1,5 +1,6 @@
 use crate::error::IherbError;
 use chromiumoxide::cdp::browser_protocol::network::{CookieParam, TimeSinceEpoch};
+use chromiumoxide::error::CdpError;
 use chromiumoxide::Page;
 use std::time::Duration;
 
@@ -192,7 +193,7 @@ impl Navigator {
 
         page.goto(url)
             .await
-            .map_err(|e| IherbError::Navigation(format!("Failed to navigate to {}: {}", url, e)))?;
+            .map_err(|e| navigation_failure(format_args!("Failed to navigate to {}", url), e))?;
 
         // Wait for initial page load
         tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
@@ -258,7 +259,7 @@ impl Navigator {
         let html = page
             .content()
             .await
-            .map_err(|e| IherbError::Navigation(format!("Failed to get page content: {}", e)))?;
+            .map_err(|e| navigation_failure("Failed to get page content", e))?;
 
         Ok(html)
     }
@@ -308,5 +309,30 @@ impl Navigator {
 
     pub async fn rate_limit_delay(&self) {
         tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+    }
+}
+
+/// Name a navigation failure while `chromiumoxide`'s own error is still typed.
+///
+/// This is the only place the timeout distinction can honestly be made. The
+/// classifier used to make it *afterwards*, by lower-casing the flattened
+/// message and looking for "timeout", "timed out" or "deadline" — and that
+/// message embeds the URL the run asked for. So `iherb-cli search timeout`
+/// built a URL containing the word, and every failure of that navigation,
+/// whatever its cause, reported `navigation_timeout` (20) and told the caller
+/// to retry. A caller's retry decision must not be steerable by the caller's
+/// own query text. The heuristic failed in the other direction too: one wording
+/// change upstream and real timeouts would have started reporting as 21, with
+/// nothing to notice it.
+///
+/// [`CdpError::Timeout`] is the driver's own answer to the same question —
+/// `chromiumoxide` maps its internal `NavigationError::Timeout` onto it — and
+/// [`CdpError::LaunchTimeout`] is the same fact about the launch handshake.
+pub fn navigation_failure(context: impl std::fmt::Display, error: CdpError) -> IherbError {
+    match error {
+        CdpError::Timeout | CdpError::LaunchTimeout(_) => {
+            IherbError::NavigationTimeout(format!("{}: {}", context, error))
+        }
+        _ => IherbError::Navigation(format!("{}: {}", context, error)),
     }
 }

@@ -31,7 +31,7 @@ use tokio::sync::Mutex;
 use iherb_cli::browser::session::BrowserSession;
 use iherb_cli::cache::CacheKey;
 use iherb_cli::config::AppConfig;
-use iherb_cli::fetch::{fetch_on, FetchTarget, Paging};
+use iherb_cli::fetch::{fetch_on, FetchTarget, Paging, Provenance};
 
 /// A config that touches nothing on disk that matters: caching off, no delay,
 /// cache and data directories under a temp path of the test's own.
@@ -617,10 +617,20 @@ async fn a_batch_does_not_accumulate_a_tab_per_target() {
         open_after_each.push(settled_pages(&session).await);
     }
 
-    let failed = fetch_on(&FailingTarget, &config, &session).await;
-    assert!(
-        failed.is_err(),
-        "FailingTarget was supposed to fail, so this measures the success path twice"
+    let failed = fetch_on(&FailingTarget, &config, &session)
+        .await
+        .expect_err("FailingTarget was supposed to fail, so this measures the success path twice");
+
+    // The page loaded and *then* its output was rejected — which is exactly what
+    // `parse_failed` and `currency_mismatch` are in production. The failure has
+    // to carry that out of the pipeline, because the envelope wraps errors too
+    // and `fetched_at: null` would state, of a page that was read, that none was
+    // (#44). Asserted here rather than only against `Failure::after_page_read`,
+    // so that it is the pipeline's wiring under test and not the constructor's.
+    assert_eq!(
+        failed.provenance,
+        Some(Provenance::Fresh),
+        "a failure after the page was read must report that a page was read"
     );
     open_after_each.push(settled_pages(&session).await);
 

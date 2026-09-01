@@ -22,6 +22,21 @@ pub enum IherbError {
     #[error("Browser navigation failed: {0}")]
     Navigation(String),
 
+    /// A navigation that ran out of time rather than out of road.
+    ///
+    /// Separate from [`IherbError::Navigation`] because the two call for
+    /// opposite responses — retry the slow page, stop retrying the one that
+    /// will never load — and because the distinction is *typed at the boundary*
+    /// rather than read out of prose. It used to be neither: `classify_error`
+    /// grepped the driver's message for "timeout", and that message embeds the
+    /// URL we asked for, so searching iHerb for the literal query `timeout`
+    /// made every navigation failure report itself as a timeout. User input
+    /// must not be able to steer a caller's retry decision. See
+    /// [`crate::scraper::navigation::navigation_failure`], which does the
+    /// classification while `chromiumoxide`'s own typed error is still in hand.
+    #[error("Browser navigation timed out: {0}")]
+    NavigationTimeout(String),
+
     #[error("Cloudflare challenge could not be solved after {0} attempts")]
     CloudflareBlocked(u32),
 
@@ -69,32 +84,55 @@ pub enum IherbError {
         what: String,
     },
 
+    /// Chrome could not be obtained: the version index, the download, the
+    /// archive, or writing any of it to disk.
+    ///
+    /// One variant over all of those on purpose. The taxonomy used to carry a
+    /// `network_error` and an `io_error` beside this and construct neither, and
+    /// the reason it constructed neither is that there is nothing for them to
+    /// mean here: a socket that closed and a disk that filled are both, to a
+    /// caller, "this machine could not get Chrome". See [`ErrorKind`].
     #[error("Chrome download failed: {0}")]
     ChromeDownload(String),
-
-    #[error("Cache error: {0}")]
-    Cache(String),
-
-    #[error("Network error: {0}")]
-    Network(#[from] reqwest::Error),
-
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
 }
 
 /// What went wrong, as a caller has to act on it (#9).
 ///
 /// One variant per documented `error_type`, each with a stable exit code. The
-/// point of the type is that the four failures a caller must respond to
-/// differently — skip this id, retry later, fix the environment, file a bug —
-/// are four different numbers rather than one `1`.
+/// point of the type is that the failures a caller must respond to differently
+/// — skip this id, retry later, fix the environment, file a bug — are different
+/// numbers rather than one `1`.
 ///
 /// The codes are grouped by what a caller does about them: `2` is the caller's
-/// input, `1x` the local environment, `2x` the page, `3x` the machine, `4x` the
-/// data, and [`ErrorKind::Internal`] sits outside all of them.
+/// input, `1x` the local environment, `2x` the page, `4x` the data,
+/// [`ErrorKind::Internal`] is this tool's own bug, and
+/// [`ErrorKind::Interrupted`] is the operator.
+///
+/// # Every code here has a producer
+///
+/// That is the invariant, and it is the whole of #9: a table that documents a
+/// distinction the code cannot make is worse than no table, because a caller
+/// branches on a code that never arrives and never notices. Four codes were
+/// documented without one and have been removed rather than given a decorative
+/// producer:
+///
+///  - **`network_error` (30)**. `reqwest` is used in exactly one place, the
+///    Chrome download. A network failure there *is*
+///    [`ErrorKind::ChromeDownloadFailed`]. Every other network failure this
+///    tool has happens inside Chrome and already arrives as a navigation or
+///    Cloudflare error.
+///  - **`io_error` (31)**. Every filesystem failure sits inside a larger
+///    operation that already has a code — the profile directory belongs to
+///    [`ErrorKind::BrowserLaunchFailed`], the unpacked archive to
+///    [`ErrorKind::ChromeDownloadFailed`] — or is not fatal at all.
+///  - **`cache_error` (32)**. The cache is an optimization. A read that fails
+///    is a miss and a write that fails is a log line; neither fails a run, and
+///    neither should. See [`crate::cache::CacheWriteFailed`], which is
+///    deliberately not an [`IherbError`] so that it cannot become one.
+///  - **`json_error` (40)**. This tool consumes no JSON from a caller, and the
+///    only JSON it produces is a record it already holds. A record that will
+///    not serialize is a bug in this tool, which is what
+///    [`ErrorKind::Internal`] already means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     /// The arguments cannot produce a request. Fix them and try again.
@@ -113,14 +151,16 @@ pub enum ErrorKind {
     ProductNotFound,
     /// The listing page carried nothing. Not a fault.
     EmptyPageOrCatalogEnd,
-    /// The network failed under us.
-    NetworkError,
-    /// The filesystem failed under us.
-    IoError,
-    /// The cache could not be read or written.
-    CacheError,
-    /// JSON we produced or consumed would not round-trip.
-    JsonError,
+    /// The storefront priced in a currency `--currency` did not allow.
+    ///
+    /// Its own code rather than [`ErrorKind::InvalidInput`], which is where it
+    /// used to land. `--country us --currency CHF` is a syntactically perfect
+    /// command line: it launches a browser, fetches a page, and can only fail
+    /// once the storefront has answered. A caller that sees `invalid_input`
+    /// re-reads its arguments; a caller that sees this one changes what it
+    /// expects of the storefront. Sharing a code forced it to parse `message`
+    /// to tell which, which is the taxonomy failing at its one job.
+    CurrencyMismatch,
     /// **The page loaded and we could not read it.** The scraper is broken and
     /// a human should look.
     ///
@@ -136,6 +176,15 @@ pub enum ErrorKind {
     /// software error, which is precisely what an error this tool cannot name
     /// about itself is.
     Internal,
+    /// Ctrl+C. Not a failure of anything, and the only code here the tool did
+    /// not decide on its own.
+    ///
+    /// `130` is `128 + SIGINT`, which is what a shell reports for a process
+    /// killed by an interrupt, and it was already this tool's interrupt exit —
+    /// it simply had no `error_type` and, under `--json`, wrote no document at
+    /// all. A caller that got 130 and zero bytes had nothing to parse in the
+    /// one case where "always one document" mattered most.
+    Interrupted,
 }
 
 impl ErrorKind {
@@ -151,12 +200,10 @@ impl ErrorKind {
             ErrorKind::ProductNotFound => "product_not_found",
             // `catalog`, not the fork's `catelog` (#9).
             ErrorKind::EmptyPageOrCatalogEnd => "empty_page_or_catalog_end",
-            ErrorKind::NetworkError => "network_error",
-            ErrorKind::IoError => "io_error",
-            ErrorKind::CacheError => "cache_error",
-            ErrorKind::JsonError => "json_error",
+            ErrorKind::CurrencyMismatch => "currency_mismatch",
             ErrorKind::ParseFailed => "parse_failed",
             ErrorKind::Internal => "internal_error",
+            ErrorKind::Interrupted => "interrupted",
         }
     }
 
@@ -171,12 +218,10 @@ impl ErrorKind {
             ErrorKind::CloudflareBlocked => 22,
             ErrorKind::ProductNotFound => 23,
             ErrorKind::EmptyPageOrCatalogEnd => 24,
-            ErrorKind::NetworkError => 30,
-            ErrorKind::IoError => 31,
-            ErrorKind::CacheError => 32,
-            ErrorKind::JsonError => 40,
+            ErrorKind::CurrencyMismatch => 25,
             ErrorKind::ParseFailed => 41,
             ErrorKind::Internal => 70,
+            ErrorKind::Interrupted => 130,
         }
     }
 
@@ -190,12 +235,10 @@ impl ErrorKind {
         ErrorKind::CloudflareBlocked,
         ErrorKind::ProductNotFound,
         ErrorKind::EmptyPageOrCatalogEnd,
-        ErrorKind::NetworkError,
-        ErrorKind::IoError,
-        ErrorKind::CacheError,
-        ErrorKind::JsonError,
+        ErrorKind::CurrencyMismatch,
         ErrorKind::ParseFailed,
         ErrorKind::Internal,
+        ErrorKind::Interrupted,
     ];
 }
 
@@ -211,42 +254,15 @@ impl IherbError {
             IherbError::InvalidInput(_) => ErrorKind::InvalidInput,
             IherbError::BrowserLaunch(_) => ErrorKind::BrowserLaunchFailed,
             IherbError::ChromeDownload(_) => ErrorKind::ChromeDownloadFailed,
-            IherbError::Navigation(msg) => {
-                if looks_like_a_timeout(msg) {
-                    ErrorKind::NavigationTimeout
-                } else {
-                    ErrorKind::NavigationFailed
-                }
-            }
+            IherbError::Navigation(_) => ErrorKind::NavigationFailed,
+            IherbError::NavigationTimeout(_) => ErrorKind::NavigationTimeout,
             IherbError::CloudflareBlocked(_) => ErrorKind::CloudflareBlocked,
             IherbError::ProductNotFound(_) => ErrorKind::ProductNotFound,
             IherbError::EmptyPageOrCatalogEnd(_) => ErrorKind::EmptyPageOrCatalogEnd,
             IherbError::ParseFailed(_) => ErrorKind::ParseFailed,
-            // Not a code of its own, and not `parse_failed` either. `--currency`
-            // named a currency this storefront does not price in, and the only
-            // thing that changes the answer is a different flag — which is what
-            // `invalid_input` tells a caller to do. The `message` names both
-            // currencies, so nothing is lost by not spending a code on it.
-            IherbError::CurrencyMismatch { .. } => ErrorKind::InvalidInput,
-            IherbError::Cache(_) => ErrorKind::CacheError,
-            IherbError::Network(_) => ErrorKind::NetworkError,
-            IherbError::Io(_) => ErrorKind::IoError,
-            IherbError::Json(_) => ErrorKind::JsonError,
+            IherbError::CurrencyMismatch { .. } => ErrorKind::CurrencyMismatch,
         }
     }
-}
-
-/// Whether a navigation failure was the clock rather than the address.
-///
-/// A heuristic over the driver's own message, and the only signal available:
-/// `IherbError::Navigation` wraps whatever `chromiumoxide` reported, which
-/// carries the distinction in prose and not in a type. It is worth making
-/// anyway — "the page was slow" and "the page will never load" call for
-/// opposite responses, and collapsing them into one code hands a caller a
-/// retry decision it cannot make.
-fn looks_like_a_timeout(message: &str) -> bool {
-    let m = message.to_ascii_lowercase();
-    m.contains("timeout") || m.contains("timed out") || m.contains("deadline")
 }
 
 /// Classify an error the way the process exit code and `--json` report it.

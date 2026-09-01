@@ -25,13 +25,13 @@ use iherb_cli::cache::CacheKey;
 use iherb_cli::cli::{Section, SortOrder};
 use iherb_cli::config::AppConfig;
 use iherb_cli::error::{classify_error, ErrorKind, IherbError};
-use iherb_cli::fetch::FetchTarget;
+use iherb_cli::fetch::{FetchTarget, Fetched, Provenance};
 use iherb_cli::model::{
     Extraction, ProductDetail, ProductSummary, SearchFetch, SearchResult, Source, Strategy,
 };
 use iherb_cli::output::{
     accounted_json_keys, format_product_json, format_search_json, product_json_keys, Envelope,
-    Meta, ProductView, Provenance, ALWAYS_RENDERED, SCHEMA_VERSION,
+    Meta, ProductView, ALWAYS_RENDERED, SCHEMA_VERSION,
 };
 use serde_json::Value;
 
@@ -39,46 +39,77 @@ use serde_json::Value;
 // The taxonomy itself
 // ---------------------------------------------------------------------------
 
-/// The table, written out. #9 pins these numbers and the strings beside them:
-/// a caller branches on them, so changing one is a breaking change to this
-/// tool's interface and has to be a deliberate edit here rather than a
-/// consequence of reordering an enum.
-const TAXONOMY: &[(ErrorKind, &str, u8)] = &[
-    (ErrorKind::InvalidInput, "invalid_input", 2),
-    (ErrorKind::BrowserLaunchFailed, "browser_launch_failed", 10),
-    (
-        ErrorKind::ChromeDownloadFailed,
-        "chrome_download_failed",
-        11,
-    ),
-    (ErrorKind::NavigationTimeout, "navigation_timeout", 20),
-    (ErrorKind::NavigationFailed, "navigation_failed", 21),
-    (ErrorKind::CloudflareBlocked, "cloudflare_blocked", 22),
-    (ErrorKind::ProductNotFound, "product_not_found", 23),
-    (
-        ErrorKind::EmptyPageOrCatalogEnd,
-        "empty_page_or_catalog_end",
-        24,
-    ),
-    (ErrorKind::NetworkError, "network_error", 30),
-    (ErrorKind::IoError, "io_error", 31),
-    (ErrorKind::CacheError, "cache_error", 32),
-    (ErrorKind::JsonError, "json_error", 40),
-    (ErrorKind::ParseFailed, "parse_failed", 41),
-    (ErrorKind::Internal, "internal_error", 70),
-];
+/// The exit-code table, as the documentation actually holds it.
+///
+/// Parsed out of the files a caller reads, not copied into a constant here.
+/// The copy is what this test used to be: a second handwritten Rust array
+/// beside `ErrorKind`, compared against `ErrorKind`. Changing the README's
+/// Cloudflare row from 22 to 25 left it green — so the one thing its name
+/// promised, catching documentation drift, was the one thing it could not do.
+///
+/// Both files are read, because #9 asks for the table in both and a `SKILL.md`
+/// that has drifted misleads exactly the agent the table exists for.
+fn documented_table(path: &str) -> Vec<(u8, String)> {
+    let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+        .unwrap_or_else(|e| panic!("{} is part of this tool's interface: {}", path, e));
 
+    let section = text
+        .split("### Exit codes")
+        .nth(1)
+        .unwrap_or_else(|| panic!("{} no longer documents the exit codes", path));
+    // Stop at the next heading, so a later table cannot be read as this one.
+    let section = section.split("\n## ").next().unwrap();
+
+    let mut rows = Vec::new();
+    for line in section.lines() {
+        let line = line.trim();
+        if !line.starts_with('|') {
+            continue;
+        }
+        let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+        if cells.len() < 2 {
+            continue;
+        }
+        // The header (`exit`) and the `|---|` separator both fail this, and so
+        // does the `0` success row, which names no `error_type`.
+        let (Ok(code), Some(error_type)) = (
+            cells[0].parse::<u8>(),
+            cells[1].strip_prefix('`').and_then(|c| c.strip_suffix('`')),
+        ) else {
+            continue;
+        };
+        rows.push((code, error_type.to_string()));
+    }
+
+    assert!(
+        rows.len() > 5,
+        "{}'s exit-code table did not parse; it had {} rows",
+        path,
+        rows.len()
+    );
+    rows
+}
+
+/// The taxonomy and the documentation of it are one thing, and this is what
+/// says so. A caller branches on these numbers and these strings, so changing
+/// one is a breaking change to this tool's interface — and a change made in the
+/// code but not in the README, or the other way round, is the bug.
 #[test]
 fn the_exit_code_table_is_what_the_readme_documents() {
-    assert_eq!(
-        TAXONOMY.len(),
-        ErrorKind::ALL.len(),
-        "a variant was added to ErrorKind without a row in the documented table"
-    );
+    let mut from_code: Vec<(u8, String)> = ErrorKind::ALL
+        .iter()
+        .map(|k| (k.exit_code(), k.error_type().to_string()))
+        .collect();
+    from_code.sort_unstable();
 
-    for (kind, error_type, exit_code) in TAXONOMY {
-        assert_eq!(kind.error_type(), *error_type);
-        assert_eq!(kind.exit_code(), *exit_code);
+    for path in ["README.md", "skills/iherb-agent/SKILL.md"] {
+        let mut documented = documented_table(path);
+        documented.sort_unstable();
+        assert_eq!(
+            documented, from_code,
+            "{} and ErrorKind disagree about the exit-code table",
+            path
+        );
     }
 
     // Every code distinct. A taxonomy whose members share a number is a
@@ -96,6 +127,29 @@ fn the_exit_code_table_is_what_the_readme_documents() {
     // 0 is success and 1 is "an error happened, no idea which" — the state this
     // whole issue exists to leave behind.
     assert!(codes.iter().all(|c| *c > 1));
+}
+
+/// **A documented code must have a reachable producer.** That is the invariant
+/// #9 exists to establish, and the one the first round of it missed: five codes
+/// were wired and four — `network_error`, `io_error`, `cache_error` and
+/// `json_error` — stayed decorative, documented distinctions the code could not
+/// make.
+///
+/// They are gone rather than wired, because there was nothing for them to mean.
+/// This test is what stops them coming back by name: every `error_type` in the
+/// taxonomy is produced somewhere in the tests below, and a row re-added to the
+/// README without a producer fails `the_exit_code_table_is_what_the_readme_documents`
+/// instead of quietly shipping.
+#[test]
+fn the_taxonomy_carries_no_code_without_a_producer() {
+    let retired = ["network_error", "io_error", "cache_error", "json_error"];
+    for kind in ErrorKind::ALL {
+        assert!(
+            !retired.contains(&kind.error_type()),
+            "{} is back in the taxonomy; it needs a producer and a test that reaches it",
+            kind.error_type()
+        );
+    }
 }
 
 /// `parse_failed` means *we loaded the page and could not read it* — the one
@@ -177,11 +231,15 @@ fn each_error_variant_maps_to_its_own_kind() {
             ErrorKind::ChromeDownloadFailed,
         ),
         (
-            IherbError::Navigation("Failed to navigate to https://x: timeout".into()),
+            IherbError::NavigationTimeout("Failed to navigate to https://x".into()),
             ErrorKind::NavigationTimeout,
         ),
+        // The message names a timeout and the kind is still `navigation_failed`,
+        // which is the fix: the classification is the variant, not the prose.
         (
-            IherbError::Navigation("Failed to get page content: closed".into()),
+            IherbError::Navigation(
+                "Failed to navigate to https://no.iherb.com/search?kw=timeout: closed".into(),
+            ),
             ErrorKind::NavigationFailed,
         ),
         (
@@ -200,25 +258,16 @@ fn each_error_variant_maps_to_its_own_kind() {
             IherbError::ParseFailed("12949".into()),
             ErrorKind::ParseFailed,
         ),
-        // No code of its own: `--currency` named something this storefront does
-        // not price in, and the only thing that changes the answer is a
-        // different flag.
+        // Its own code, not `invalid_input`. The command line was well formed;
+        // this is the storefront's answer disagreeing with it, and the two call
+        // for different repairs.
         (
             IherbError::CurrencyMismatch {
                 expected: "CHF".into(),
                 actual: "USD".into(),
                 what: "product 12949".into(),
             },
-            ErrorKind::InvalidInput,
-        ),
-        (IherbError::Cache("nope".into()), ErrorKind::CacheError),
-        (
-            IherbError::Io(std::io::Error::other("nope")),
-            ErrorKind::IoError,
-        ),
-        (
-            IherbError::Json(serde_json::from_str::<Value>("{").unwrap_err()),
-            ErrorKind::JsonError,
+            ErrorKind::CurrencyMismatch,
         ),
     ];
 
@@ -355,20 +404,18 @@ fn at(epoch_secs: u64) -> SystemTime {
 /// ran. The distinction is the entire point when `from_cache` is true: a record
 /// stored in a spreadsheet and read back months later otherwise carries one
 /// timestamp with two possible meanings.
+///
+/// Built the way the pipeline builds it — [`Fetched::cached`] is what
+/// `crate::fetch::cached` returns on a hit — rather than by handing [`Meta`] a
+/// `Provenance` this test invented.
 #[test]
 fn a_cached_document_dates_the_page_earlier_than_the_run() {
     let config = config("no", Some("NOK"));
     let emitted = at(1_756_000_000);
-    let fetched = at(1_756_000_000 - 3 * 24 * 60 * 60);
+    let written = at(1_756_000_000 - 3 * 24 * 60 * 60);
 
-    let meta = Meta::new(
-        &config,
-        Some(Provenance {
-            fetched_at: fetched,
-            from_cache: true,
-        }),
-        emitted,
-    );
+    let fetched = Fetched::cached("a record", written);
+    let meta = Meta::new(&config, Some(fetched.provenance), emitted);
 
     assert_eq!(meta.from_cache, Some(true));
     assert_eq!(meta.fetched_at.as_deref(), Some("2025-08-21T01:46:40Z"));
@@ -376,22 +423,51 @@ fn a_cached_document_dates_the_page_earlier_than_the_run() {
     assert!(meta.fetched_at.as_deref().unwrap() < meta.emitted_at.as_str());
 }
 
+/// A fresh document dates the page and the run alike — #44's criterion, and the
+/// README's "the same instant".
+///
+/// # Why this goes through `Fetched::fresh`
+///
+/// Because the previous version of this test could not fail. It built a
+/// `Provenance` itself, put the same `now` in both fields, and asserted the two
+/// came back equal — so changing the production path's fresh timestamp to
+/// `UNIX_EPOCH` left it green. It was asserting on its own fixture.
+///
+/// [`Fetched::fresh`] is the one constructor the pipeline uses for a fresh
+/// result, and [`Provenance::Fresh`] carries no instant at all: a fresh record's
+/// page was read during this run, so the run's single clock sample dates both
+/// fields and there is no second one to drift. `emitted` here is deliberately
+/// not `SystemTime::now()`, so any clock read on the fresh path shows up as a
+/// mismatch rather than as a race this test would usually win.
 #[test]
 fn a_fresh_document_dates_the_page_and_the_run_alike() {
     let config = config("no", Some("NOK"));
-    let now = at(1_756_000_000);
+    let emitted = at(1_756_000_000);
 
-    let meta = Meta::new(
-        &config,
-        Some(Provenance {
-            fetched_at: now,
-            from_cache: false,
-        }),
-        now,
-    );
+    let fetched = Fetched::fresh("a record");
+    let meta = Meta::new(&config, Some(fetched.provenance), emitted);
 
     assert_eq!(meta.from_cache, Some(false));
-    assert_eq!(meta.fetched_at.as_deref(), Some(meta.emitted_at.as_str()));
+    assert_eq!(meta.emitted_at, "2025-08-24T01:46:40Z");
+    assert_eq!(
+        meta.fetched_at.as_deref(),
+        Some(meta.emitted_at.as_str()),
+        "a fresh record's page was read during this run; the two have to be one instant"
+    );
+}
+
+/// The same claim one layer down, on [`Provenance`] itself, so that the
+/// equality is visible as a property of the type rather than of one call.
+#[test]
+fn a_fresh_provenance_has_no_second_clock_to_drift_from() {
+    let emitted = at(1_756_000_000);
+
+    assert_eq!(Provenance::Fresh.fetched_at(emitted), emitted);
+    assert!(!Provenance::Fresh.from_cache());
+
+    let written = at(1_700_000_000);
+    assert_eq!(Provenance::Cached(written).fetched_at(emitted), written);
+    assert!(Provenance::Cached(written).from_cache());
 }
 
 /// The timestamp format itself, against instants whose UTC rendering is not in
@@ -420,7 +496,10 @@ fn a_failure_dates_no_page_at_all() {
     assert_eq!(meta.fetched_at, None);
     assert_eq!(meta.from_cache, None);
     // The storefront is still known: the run resolved, it just did not succeed.
-    assert_eq!(meta.storefront.as_deref(), Some("https://no.iherb.com"));
+    assert_eq!(
+        meta.requested_storefront.as_deref(),
+        Some("https://no.iherb.com")
+    );
 }
 
 /// A command line clap refused has no effective storefront, and inventing one
@@ -428,9 +507,9 @@ fn a_failure_dates_no_page_at_all() {
 #[test]
 fn a_run_that_never_configured_claims_no_storefront() {
     let meta = Meta::unconfigured(None, at(1_756_000_000));
-    assert_eq!(meta.country, None);
-    assert_eq!(meta.currency, None);
-    assert_eq!(meta.storefront, None);
+    assert_eq!(meta.requested_country, None);
+    assert_eq!(meta.requested_currency, None);
+    assert_eq!(meta.requested_storefront, None);
     assert_eq!(meta.tool_version, env!("CARGO_PKG_VERSION"));
 }
 
@@ -442,9 +521,49 @@ fn the_envelope_names_a_non_usd_storefront() {
     let config = config("no", Some("NOK"));
     let meta = Meta::new(&config, None, at(1_756_000_000));
 
-    assert_eq!(meta.country.as_deref(), Some("no"));
-    assert_eq!(meta.currency.as_deref(), Some("NOK"));
-    assert_eq!(meta.storefront.as_deref(), Some("https://no.iherb.com"));
+    assert_eq!(meta.requested_country.as_deref(), Some("no"));
+    assert_eq!(meta.requested_currency.as_deref(), Some("NOK"));
+    assert_eq!(
+        meta.requested_storefront.as_deref(),
+        Some("https://no.iherb.com")
+    );
+}
+
+/// `meta` describes the request, and its field names have to say so.
+///
+/// The case that made this a bug rather than a quibble: no flags at all, on a
+/// Norwegian IP. The configuration resolves `us`, so `meta` claimed country
+/// `us` and storefront `www.iherb.com` with `currency: null` — while iHerb,
+/// which geolocates by IP (#5), can price the very record beside it in NOK. A
+/// field named `country` sitting next to `data` reads as a fact about `data`.
+/// Named `requested_country` it cannot.
+#[test]
+fn meta_names_the_request_and_never_claims_to_name_the_answer() {
+    let config = config("us", None);
+    let meta = Meta::new(&config, Some(Provenance::Fresh), at(1_756_000_000));
+    let rendered: Value = serde_json::from_str(
+        &Envelope::success(meta, serde_json::json!({"currency": "NOK"})).render(),
+    )
+    .expect("the envelope is JSON");
+
+    let meta = &rendered["meta"];
+    assert_eq!(meta["requested_country"], "us");
+    assert_eq!(meta["requested_storefront"], "https://www.iherb.com");
+    assert!(meta["requested_currency"].is_null());
+
+    // No unprefixed alias survives, in either direction: a consumer must not be
+    // able to read a request value as an answer, and the answer must not be
+    // duplicated here where it could drift from the record.
+    for claimed in ["country", "currency", "storefront"] {
+        assert!(
+            meta.get(claimed).is_none(),
+            "meta.{} reads as a fact about data; it is a fact about the request",
+            claimed
+        );
+    }
+
+    // Where the answer actually lives, and it is the only place it lives.
+    assert_eq!(rendered["data"]["currency"], "NOK");
 }
 
 /// `--currency` is a question the run asked the storefront, not an answer about
@@ -455,8 +574,124 @@ fn asking_for_no_currency_claims_no_currency() {
     let config = config("no", None);
     let meta = Meta::new(&config, None, at(1_756_000_000));
 
-    assert_eq!(meta.currency, None);
-    assert_eq!(meta.storefront.as_deref(), Some("https://no.iherb.com"));
+    assert_eq!(meta.requested_currency, None);
+    assert_eq!(
+        meta.requested_storefront.as_deref(),
+        Some("https://no.iherb.com")
+    );
+}
+
+/// A payload that will not serialize produces a failure envelope **and a
+/// failing exit code**.
+///
+/// It used to produce only the first. `render_json` built the `json_error`
+/// envelope and `run` returned `ExitCode::SUCCESS` beside it, so the one
+/// reachable path to that code reported `0` — a document saying `ok: false`
+/// under an exit code saying it succeeded, which is the single combination a
+/// caller branching on the code cannot recover from.
+///
+/// The kind is `internal_error`, not a `json_error` of its own: this tool
+/// consumes no JSON from a caller, and a record of ours that will not serialize
+/// is our bug.
+#[test]
+fn a_payload_that_will_not_serialize_fails_the_run() {
+    use iherb_cli::app::json_document;
+
+    let config = config("no", Some("NOK"));
+    let meta = || Meta::new(&config, Some(Provenance::Fresh), at(1_756_000_000));
+
+    let (document, code) = json_document(meta(), Ok(serde_json::json!({"answer": 42})));
+    assert_eq!(code, 0);
+    let ok: Value = serde_json::from_str(&document).expect("the envelope is JSON");
+    assert_eq!(ok["ok"], true);
+
+    let broken = serde_json::from_str::<Value>("{").unwrap_err();
+    let (document, code) = json_document(meta(), Err(broken));
+    assert_eq!(
+        code,
+        ErrorKind::Internal.exit_code(),
+        "an envelope reporting a failure must not exit 0"
+    );
+    let failed: Value = serde_json::from_str(&document).expect("the envelope is JSON");
+    assert_eq!(failed["ok"], false);
+    assert_eq!(failed["error_type"], "internal_error");
+}
+
+/// A failure that happened *after* a page was read reports the page.
+///
+/// `parse_failed` and `currency_mismatch` both mean the same thing about
+/// provenance: the browser launched, the page loaded, and the record it
+/// produced was rejected. The envelope used to answer `fetched_at: null` and
+/// `from_cache: null` for those, because provenance was assembled only once
+/// `fetch` had succeeded — stating, of a page that was read, that none was.
+#[test]
+fn a_failure_after_a_page_was_read_says_a_page_was_read() {
+    use iherb_cli::fetch::Failure;
+
+    let config = config("no", Some("NOK"));
+    let emitted = at(1_756_000_000);
+
+    let failure = Failure::after_page_read(anyhow::Error::new(IherbError::ParseFailed(
+        "143499".to_string(),
+    )));
+    let meta = Meta::new(&config, failure.provenance, emitted);
+
+    assert_eq!(meta.from_cache, Some(false));
+    assert_eq!(
+        meta.fetched_at.as_deref(),
+        Some(meta.emitted_at.as_str()),
+        "the page was read during this run"
+    );
+
+    // And a failure that read nothing still says nothing.
+    let never_started: Failure = anyhow::Error::new(IherbError::InvalidInput("no".into())).into();
+    assert!(never_started.provenance.is_none());
+    let meta = Meta::new(&config, never_started.provenance, emitted);
+    assert_eq!(meta.fetched_at, None);
+    assert_eq!(meta.from_cache, None);
+}
+
+/// The timeout distinction is made from `chromiumoxide`'s own typed error, at
+/// the boundary, before anything is flattened into a string.
+///
+/// It used to be made from the string afterwards, by looking for "timeout" in
+/// the message — and the message embeds the URL the run asked for. So
+/// `iherb-cli search timeout` put the word into every navigation failure of
+/// that run, and a caller was told to retry a failure that had nothing to do
+/// with the clock. **User input steering a retry decision.** The heuristic was
+/// equally fragile the other way: one wording change upstream and a real
+/// timeout starts reporting 21.
+#[test]
+fn a_navigation_timeout_is_classified_from_the_type_not_the_message() {
+    use chromiumoxide::error::CdpError;
+    use iherb_cli::scraper::navigation::navigation_failure;
+
+    let timed_out = navigation_failure(
+        "Failed to navigate to https://no.iherb.com/pr/p/143499",
+        CdpError::Timeout,
+    );
+    assert_eq!(timed_out.kind(), ErrorKind::NavigationTimeout);
+    assert_eq!(timed_out.kind().exit_code(), 20);
+
+    // The message says "timeout" — because the caller searched for it — and the
+    // driver did not. It is not a timeout.
+    let query_says_timeout = navigation_failure(
+        "Failed to navigate to https://no.iherb.com/search?kw=timeout",
+        CdpError::NoResponse,
+    );
+    assert_eq!(
+        query_says_timeout.kind(),
+        ErrorKind::NavigationFailed,
+        "a caller's own query text must not be able to steer its retry decision"
+    );
+    assert!(
+        query_says_timeout.to_string().contains("timeout"),
+        "the message really does carry the word; that is the whole trap"
+    );
+
+    // And a failure with nothing timeout-shaped about it either way.
+    let plain = navigation_failure("Failed to get page content", CdpError::NotFound);
+    assert_eq!(plain.kind(), ErrorKind::NavigationFailed);
 }
 
 #[test]
@@ -475,7 +710,10 @@ fn success_and_failure_wear_the_same_envelope() {
 
     for document in [&ok, &bad] {
         assert_eq!(document["schema_version"], SCHEMA_VERSION);
-        assert_eq!(document["meta"]["storefront"], "https://no.iherb.com");
+        assert_eq!(
+            document["meta"]["requested_storefront"],
+            "https://no.iherb.com"
+        );
     }
 
     assert_eq!(ok["ok"], true);
@@ -872,7 +1110,7 @@ fn markdown_output_keeps_its_logging_off_stdout() {
     assert!(ran.stderr.contains("Cache hit"));
 }
 
-/// `meta.country` is the value the run *resolved* to, not the flag it was
+/// `meta.requested_country` is the value the run *resolved* to, not the flag it was
 /// passed — asserted with a config file and no flags at all, because that is
 /// the case a record produced by an unattended run is written under.
 #[test]
@@ -885,9 +1123,9 @@ fn the_envelope_reports_the_resolved_storefront_with_no_flags_passed() {
 
     assert_eq!(ran.code, 0, "stderr was:\n{}", ran.stderr);
     let meta = &ran.document()["meta"];
-    assert_eq!(meta["country"], "no");
-    assert_eq!(meta["currency"], "NOK");
-    assert_eq!(meta["storefront"], "https://no.iherb.com");
+    assert_eq!(meta["requested_country"], "no");
+    assert_eq!(meta["requested_currency"], "NOK");
+    assert_eq!(meta["requested_storefront"], "https://no.iherb.com");
     assert_eq!(meta["tool_version"], env!("CARGO_PKG_VERSION"));
 }
 
@@ -987,6 +1225,100 @@ fn help_is_still_help_under_json() {
     let versioned = home.run(&["--json", "--version"], None);
     assert_eq!(versioned.code, 0);
     assert!(versioned.stdout.contains(env!("CARGO_PKG_VERSION")));
+}
+
+/// **An interrupted run still emits one JSON document.**
+///
+/// This is the promise `--json` makes — one document on stdout, always, success
+/// or failure — and the interrupt was the one path that kept none of it: exit
+/// 130 with zero bytes written, measured. An agent that gives up on a slow fetch
+/// got nothing to parse in the case where "always" matters most.
+///
+/// Run against a stand-in browser that never speaks, so the interrupt lands
+/// while the run is genuinely inside the command — no network, no Chrome, and
+/// the real signal handler, the real shutdown and the real render. Nothing about
+/// the interrupt handling itself changed to make this pass; a document was added
+/// to a path that already exited cleanly (#46).
+#[cfg(unix)]
+#[test]
+fn an_interrupted_run_still_answers_in_json() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let home = Home::new("interrupt");
+
+    // Executable, and it outlives the interrupt without ever printing the
+    // DevTools line chromiumoxide waits for — so the launch is still in flight
+    // when the signal lands. Its stderr stays attached on purpose: that is the
+    // pipe chromiumoxide reads the line from, and closing it would end the
+    // launch immediately with an error instead of leaving it waiting. It never
+    // holds this test's own pipes, which chromiumoxide gives it as `null`.
+    let stub = home.0.join("a-browser-that-never-speaks");
+    let mut script = std::fs::File::create(&stub).expect("create the stub browser");
+    script
+        .write_all(b"#!/bin/sh\nexec sleep 20 </dev/null\n")
+        .expect("write the stub browser");
+    drop(script);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("make the stub browser executable");
+    }
+
+    let child = Command::new(env!("CARGO_BIN_EXE_iherb-cli"))
+        .args(["product", "143499", "--json", "--no-cache"])
+        .env("HOME", &home.0)
+        .env("IHERB_BROWSER_PATH", &stub)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_CACHE_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("IHERB_COUNTRY")
+        .env_remove("IHERB_CURRENCY")
+        .env_remove("RUST_LOG")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run iherb-cli");
+
+    // Long enough for the handler to be installed and the launch to be in
+    // flight; far short of the stub's lifetime.
+    std::thread::sleep(Duration::from_millis(1500));
+    let killed = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .expect("send SIGINT");
+    assert!(killed.success(), "could not interrupt the run");
+
+    let output = child
+        .wait_with_output()
+        .expect("collect the interrupted run");
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr is UTF-8");
+
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(ErrorKind::Interrupted.exit_code())),
+        "stdout was:\n{}\nstderr was:\n{}",
+        stdout,
+        stderr
+    );
+
+    let document: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "an interrupted --json run wrote no document a caller can parse ({e}); \
+             stdout was:\n{stdout}\nstderr was:\n{stderr}"
+        )
+    });
+    assert_eq!(document["ok"], false);
+    assert_eq!(document["error_type"], "interrupted");
+    assert_eq!(document["schema_version"], SCHEMA_VERSION);
+    // The run resolved its configuration before it was interrupted, so the
+    // envelope still says what it had asked for.
+    assert_eq!(document["meta"]["requested_country"], "us");
+    // And nothing was read, which is a different claim from "read nothing".
+    assert!(document["meta"]["fetched_at"].is_null());
+    assert!(document["meta"]["from_cache"].is_null());
 }
 
 /// The seeded entry is where the run actually reads from — otherwise every

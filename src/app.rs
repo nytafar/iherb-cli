@@ -19,19 +19,17 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Result;
+use serde_json::Value;
 use tokio::sync::Notify;
 
 use crate::browser::session::BrowserSession;
 use crate::cli::{Cli, Commands, Section, SortOrder};
 use crate::config::AppConfig;
 use crate::error::{classify_error, ErrorKind};
-use crate::fetch::fetch;
+use crate::fetch::{fetch, Failure, Provenance};
 use crate::model::{ProductDetail, SearchResult};
-use crate::output::{self, Envelope, Meta, ProductView, Provenance};
+use crate::output::{self, Envelope, Meta, ProductView};
 use crate::targets::{ProductTarget, SearchTarget};
-
-/// The exit status a process killed by SIGINT reports: 128 + SIGINT.
-const EXIT_INTERRUPTED: u8 = 130;
 
 /// Run the CLI: configure logging, load config, dispatch the subcommand, and
 /// render whatever came back.
@@ -109,13 +107,18 @@ pub async fn run(cli: Cli) -> ExitCode {
                     eprintln!("\nInterrupted again. Killing the browser.");
                     impatient.notify_one();
                 }
-                _ => std::process::exit(EXIT_INTERRUPTED as i32),
+                // The same 130 the polite path leaves on, from the same
+                // place, so the impatient exit and the graceful one cannot
+                // drift apart.
+                _ => std::process::exit(i32::from(ErrorKind::Interrupted.exit_code())),
             }
         });
         if let Err(e) = handler {
             return report_failure(
                 Some(&config),
-                anyhow::Error::new(e).context("Failed to set Ctrl+C handler"),
+                anyhow::Error::new(e)
+                    .context("Failed to set Ctrl+C handler")
+                    .into(),
                 json,
             );
         }
@@ -170,21 +173,26 @@ pub async fn run(cli: Cli) -> ExitCode {
 
     match outcome {
         Outcome::Ran(Ok(command)) => {
-            print!("{}", render(&command, &config, json));
-            ExitCode::SUCCESS
+            // One clock sample for the whole document, taken here: it dates the
+            // run *and*, for a fresh record, the page the run read. See
+            // [`crate::fetch::Provenance`].
+            let (document, code) = render(&command, &config, json, SystemTime::now());
+            print!("{}", document);
+            ExitCode::from(code)
         }
-        Outcome::Ran(Err(e)) => report_failure(Some(&config), e, json),
+        Outcome::Ran(Err(failure)) => report_failure(Some(&config), failure, json),
         // Returning here skips no cleanup: the browser is already closed and
-        // its profile directory already gone. What it buys is the 130 a caller
-        // reads to tell an interrupt from a failure.
-        Outcome::Interrupted => ExitCode::from(EXIT_INTERRUPTED),
+        // its profile directory already gone (#46). What it buys is the 130 a
+        // caller reads to tell an interrupt from a failure — and, since #9, a
+        // document to read it out of.
+        Outcome::Interrupted => report_interrupt(Some(&config), json),
     }
 }
 
 /// How [`run`]'s command ended.
 enum Outcome {
     /// The command finished on its own, well or badly.
-    Ran(Result<CommandOutcome>),
+    Ran(Result<CommandOutcome, Failure>),
     /// Ctrl+C arrived first and the command was dropped where it stood.
     Interrupted,
 }
@@ -198,7 +206,7 @@ async fn dispatch(
     command: Commands,
     config: &AppConfig,
     browser_session: &mut Option<BrowserSession>,
-) -> Result<CommandOutcome> {
+) -> Result<CommandOutcome, Failure> {
     match command {
         Commands::Search {
             query,
@@ -229,10 +237,10 @@ pub async fn cmd_search(
     limit: usize,
     sort: SortOrder,
     category: Option<&str>,
-) -> Result<CommandOutcome> {
+) -> Result<CommandOutcome, Failure> {
     let target = SearchTarget::new(config, query, limit, sort, category)?;
     let fetched = fetch(&target, config, browser_session).await?;
-    let provenance = Provenance::from(&fetched);
+    let provenance = fetched.provenance;
 
     // The cache holds every product that was fetched; only the display is
     // capped at --limit.
@@ -251,12 +259,12 @@ pub async fn cmd_product(
     browser_session: &mut Option<BrowserSession>,
     id_or_url: &str,
     section: Option<Section>,
-) -> Result<CommandOutcome> {
+) -> Result<CommandOutcome, Failure> {
     let target = ProductTarget::new(config, id_or_url)?;
     let fetched = fetch(&target, config, browser_session).await?;
 
     Ok(CommandOutcome::Product {
-        provenance: Provenance::from(&fetched),
+        provenance: fetched.provenance,
         product: Box::new(fetched.data),
         // Resolved here, once, from the flag. Both renderings below read the
         // answer; neither re-derives it. See [`ProductView`].
@@ -295,17 +303,28 @@ impl CommandOutcome {
     }
 }
 
-/// Render a finished command, as Markdown or as one JSON document.
-fn render(outcome: &CommandOutcome, config: &AppConfig, json: bool) -> String {
+/// Render a finished command, as Markdown or as one JSON document, and say what
+/// the process should exit on.
+///
+/// The exit code comes back with the document because it is a property *of* the
+/// document: `--json` can produce an envelope reporting a failure even when the
+/// command succeeded, and a failure envelope under a success code is the one
+/// combination a caller cannot recover from. See [`json_document`].
+fn render(
+    outcome: &CommandOutcome,
+    config: &AppConfig,
+    json: bool,
+    emitted_at: SystemTime,
+) -> (String, u8) {
     if json {
-        render_json(outcome, config, SystemTime::now())
+        render_json(outcome, config, emitted_at)
     } else {
-        render_markdown(outcome, config)
+        (render_markdown(outcome, config, emitted_at), 0)
     }
 }
 
 /// The Markdown a human — or an agent reading prose — gets.
-fn render_markdown(outcome: &CommandOutcome, config: &AppConfig) -> String {
+fn render_markdown(outcome: &CommandOutcome, config: &AppConfig, emitted_at: SystemTime) -> String {
     let mut out = String::new();
 
     match outcome {
@@ -338,7 +357,7 @@ fn render_markdown(outcome: &CommandOutcome, config: &AppConfig) -> String {
 
     out.push_str(&format!(
         "\n- **Data from:** {}\n",
-        output::format_cached_at(outcome.provenance().fetched_at)
+        output::format_cached_at(outcome.provenance().fetched_at(emitted_at))
     ));
     out
 }
@@ -347,8 +366,13 @@ fn render_markdown(outcome: &CommandOutcome, config: &AppConfig) -> String {
 ///
 /// `emitted_at` is a parameter rather than a call to the clock so that the
 /// document is a function of its inputs — which is what makes the cached-versus-
-/// fresh distinction in `meta` assertable at all.
-fn render_json(outcome: &CommandOutcome, config: &AppConfig, emitted_at: SystemTime) -> String {
+/// fresh distinction in `meta` assertable at all, and what lets one sample date
+/// both the run and the page a fresh run read (#44).
+fn render_json(
+    outcome: &CommandOutcome,
+    config: &AppConfig,
+    emitted_at: SystemTime,
+) -> (String, u8) {
     let meta = Meta::new(config, Some(outcome.provenance()), emitted_at);
 
     let data = match outcome {
@@ -356,43 +380,104 @@ fn render_json(outcome: &CommandOutcome, config: &AppConfig, emitted_at: SystemT
         CommandOutcome::Product { product, view, .. } => output::format_product_json(product, view),
     };
 
+    json_document(meta, data)
+}
+
+/// One JSON document and the code the process leaves on.
+///
+/// Serializing a record we already hold cannot fail in practice, but "cannot
+/// fail" is not "need not be answered": under `--json` there is exactly one
+/// document on stdout, and a panic here would emit none. It is a bug in this
+/// tool rather than anything a caller did, which is what `internal_error` (70)
+/// means — the taxonomy's `json_error` was a fifth name for the same thing and
+/// no run could reach it, so it is gone.
+///
+/// The code travels with the string because it used to not: `run` printed this
+/// envelope, `ok: false` and all, and then returned `ExitCode::SUCCESS`. A
+/// caller branching on the exit code — which is what the whole taxonomy asks it
+/// to do — read `0` off a document reporting a failure.
+///
+/// `pub` so the failing branch is reachable from a test. It is the only way in:
+/// no [`ProductDetail`] can be built that `serde_json` refuses.
+pub fn json_document(meta: Meta, data: Result<Value, serde_json::Error>) -> (String, u8) {
     match data {
-        Ok(data) => Envelope::success(meta, data).render(),
-        // Serializing a record we already hold cannot fail in practice, but
-        // "cannot fail" is not "need not be answered": under `--json` there is
-        // exactly one document on stdout, and a panic here would emit none.
-        Err(e) => Envelope::failure(meta, ErrorKind::JsonError, e.to_string()).render(),
+        Ok(data) => (Envelope::success(meta, data).render(), 0),
+        Err(e) => (
+            Envelope::failure(meta, ErrorKind::Internal, e.to_string()).render(),
+            ErrorKind::Internal.exit_code(),
+        ),
     }
 }
 
-/// Report a failed run and produce its exit code.
+/// The meta block for a run, whether or not its configuration resolved.
 ///
 /// `config` is `None` when the failure happened before the configuration
 /// resolved. Without it the envelope's storefront fields are `null`, which is
 /// the truth: an unparseable command line has no effective storefront.
-fn report_failure(config: Option<&AppConfig>, error: anyhow::Error, json: bool) -> ExitCode {
-    let kind = classify_error(&error);
+fn meta_for(
+    config: Option<&AppConfig>,
+    provenance: Option<Provenance>,
+    emitted_at: SystemTime,
+) -> Meta {
+    match config {
+        Some(config) => Meta::new(config, provenance, emitted_at),
+        None => Meta::unconfigured(provenance, emitted_at),
+    }
+}
+
+/// Report a failed run and produce its exit code.
+fn report_failure(config: Option<&AppConfig>, failure: Failure, json: bool) -> ExitCode {
+    let kind = classify_error(&failure.error);
 
     if json {
         let emitted_at = SystemTime::now();
-        let meta = match config {
-            // No provenance: a failure means no page was read, and `null` says
-            // so rather than dating the failure as if it were data.
-            Some(config) => Meta::new(config, None, emitted_at),
-            None => Meta::unconfigured(None, emitted_at),
-        };
+        // The provenance the failure carried, which is `Some` exactly when a
+        // page was read before it (#44). A validation failure on a page that
+        // loaded used to report `fetched_at: null`, which states of a page that
+        // was read that none was.
+        let meta = meta_for(config, failure.provenance, emitted_at);
         // `{:#}` rather than `{:?}`: the whole anyhow chain on one line, which
         // is what a JSON string wants, instead of the multi-line debug report
         // the human path prints.
         print!(
             "{}",
-            Envelope::failure(meta, kind, format!("{:#}", error)).render()
+            Envelope::failure(meta, kind, format!("{:#}", failure.error)).render()
         );
     } else {
-        eprintln!("Error: {:?}", error);
+        eprintln!("Error: {:?}", failure.error);
     }
 
     ExitCode::from(kind.exit_code())
+}
+
+/// Report a run Ctrl+C ended, and produce its exit code.
+///
+/// `--json` promises one document on stdout, always, success or failure — and
+/// the interrupt was the one path that promised nothing: exit 130 with **zero
+/// bytes written**, measured. An agent that interrupts a fetch got nothing to
+/// parse, in the case where "always" matters most.
+///
+/// Nothing about the interrupt handling itself changes here. By the time this
+/// runs the browser has been closed and its profile directory removed (#46);
+/// this only writes the document that path never wrote.
+fn report_interrupt(config: Option<&AppConfig>, json: bool) -> ExitCode {
+    if json {
+        let emitted_at = SystemTime::now();
+        // No provenance: an interrupt says nothing about whether a page was
+        // read, because the command was dropped where it stood.
+        let meta = meta_for(config, None, emitted_at);
+        print!(
+            "{}",
+            Envelope::failure(
+                meta,
+                ErrorKind::Interrupted,
+                "Interrupted before the command completed".to_string(),
+            )
+            .render()
+        );
+    }
+
+    ExitCode::from(ErrorKind::Interrupted.exit_code())
 }
 
 /// Whether the caller asked for JSON, read straight off `argv`.

@@ -190,9 +190,9 @@ iherb-cli product 12949 --country no --currency NOK --json
     "fetched_at": "2026-08-31T09:14:22Z",
     "emitted_at": "2026-08-31T11:02:05Z",
     "from_cache": true,
-    "country": "no",
-    "currency": "NOK",
-    "storefront": "https://no.iherb.com"
+    "requested_country": "no",
+    "requested_currency": "NOK",
+    "requested_storefront": "https://no.iherb.com"
   },
   "data": {
     "name": "Nordic Naturals, Ultimate Omega",
@@ -221,8 +221,8 @@ would be:
   "ok": false,
   "schema_version": 1,
   "meta": { "tool_version": "0.1.1", "fetched_at": null, "emitted_at": "2026-08-31T11:02:05Z",
-            "from_cache": null, "country": "no", "currency": "NOK",
-            "storefront": "https://no.iherb.com" },
+            "from_cache": null, "requested_country": "no", "requested_currency": "NOK",
+            "requested_storefront": "https://no.iherb.com" },
   "error_type": "cloudflare_blocked",
   "message": "Cloudflare challenge could not be solved after 3 attempts"
 }
@@ -230,25 +230,41 @@ would be:
 
 ### What `meta` means
 
+**`meta` describes the request. The record describes the answer.** Every
+storefront field here is named `requested_` because that is what it is: iHerb
+geolocates by IP and will override a `--country` you did not state, so with no
+flags on a Norwegian IP the run resolves `us` and asks
+`https://www.iherb.com` — and gets a price in NOK. A `meta` that called that
+`country: "us"` and `currency: null` was describing the question while sitting
+next to the answer.
+
 - **`fetched_at`** is when the *page* was read; **`emitted_at`** is when the
-  command ran. On a fresh fetch they are the same instant. On a cache hit they
-  are not, and the difference is the whole point: a price read three weeks ago
-  is not stale, it is wrong.
+  command ran. On a fresh fetch they are the same instant, and they are the
+  same instant by construction: a fresh record's page was read during this run,
+  so one clock sample dates both. On a cache hit they differ, and the difference
+  is the whole point — a price read three weeks ago is not stale, it is wrong.
 - **`from_cache`** says which of those two you are looking at.
-- **`country`, `currency`, `storefront`** are the values the run *resolved* to
-  after flag → env → config file — not the flags as typed. A record produced by
-  an unattended run with no flags at all still says which storefront it came
-  from.
-- `fetched_at` and `from_cache` are `null` when no page was read, which is every
-  failure. `country`, `currency` and `storefront` are `null` when the run failed
-  before its configuration resolved — an unparseable command line has no
-  effective storefront, and naming one would be a claim about a run that never
-  started.
-- **`meta.currency` is the currency the run asked the storefront for**, and is
-  `null` when it asked for nothing in particular. The currency a *price* is in
-  is `data.currency`, and whether anybody read it off the page is in
-  `data.extraction.sources.currency`. These are deliberately two different
-  fields: see [what `--currency` does](#what---currency-does).
+- **`requested_country`, `requested_currency`, `requested_storefront`** are the
+  values the run *resolved* to after flag → env → config file — not the flags as
+  typed. A record produced by an unattended run with no flags at all still says
+  what it asked for.
+- **What the storefront actually answered is on the record, not here.** The
+  currency a price is in is `data.currency`, and whether anybody read it off the
+  page is `data.extraction.sources.currency`. The URL the record names is
+  `data.product_url`, with `data.extraction.sources.product_url` saying whether
+  the page published it or we defaulted it from the requested storefront. None
+  of it is copied into `meta`: a value stored in two places is a value that can
+  disagree with itself.
+- `fetched_at` and `from_cache` are `null` when no page was read — a bad
+  argument, a browser that would not start, an interrupt. A failure that happens
+  *after* a page was read reports the page: `parse_failed` and
+  `currency_mismatch` both mean the page loaded first.
+- `requested_country`, `requested_currency` and `requested_storefront` are
+  `null` when the run failed before its configuration resolved — an unparseable
+  command line has no effective storefront, and naming one would be a claim
+  about a run that never started. `requested_currency` is also `null` on a good
+  run that passed no `--currency`, because then it asked for nothing in
+  particular. See [what `--currency` does](#what---currency-does).
 
 ### `data.extraction`
 
@@ -282,30 +298,49 @@ across additions.
 
 ### Exit codes
 
-`--json` or not, a failure exits on a stable code naming what went wrong. `0` is
-success and `130` is an interrupt (Ctrl+C).
+`--json` or not, a run leaves on a stable code naming what happened. `0` is
+success.
+
+**Every code in this table has a producer.** A table that documents a
+distinction the code cannot make is worse than no table: a caller branches on a
+number that never arrives and never finds out. Four codes an earlier draft
+carried — `network_error` (30), `io_error` (31), `cache_error` (32) and
+`json_error` (40) — had no producer and have been removed rather than given a
+decorative one. `reqwest` is used in exactly one place, so a network failure
+there *is* a failed Chrome download; every filesystem failure sits inside an
+operation that already has a code; the cache is an optimization, so a read that
+fails is a miss and a write that fails is a log line; and a record of ours that
+will not serialize is a bug in this tool, which is `internal_error`.
 
 | exit | `error_type` | what it means | produced by |
 |---|---|---|---|
-| 2 | `invalid_input` | The arguments cannot produce a request. Fix them. | an empty query, `--limit 0`, an unknown `--category`, an identifier that is neither an id nor a URL, an unknown `--country`, and a `--currency` the storefront does not price in |
-| 10 | `browser_launch_failed` | Chrome would not start. The environment needs attention. | browser launch |
-| 11 | `chrome_download_failed` | Chrome could not be downloaded. | the first-run browser download |
-| 20 | `navigation_timeout` | The page did not load in time. Worth retrying. | a navigation failure whose cause names a timeout |
+| 2 | `invalid_input` | The arguments cannot produce a request. Fix them. | an empty query, `--limit 0`, an unknown `--category`, an identifier that is neither an id nor a URL, and an unknown `--country` |
+| 10 | `browser_launch_failed` | Chrome would not start. The environment needs attention. | browser launch, including its temporary profile directory |
+| 11 | `chrome_download_failed` | Chrome could not be obtained. | the first-run browser download: the version index, the transfer, the archive, and writing any of it to disk |
+| 20 | `navigation_timeout` | The page did not load in time. Worth retrying. | a navigation the driver itself reported as a timeout |
 | 21 | `navigation_failed` | The page did not load, and not because of the clock. | any other navigation failure |
 | 22 | `cloudflare_blocked` | Cloudflare would not let us through. Retry later, from elsewhere. | the challenge loop giving up |
 | 23 | `product_not_found` | iHerb says the product is gone. Stop asking about this id. | a 404 or not-found page |
 | 24 | `empty_page_or_catalog_end` | The listing carried nothing. Not a fault. | a search whose result set is empty |
-| 30 | `network_error` | The network failed under us. | the Chrome download's HTTP client |
-| 31 | `io_error` | The filesystem failed under us. | file reads and writes |
-| 32 | `cache_error` | The cache could not be read or written. | the cache directory |
-| 40 | `json_error` | JSON we produced or consumed would not round-trip. | cache serialization |
+| 25 | `currency_mismatch` | The storefront prices in something else, and this tool does not convert. Change `--country`, or drop `--currency`. | `--currency` disagreeing with the price the storefront returned |
 | 41 | `parse_failed` | **The page loaded and we could not read it.** The scraper is broken and a human should look. | a product page from which no strategy produced a name or a price |
-| 70 | `internal_error` | This tool hit something it cannot name about itself. A bug. | anything unclassified |
+| 70 | `internal_error` | This tool hit something it cannot name about itself. A bug. | anything unclassified, and a record of ours that will not serialize |
+| 130 | `interrupted` | Ctrl+C. The browser was closed and its profile removed on the way out. | SIGINT during a command |
 
 `parse_failed` and `internal_error` are deliberately separate. `parse_failed` is
 the one code in this table worth alerting on — it means the site changed shape
 under us — and it is worthless the moment every unrecognised error is filed
 under it.
+
+`currency_mismatch` is separate from `invalid_input` for the same kind of
+reason. `--country us --currency CHF` is a perfectly well-formed command line:
+it launches a browser, fetches a page, and can only fail once the storefront has
+answered. A caller that reads `invalid_input` re-reads its arguments; a caller
+that reads `currency_mismatch` changes what it expects of the storefront. Under
+one code it had to parse `message` to tell which.
+
+`interrupted` is in the table because `--json` carries **one document on stdout,
+always** — and the interrupt used to be the exception that wrote none.
 
 `--help` and `--version` are not command output: they print as usual and exit
 `0`, `--json` or not.

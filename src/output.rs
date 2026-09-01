@@ -653,61 +653,57 @@ pub fn format_extraction_health(health: &ExtractionHealth) -> String {
 /// records already on disk.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// Where the data in an envelope came from, and when.
-///
-/// Both halves, because either alone is ambiguous. `fetched_at` on a cache hit
-/// is the mtime of a file written some time ago; on a fresh fetch it is a
-/// moment ago. Nothing in the timestamp says which, and a price read three
-/// weeks ago is not stale, it is wrong (#25).
-#[derive(Debug, Clone, Copy)]
-pub struct Provenance {
-    /// When the *page* was read.
-    pub fetched_at: SystemTime,
-    /// Whether that reading came off the local cache rather than off iHerb.
-    pub from_cache: bool,
-}
-
-impl<T> From<&crate::fetch::Fetched<T>> for Provenance {
-    fn from(fetched: &crate::fetch::Fetched<T>) -> Self {
-        Provenance {
-            fetched_at: fetched.retrieved_at,
-            from_cache: fetched.from_cache,
-        }
-    }
-}
+pub use crate::fetch::Provenance;
 
 /// The invocation a JSON document came out of, carried with it.
 ///
 /// Once the document leaves the process the invocation is gone, and a price
 /// with no storefront, currency or timestamp attached is not interpretable —
-/// only plausible (#44). Every field here is what the run *resolved* to after
-/// `--flag` → env → config file, not what was typed: a record produced with no
-/// flags at all still says which storefront it came from.
+/// only plausible (#44).
+///
+/// # Why every storefront field is named `requested_`
+///
+/// Because that is what they are, and the unprefixed names claimed otherwise.
+/// `meta` sits beside `data` in the envelope and reads as a description of it,
+/// and three of its fields described the *request* instead: with no flags on a
+/// Norwegian IP the configuration resolves country `us`, so the envelope said
+/// `country: "us"`, `storefront: "https://www.iherb.com"` and
+/// `currency: null` — while the record beside it carried a price in NOK. #5
+/// measured exactly that: iHerb geolocates by IP and overrides an unstated
+/// `--country`. A consumer reading `meta.currency` as the currency of the price
+/// got `null` for a NOK price, and one reading `meta.storefront` got a claim no
+/// part of the run had checked.
+///
+/// So `meta` now says only what the run asked for, in field names that cannot
+/// be read as anything else. **What the storefront actually answered is on the
+/// record**, where it was measured and where its provenance is:
+/// `data.currency` with `data.extraction.sources.currency`, and
+/// `data.product_url` with `data.extraction.sources.product_url`. It is not
+/// copied here — a value stored twice is a value that can disagree with itself,
+/// and the disagreement is what this whole issue is about.
 ///
 /// Three fields are `Option` and each `null` means something specific rather
 /// than "missing":
 ///
-///  - `fetched_at` / `from_cache` are `null` when no page was read at all, which
-///    is every failure that happens before or instead of a fetch.
-///  - `country` / `currency` / `storefront` are `null` when the failure happened
-///    before the configuration was resolved — an unparseable command line has no
-///    effective storefront, and inventing one would be a claim about a run that
-///    never started.
-///  - `currency` is also `null` on a perfectly good run that did not pass
-///    `--currency`, because then the run asked the storefront for nothing in
-///    particular. **This names the currency the run requested, not the one a
-///    price is in**: that lives on the record itself, as `data.currency`, with
-///    its provenance in `data.extraction`. Conflating the two is exactly the
-///    fabrication #5 removed.
+///  - `fetched_at` / `from_cache` are `null` when no page was read at all —
+///    every failure that happens before or instead of a fetch. A failure that
+///    happens *after* a page was read reports the page, because it read one.
+///  - `requested_country` / `requested_currency` / `requested_storefront` are
+///    `null` when the failure happened before the configuration was resolved —
+///    an unparseable command line has no effective storefront, and inventing
+///    one would be a claim about a run that never started.
+///  - `requested_currency` is also `null` on a perfectly good run that did not
+///    pass `--currency`, because then the run asked the storefront for nothing
+///    in particular.
 #[derive(Debug, Clone, Serialize)]
 pub struct Meta {
     pub tool_version: &'static str,
     pub fetched_at: Option<String>,
     pub emitted_at: String,
     pub from_cache: Option<bool>,
-    pub country: Option<String>,
-    pub currency: Option<String>,
-    pub storefront: Option<String>,
+    pub requested_country: Option<String>,
+    pub requested_currency: Option<String>,
+    pub requested_storefront: Option<String>,
 }
 
 impl Meta {
@@ -719,9 +715,9 @@ impl Meta {
     /// cached-versus-fresh distinction is checkable at all.
     pub fn new(config: &AppConfig, provenance: Option<Provenance>, emitted_at: SystemTime) -> Self {
         Self {
-            country: Some(config.country.clone()),
-            currency: config.currency.clone(),
-            storefront: Some(config.base_url()),
+            requested_country: Some(config.country.clone()),
+            requested_currency: config.currency.clone(),
+            requested_storefront: Some(config.base_url()),
             ..Self::unconfigured(provenance, emitted_at)
         }
     }
@@ -732,12 +728,15 @@ impl Meta {
     pub fn unconfigured(provenance: Option<Provenance>, emitted_at: SystemTime) -> Self {
         Self {
             tool_version: env!("CARGO_PKG_VERSION"),
-            fetched_at: provenance.map(|p| format_rfc3339(p.fetched_at)),
+            // Both read off the one `emitted_at` this run sampled, so a fresh
+            // document's two timestamps are the same string by construction
+            // rather than by luck (#44). See [`Provenance`].
+            fetched_at: provenance.map(|p| format_rfc3339(p.fetched_at(emitted_at))),
             emitted_at: format_rfc3339(emitted_at),
-            from_cache: provenance.map(|p| p.from_cache),
-            country: None,
-            currency: None,
-            storefront: None,
+            from_cache: provenance.map(|p| p.from_cache()),
+            requested_country: None,
+            requested_currency: None,
+            requested_storefront: None,
         }
     }
 }

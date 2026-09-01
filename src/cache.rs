@@ -1,5 +1,4 @@
 use crate::cli::SortOrder;
-use crate::error::IherbError;
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -157,6 +156,23 @@ impl CacheKey {
     }
 }
 
+/// A cache entry that did not get written.
+///
+/// Deliberately **not** an [`crate::error::IherbError`], and that is the point
+/// rather than an oversight. The taxonomy documented a `cache_error` (32) and a
+/// `json_error` (40) that no run could ever exit on, because the cache is an
+/// optimization: a read that fails is a miss, and a write that fails is a log
+/// line beside a perfectly good result. Neither should fail a run — a full disk
+/// is not a reason to throw away a page we already fetched — so this error is
+/// given a type that cannot reach [`crate::error::classify_error`] at all,
+/// instead of a code that claimed it could and never did.
+///
+/// The same reasoning covers a read: [`Cache::get`] returns `Option`, and a
+/// file that will not parse is `None` — a miss, refetched, with a warning.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct CacheWriteFailed(String);
+
 pub struct Cache {
     dir: PathBuf,
     read_enabled: bool,
@@ -191,7 +207,7 @@ impl Cache {
 
     /// Write an entry. Writes happen even under `--no-cache`, which only
     /// suppresses reads.
-    pub fn set<T: Serialize>(&self, key: &CacheKey, data: &T) -> Result<(), IherbError> {
+    pub fn set<T: Serialize>(&self, key: &CacheKey, data: &T) -> Result<(), CacheWriteFailed> {
         let path = self.dir.join(key.file_name());
         self.write_cached(&path, data)
     }
@@ -220,12 +236,13 @@ impl Cache {
         }
     }
 
-    fn write_cached<T: Serialize>(&self, path: &Path, data: &T) -> Result<(), IherbError> {
+    fn write_cached<T: Serialize>(&self, path: &Path, data: &T) -> Result<(), CacheWriteFailed> {
         std::fs::create_dir_all(&self.dir)
-            .map_err(|e| IherbError::Cache(format!("Failed to create cache dir: {}", e)))?;
-        let content = serde_json::to_string_pretty(data)?;
+            .map_err(|e| CacheWriteFailed(format!("Failed to create cache dir: {}", e)))?;
+        let content = serde_json::to_string_pretty(data)
+            .map_err(|e| CacheWriteFailed(format!("Failed to serialize the entry: {}", e)))?;
         std::fs::write(path, content)
-            .map_err(|e| IherbError::Cache(format!("Failed to write cache: {}", e)))?;
+            .map_err(|e| CacheWriteFailed(format!("Failed to write cache: {}", e)))?;
         tracing::debug!("Cached to {}", path.display());
         Ok(())
     }
