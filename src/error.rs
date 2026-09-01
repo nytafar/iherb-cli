@@ -128,7 +128,10 @@ pub enum IherbError {
 ///  - **`cache_error` (32)**. The cache is an optimization. A read that fails
 ///    is a miss and a write that fails is a log line; neither fails a run, and
 ///    neither should. See [`crate::cache::CacheWriteFailed`], which is
-///    deliberately not an [`IherbError`] so that it cannot become one.
+///    deliberately not an [`IherbError`] — and which stays out of this table
+///    because its one call site handles it rather than propagating it, not
+///    because a separate type could not reach `classify_error`. It could, as
+///    `internal_error`.
 ///  - **`json_error` (40)**. This tool consumes no JSON from a caller, and the
 ///    only JSON it produces is a record it already holds. A record that will
 ///    not serialize is a bug in this tool, which is what

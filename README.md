@@ -296,6 +296,23 @@ across additions.
 |---|---|
 | 1 | Initial `--json` output: the `ok` / `schema_version` / `meta` / `data` envelope, product and search payloads, and the `extraction` provenance block on both. |
 
+**Why version 1 covers two envelope shapes.** The first draft of `meta` named
+its storefront fields `country`, `currency` and `storefront`; they are now
+`requested_country`, `requested_currency` and `requested_storefront`. Three
+fields removed and three added is a breaking change by the rule above, and it
+happened without the version moving.
+
+That is deliberate and it rests on a fact that is not in the code: **nothing has
+been released.** The unprefixed names were on `origin` for about twenty minutes
+and there is no tag and no published artefact, so no consumer can be holding a
+document that has a `meta.country` in it. Bumping to 2 would spend this tool's
+first version increment announcing a break from a shape nobody ever received,
+and leave a row here describing a document that does not exist.
+
+**The assumption expires at the first release.** From the first tag onwards any
+change of this kind — a rename included, since a rename is a field removed and a
+field added — bumps `schema_version` and adds a row here.
+
 ### Exit codes
 
 `--json` or not, a run leaves on a stable code naming what happened. `0` is

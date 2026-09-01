@@ -651,6 +651,28 @@ pub fn format_extraction_health(health: &ExtractionHealth) -> String {
 /// making the change, not a follow-up: a stored record's only claim about its
 /// own shape is this integer, and there is no way to add one retroactively to
 /// records already on disk.
+///
+/// # Version 1 has already had a breaking change, and it is still 1
+///
+/// `ff35741` renamed `meta.country`, `meta.currency` and `meta.storefront` to
+/// `requested_country`, `requested_currency` and `requested_storefront`. Three
+/// fields removed and three added under a version that did not move is, read as
+/// a rule, exactly the drift this constant exists to prevent: a consumer
+/// holding a document from the parent commit and one from this one cannot tell
+/// them apart, because the only discriminator says `1` on both.
+///
+/// It is correct anyway, and only because of a fact outside the code: **nothing
+/// has been released**. The unprefixed names existed on `origin` in `0b65f46`
+/// for roughly twenty minutes, there is no tagged version and no published
+/// artefact, so no document with a `meta.country` in it can be in anyone's
+/// hands. Bumping to 2 would spend the tool's first version increment
+/// announcing a break from a shape nobody ever received, and would leave a `1`
+/// in the history table describing a document that does not exist.
+///
+/// **That assumption expires at the first release.** From the first tag
+/// onwards, any change of this kind bumps this constant and adds a row to the
+/// README's table — including a rename, which is a field removed and a field
+/// added however sympathetic the motive.
 pub const SCHEMA_VERSION: u32 = 1;
 
 pub use crate::fetch::Provenance;

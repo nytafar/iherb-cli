@@ -16,6 +16,7 @@
 //! one document and nothing else — because the thing that used to break it was
 //! a tracing subscriber writing somewhere no in-process assertion looks.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -135,21 +136,266 @@ fn the_exit_code_table_is_what_the_readme_documents() {
 /// `json_error` — stayed decorative, documented distinctions the code could not
 /// make.
 ///
-/// They are gone rather than wired, because there was nothing for them to mean.
-/// This test is what stops them coming back by name: every `error_type` in the
-/// taxonomy is produced somewhere in the tests below, and a row re-added to the
-/// README without a producer fails `the_exit_code_table_is_what_the_readme_documents`
-/// instead of quietly shipping.
+/// # This test used to be a blocklist, and a blocklist cannot check an invariant
+///
+/// It asserted that four literal strings were absent from [`ErrorKind`], and
+/// nothing else. So the failure it was named for — a code documented in both
+/// tables with nothing in the crate that produces it — walked straight past it,
+/// as long as the code was not called one of those four things. A fifth
+/// decorative code was one variant away, and the test would have stayed green
+/// while its name promised otherwise.
+///
+/// # What it checks now
+///
+/// Three things, over the crate's own source:
+///
+///  1. [`ErrorKind::ALL`] holds every variant the enum declares, parsed out of
+///     `src/error.rs`. Everything below sweeps `ALL`, so a variant missing from
+///     it would be exempt from all of it.
+///  2. Every [`IherbError`] variant the enum declares has a sample in
+///     [`error_samples`]. Adding a variant without one fails here rather than
+///     being silently skipped.
+///  3. **Every [`ErrorKind`] is produced.** A kind counts as produced when
+///     production code outside `src/error.rs` either names it directly —
+///     `ErrorKind::Internal` in [`iherb_cli::app::json_document`],
+///     `ErrorKind::Interrupted` on the interrupt path — or constructs an
+///     [`IherbError`] variant whose real `kind()` is that kind. The mapping is
+///     taken from the production function, not from a table here.
+///
+/// `src/error.rs` is excluded on purpose: `error_type`, `exit_code`, `ALL` and
+/// `kind` each name every variant, so counting a mention there would make the
+/// taxonomy its own witness — which is the circularity this test exists to
+/// break. Comments are stripped for the same reason; a `[`IherbError::Navigation`]`
+/// in a doc comment is a reference, not a producer.
+///
+/// # What it still does not prove
+///
+/// That a *run* can reach each code. This is a source-level check: it says the
+/// crate constructs the error, not that any input makes it do so. The
+/// behavioural tests below are what carry that half — `every_way_to_pass_bad_input_reports_invalid_input`,
+/// `an_empty_result_set_is_the_catalog_end_not_an_internal_fault`,
+/// `a_navigation_timeout_is_classified_from_the_type_not_the_message`,
+/// `a_payload_that_will_not_serialize_fails_the_run`,
+/// `an_interrupted_run_still_answers_in_json` — each through a real production
+/// constructor. Between the two, a new code cannot be documented, listed and
+/// shipped with nothing behind it.
 #[test]
 fn the_taxonomy_carries_no_code_without_a_producer() {
-    let retired = ["network_error", "io_error", "cache_error", "json_error"];
+    let source = production_source_outside_the_taxonomy();
+
+    // 1. `ALL` is the whole enum. Everything below sweeps it.
+    let declared_kinds = declared_variants("ErrorKind");
+    let listed: BTreeSet<String> = ErrorKind::ALL.iter().map(variant_name).collect();
+    assert_eq!(
+        declared_kinds, listed,
+        "ErrorKind::ALL has fallen behind the enum; a variant missing from it is \
+         exempt from every sweep in this file"
+    );
+
+    // 2. Every declared `IherbError` variant has a sample to classify.
+    let samples = error_samples();
+    let sampled: BTreeSet<String> = samples.iter().map(|(name, _)| name.to_string()).collect();
+    assert_eq!(
+        declared_variants("IherbError"),
+        sampled,
+        "error_samples() has fallen behind IherbError; a variant with no sample \
+         here cannot be shown to have a producer"
+    );
+
+    // 3. What production actually constructs.
+    let mut produced: BTreeSet<String> = BTreeSet::new();
+    for (name, error) in &samples {
+        if constructs(&source, "IherbError", name) {
+            // The mapping comes from the production function. A variant whose
+            // `kind()` is changed re-points its producer here, rather than this
+            // test holding a second opinion about the taxonomy.
+            produced.insert(variant_name(&error.kind()));
+        }
+    }
     for kind in ErrorKind::ALL {
+        let name = variant_name(kind);
+        if constructs(&source, "ErrorKind", &name) {
+            produced.insert(name);
+        }
+    }
+
+    let orphans: Vec<&String> = listed.difference(&produced).collect();
+    assert!(
+        orphans.is_empty(),
+        "these codes are documented and nothing in this crate produces them: {:?}. \
+         Wire a producer or remove the code — a caller branches on a number that \
+         never arrives and never finds out.",
+        orphans
+    );
+
+    // The four that were removed rather than wired, by name, so re-adding one
+    // is a decision someone has to make in the open rather than a rebase
+    // bringing back a row.
+    for retired in ["network_error", "io_error", "cache_error", "json_error"] {
         assert!(
-            !retired.contains(&kind.error_type()),
+            !listed.contains(&pascal_case(retired)),
             "{} is back in the taxonomy; it needs a producer and a test that reaches it",
-            kind.error_type()
+            retired
         );
     }
+}
+
+/// A variant's identifier as it is spelled in source.
+///
+/// Both enums are `Debug` and every variant swept here is a unit variant, so
+/// the derived `Debug` *is* the identifier — no second hand-written table to
+/// fall behind the enum.
+fn variant_name(kind: &ErrorKind) -> String {
+    format!("{:?}", kind)
+}
+
+/// `network_error` → `NetworkError`, so a retired `error_type` can be looked
+/// for among variant identifiers.
+fn pascal_case(snake: &str) -> String {
+    snake
+        .split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// The variant identifiers an enum in `src/error.rs` declares.
+///
+/// Read out of the file rather than mirrored in an array here, for the same
+/// reason [`documented_table`] reads the README: a copy is a thing that can
+/// disagree, and the disagreement is invisible.
+fn declared_variants(enum_name: &str) -> BTreeSet<String> {
+    let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/error.rs"))
+        .expect("src/error.rs is the taxonomy");
+
+    let body = text
+        .split(&format!("pub enum {} {{\n", enum_name))
+        .nth(1)
+        .unwrap_or_else(|| panic!("src/error.rs no longer declares `pub enum {}`", enum_name));
+    // The first closing brace in column zero ends the declaration; a struct
+    // variant's own brace is indented.
+    let body = body.split("\n}").next().unwrap();
+
+    let variants: BTreeSet<String> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//") && !line.starts_with('#'))
+        .filter_map(|line| {
+            let ident: String = line
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            let rest = line[ident.len()..].trim_start();
+            // A variant is an identifier that starts a line and is followed by
+            // its payload or a comma. A struct variant's fields are lower case
+            // and its closing `},` has no identifier at all.
+            let starts_upper = ident.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+            let is_variant = matches!(rest.chars().next(), Some('(' | '{' | ',') | None);
+            (starts_upper && is_variant).then_some(ident)
+        })
+        .collect();
+
+    assert!(
+        variants.len() > 5,
+        "`pub enum {}` did not parse; it yielded {:?}",
+        enum_name,
+        variants
+    );
+    variants
+}
+
+/// One value of every [`IherbError`] variant, so each can be handed to the
+/// production `kind()`.
+///
+/// Checked against the declaration rather than trusted: a variant added without
+/// a line here fails [`the_taxonomy_carries_no_code_without_a_producer`].
+fn error_samples() -> Vec<(&'static str, IherbError)> {
+    vec![
+        ("InvalidInput", IherbError::InvalidInput("x".into())),
+        ("BrowserLaunch", IherbError::BrowserLaunch("x".into())),
+        ("Navigation", IherbError::Navigation("x".into())),
+        (
+            "NavigationTimeout",
+            IherbError::NavigationTimeout("x".into()),
+        ),
+        ("CloudflareBlocked", IherbError::CloudflareBlocked(3)),
+        ("ProductNotFound", IherbError::ProductNotFound("x".into())),
+        ("ParseFailed", IherbError::ParseFailed("x".into())),
+        (
+            "EmptyPageOrCatalogEnd",
+            IherbError::EmptyPageOrCatalogEnd("x".into()),
+        ),
+        (
+            "CurrencyMismatch",
+            IherbError::CurrencyMismatch {
+                expected: "USD".into(),
+                actual: "NOK".into(),
+                what: "x".into(),
+            },
+        ),
+        ("ChromeDownload", IherbError::ChromeDownload("x".into())),
+    ]
+}
+
+/// Every `.rs` file the crate ships except `src/error.rs`, with comments
+/// stripped.
+fn production_source_outside_the_taxonomy() -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let taxonomy = root.join("error.rs");
+    let mut out = String::new();
+    collect_rust_sources(&root, &taxonomy, &mut out);
+    assert!(
+        out.len() > 10_000,
+        "the crate's source did not load; got {} bytes",
+        out.len()
+    );
+    out
+}
+
+fn collect_rust_sources(dir: &Path, skip: &Path, out: &mut String) {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("{}: {}", dir.display(), e))
+        .map(|e| e.expect("readable directory entry").path())
+        .collect();
+    entries.sort();
+
+    for path in entries {
+        if path.is_dir() {
+            collect_rust_sources(&path, skip, out);
+        } else if path.extension().is_some_and(|e| e == "rs") && path != skip {
+            let text =
+                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{:?}: {}", path, e));
+            for line in text.lines() {
+                // A reference in a doc comment is not a producer. Whole-line
+                // comments are all this crate has; there are no block comments
+                // and no trailing `//` after code that names either enum.
+                if !line.trim_start().starts_with("//") {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+}
+
+/// Whether production code names `Ty::Variant`.
+///
+/// Boundary-checked, so `IherbError::Navigation` is not satisfied by
+/// `IherbError::NavigationTimeout` — the two are different codes with opposite
+/// advice, and a prefix match would let either stand in for the other.
+fn constructs(source: &str, ty: &str, variant: &str) -> bool {
+    let needle = format!("{}::{}", ty, variant);
+    source.match_indices(&needle).any(|(at, _)| {
+        !source[at + needle.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
 }
 
 /// `parse_failed` means *we loaded the page and could not read it* — the one

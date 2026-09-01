@@ -163,9 +163,29 @@ impl CacheKey {
 /// `json_error` (40) that no run could ever exit on, because the cache is an
 /// optimization: a read that fails is a miss, and a write that fails is a log
 /// line beside a perfectly good result. Neither should fail a run — a full disk
-/// is not a reason to throw away a page we already fetched — so this error is
-/// given a type that cannot reach [`crate::error::classify_error`] at all,
-/// instead of a code that claimed it could and never did.
+/// is not a reason to throw away a page we already fetched — so this is its own
+/// type rather than a code in a table that claimed it could and never did.
+///
+/// # What the type does and does not buy
+///
+/// It buys the compiler's help at the `?`: a `Result<_, CacheWriteFailed>` is
+/// not a `Result<_, IherbError>`, so nothing can propagate one *as* a member of
+/// the taxonomy, and [`crate::error::IherbError::kind`] never has to answer for
+/// it.
+///
+/// It does **not** make the pipeline unreachable, and an earlier draft of this
+/// comment claimed it did. Rust converts any `std::error::Error` into an
+/// `anyhow::Error`, so `cache.set(..)?` inside an `anyhow`-returning function
+/// compiles, and the error it produces carries no [`crate::error::IherbError`]
+/// anywhere in its chain — which is precisely what
+/// [`crate::error::classify_error`] reports as `internal_error` (70). A full
+/// disk would then tell a caller to file a bug about this tool.
+///
+/// What actually keeps that from happening is a control-flow boundary, not a
+/// type-level impossibility: the one call site, `src/fetch.rs:364`, handles the
+/// write failure where it happens — `if let Err(e) = cache.set(..)`, logged and
+/// dropped — instead of propagating it. Keep the `?` off that call and the
+/// promise holds.
 ///
 /// The same reasoning covers a read: [`Cache::get`] returns `Option`, and a
 /// file that will not parse is `None` — a miss, refetched, with a warning.
