@@ -32,6 +32,111 @@ const STEALTH_FLAGS: &[&str] = &[
 
 const STEALTH_DISABLED_FEATURES: &[&str] = &["IsolateOrigins", "site-per-process"];
 
+/// Chrome's own defaults, re-supplied by hand **without `enable-automation`**
+/// (#48).
+///
+/// chromiumoxide passes a 24-switch `DEFAULT_ARGS` — puppeteer's list — to
+/// every launch, and one of them is `--enable-automation`, the loudest bot
+/// signal a Chrome instance can emit. It was verified present in captured argv.
+/// `disable_default_args()` is the only lever that removes it, and it removes
+/// all 24, so the 23 we want are written down here.
+///
+/// # The decision, recorded
+///
+/// **Drop `enable-automation`, keep the other 23 verbatim.** They are the
+/// switches that make a launched Chrome behave like a scraping target rather
+/// than a desktop browser — no background networking, no breakpad, no sync, no
+/// hang monitor, a basic password store, a mock keychain — and none of them is
+/// a detection signal in the way `--enable-automation` is. Two of them,
+/// `disable-hang-monitor` and `disable-ipc-flooding-protection`, this tool was
+/// not previously getting on top of its own [`STEALTH_FLAGS`]; keeping the list
+/// whole is why.
+///
+/// Overlap with [`STEALTH_FLAGS`] is harmless and deliberate: chromiumoxide's
+/// argument builder is keyed by switch name, so a flag supplied twice is
+/// emitted once, and two `disable-features` lists merge into one switch.
+///
+/// One switch is **not** re-supplied and is not missing either:
+/// `disable-blink-features=AutomationControlled` now comes from the builder's
+/// own `.hide()`, which is where it belongs.
+const CHROME_DEFAULT_FLAGS: &[&str] = &[
+    "disable-background-networking",
+    "disable-background-timer-throttling",
+    "disable-backgrounding-occluded-windows",
+    "disable-breakpad",
+    "disable-client-side-phishing-detection",
+    "disable-component-extensions-with-background-pages",
+    "disable-default-apps",
+    "disable-dev-shm-usage",
+    "disable-hang-monitor",
+    "disable-ipc-flooding-protection",
+    "disable-popup-blocking",
+    "disable-prompt-on-repost",
+    "disable-renderer-backgrounding",
+    "disable-sync",
+    "metrics-recording-only",
+    "no-first-run",
+    "use-mock-keychain",
+];
+
+/// The rest of [`CHROME_DEFAULT_FLAGS`]: the defaults that carry values.
+const CHROME_DEFAULT_VALUED: &[(&str, &[&str])] = &[
+    (
+        "enable-features",
+        &["NetworkService", "NetworkServiceInProcess"],
+    ),
+    ("disable-features", &["TranslateUI"]),
+    ("force-color-profile", &["srgb"]),
+    ("password-store", &["basic"]),
+    ("enable-blink-features", &["IdleDetection"]),
+    ("lang", &["en_US"]),
+];
+
+// What hides `navigator.webdriver`, and what does not (#48).
+//
+// This module used to answer CDP's `navigator.webdriver === true` with a JS
+// snippet in `new_page`:
+// `Object.defineProperty(navigator, 'webdriver', { get: () => undefined })`.
+// It was wrong twice over. It ran through `evaluate()` against the current
+// document, and the current document of a freshly opened tab is `about:blank`;
+// the cross-document `goto` that follows discards every property defined on it,
+// so it had never once been in effect on a real page. And the pattern itself is
+// a detection signal: defining the property on the *instance* puts it in
+// `Object.getOwnPropertyNames(navigator)`, where a real browser has nothing,
+// and `undefined` is not a value any real browser reports.
+//
+// # There is no replacement script, and that is a measurement
+//
+// `--disable-blink-features=AutomationControlled` turns off the Blink feature
+// that sets the property in the first place, so `navigator.webdriver` reads
+// `false` natively, on the prototype, with no own property on `navigator` and
+// no script involved. That switch is what the builder's `.hide()` supplies, and
+// it is the same switch this code used to spell by hand.
+//
+// An `evaluate_on_new_document` copy of the prototype-level fix was written
+// first and then removed, because with the switch in place its presence and its
+// absence are indistinguishable in every reading the test can take — and
+// shipping a second mechanism whose effect nothing can demonstrate is the same
+// defect as the snippet it would have replaced, only quieter.
+// `navigator_webdriver_reads_false_on_a_loaded_page` fails the moment `.hide()`
+// goes, which is what pins the claim to the thing that carries it.
+//
+// # One of #48's premises did not reproduce, and it is recorded here
+//
+// #48 states that `navigator.webdriver` reads `true` on the real page. On
+// Google Chrome 152.0.7977.66, headless-new, it does not: the pre-#48 argument
+// set — `--enable-automation` present, the hand-written
+// `disable-blink-features=AutomationControlled` present, the no-op snippet in
+// place — was reconstructed and measured on a loaded page, and it read `false`.
+// The blink switch alone decides it, and that switch predates #48.
+//
+// Nothing above changes as a result. The snippet was still a no-op and its
+// pattern is still a detection signal, so removing it is still right; and
+// `--enable-automation` is a separate signal from `navigator.webdriver`, which
+// is why the argv assertion is a test of its own rather than a corollary of the
+// page reading. What changes is that the page reading is now *verified* rather
+// than assumed in either direction.
+
 /// How many times a profile directory removal is attempted before giving up.
 const CLEANUP_ATTEMPTS: u32 = 4;
 
@@ -323,14 +428,25 @@ impl BrowserSession {
         let mut builder = BrowserConfig::builder()
             .chrome_executable(chrome_path)
             .user_data_dir(profile.path())
+            // Chrome's own 24 defaults are turned off so that one of them —
+            // `--enable-automation` — can be left out, and re-supplied below
+            // (#48). There is no narrower lever: chromiumoxide offers the list
+            // whole or not at all.
+            .disable_default_args()
+            // The builder's own way of saying
+            // `disable-blink-features=AutomationControlled`, which this used to
+            // spell by hand. Same switch, from the library that owns it.
+            .hide()
             .arg(("user-agent", STEALTH_USER_AGENT))
-            .arg(("disable-blink-features", "AutomationControlled"))
             .arg(("disable-features", STEALTH_DISABLED_FEATURES))
             .window_size(1920, 1080)
             .viewport(None);
 
-        for flag in STEALTH_FLAGS {
+        for flag in CHROME_DEFAULT_FLAGS.iter().chain(STEALTH_FLAGS) {
             builder = builder.arg(*flag);
+        }
+        for (key, values) in CHROME_DEFAULT_VALUED {
+            builder = builder.arg((*key, *values));
         }
 
         // Headless is a *mode* on the builder, not a switch in `args`, and the
@@ -388,28 +504,11 @@ impl BrowserSession {
             .await
             .map_err(|e| IherbError::BrowserLaunch(format!("Failed to create page: {}", e)))?;
 
-        // Stealth: override navigator.webdriver and other detection vectors
-        let _ = page
-            .evaluate(
-                r#"
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-
-                // Override chrome.runtime to prevent detection
-                window.chrome = { runtime: {} };
-
-                // Override permissions query
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications' ?
-                    Promise.resolve({ state: Notification.permission }) :
-                    originalQuery(parameters)
-                );
-                "#,
-            )
-            .await;
-
+        // No stealth script here any more, and nothing is missing. The switch
+        // `.hide()` puts in the launch argv is what makes `navigator.webdriver`
+        // read `false`; the snippet that used to sit here never ran on a real
+        // page. See the note above `BrowserSession::new_page`'s module
+        // neighbours on why there is no replacement (#48).
         Ok(page)
     }
 
