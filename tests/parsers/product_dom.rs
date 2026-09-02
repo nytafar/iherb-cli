@@ -2,7 +2,7 @@
 //! `enrich_from_html`, `extract_spec`, `parse_supplement_facts_html`,
 //! `parse_review_distribution_html`.
 
-use iherb_cli::error::IherbError;
+use iherb_cli::error::{classify_error, IherbError};
 use iherb_cli::model::{ReviewDistribution, Source};
 use iherb_cli::scraper::helpers::is_not_found_page;
 use iherb_cli::scraper::product::{
@@ -383,7 +383,105 @@ fn captured_pages_are_not_mistaken_for_404s() {
         assert!(!is_not_found_page(f.html()), "{}", f.slug());
     }
     assert!(is_not_found_page("<html><title>404</title></html>"));
-    assert!(is_not_found_page("<h1>Page Not Found</h1>"));
+    assert!(is_not_found_page(
+        "<html><title>Page Not Found</title></html>"
+    ));
+}
+
+/// A dead product id leaves the process on **23**, not 41 (#59).
+///
+/// The assertion is the exit code, deliberately, because the exit code is what
+/// broke. `is_not_found_page` returning `true` is necessary and not sufficient:
+/// the number a caller branches on is produced two steps later, by
+/// [`classify_error`], and it is possible to fix a predicate and still ship 41.
+/// Before this fix the live tool answered `41 parse_failed` on exactly this
+/// page, on both storefronts, which told the agent to retry an id that will
+/// never work and pointed a human at selectors that are fine.
+///
+/// Both captures, because a marker list checked against one storefront is a
+/// guess about the other.
+#[test]
+fn a_dead_product_id_exits_23() {
+    for f in fixture::not_found_pages() {
+        // The exit code first, because it is the claim. `parse_from_html` is
+        // the extractor's own gate; the wrapper is the `.context(..)`
+        // production adds, since that is the chain the classifier has to walk;
+        // `classify_error` is the function `report_failure` calls to pick the
+        // number. Nothing here is a stand-in for the number a caller reads.
+        let err = parse_from_html(f.html(), f.product_id(), f.base_url())
+            .expect_err("a not-found page is not a product page");
+        let wrapped = anyhow::Error::new(err).context("Failed to extract product data");
+        let kind = classify_error(&wrapped);
+        assert_eq!(
+            kind.exit_code(),
+            23,
+            "{}: a dead id must exit 23, not {} ({})",
+            f.slug(),
+            kind.exit_code(),
+            kind.error_type()
+        );
+        assert_eq!(kind.error_type(), "product_not_found", "{}", f.slug());
+
+        // The error is `ProductNotFound` and not something else that happens to
+        // classify the same way.
+        let err = parse_from_html(f.html(), f.product_id(), f.base_url()).unwrap_err();
+        assert!(
+            matches!(err, IherbError::ProductNotFound(ref id) if id == "99999999"),
+            "{}: expected ProductNotFound, got {:?}",
+            f.slug(),
+            err
+        );
+
+        // And the gate at `targets/product.rs`, which sees the page before any
+        // extractor does and is the one that fires in a live run.
+        assert!(
+            is_not_found_page(f.html()),
+            "{}: iHerb's own not-found page was not recognised as one",
+            f.slug()
+        );
+    }
+}
+
+/// The structural markers are load-bearing on their own (#59).
+///
+/// Stated as its own test because the point of adding them was that the copy
+/// can change without retiring the code. If only the title check were doing the
+/// work, this passes today and fails the day iHerb rewords the page — which is
+/// the failure this whole fix exists to prevent, arriving late instead of
+/// never.
+#[test]
+fn a_not_found_page_is_recognised_after_its_copy_changes() {
+    for f in fixture::not_found_pages() {
+        let reworded = f
+            .html()
+            .replace("The page is not found!", "Denne siden finnes ikke")
+            .replace("The Page is Not Found!", "Denne siden finnes ikke");
+        assert!(
+            !reworded.to_lowercase().contains("page is not found"),
+            "{}: the rewrite did not remove the phrase it was testing",
+            f.slug()
+        );
+        assert!(
+            is_not_found_page(&reworded),
+            "{}: a reworded not-found page stopped being recognised",
+            f.slug()
+        );
+    }
+}
+
+/// The title check does not fire on words that merely appear on a page (#59).
+///
+/// The three markers this function used to carry were matched against the whole
+/// document, which is a false positive waiting for a product whose description
+/// says "page not found". Reading the `<title>` instead is what makes that
+/// impossible rather than unlikely.
+#[test]
+fn not_found_copy_in_the_body_of_a_real_page_is_not_a_404() {
+    let page = "<html><head><title>Nordic Naturals Ultimate Omega</title></head>\
+                <body><h1 id=\"name\">Ultimate Omega</h1>\
+                <p>Some reviewers report a 404 Not Found when the page not found \
+                error hits our old links.</p></body></html>";
+    assert!(!is_not_found_page(page));
 }
 
 // ---------------------------------------------------------------------------

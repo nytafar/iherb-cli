@@ -213,11 +213,110 @@ pub fn debug_dump_html(html: &str, label: &str) {
     }
 }
 
-/// Check if HTML indicates a 404/not-found page.
+/// The hooks iHerb hangs its own not-found page on, which carry no prose (#59).
+///
+/// These are the markers that matter. The three copy strings this function used
+/// to check — and only check — matched nothing iHerb serves: the page a dead
+/// product id returns is titled `The page is not found!`, so
+/// [`crate::error::IherbError::ProductNotFound`] was raised from neither of its
+/// call sites and exit code 23 had no live producer at all. Every dead id
+/// exited 41 `parse_failed` instead, which is the one code the README says is
+/// worth paging a human about.
+///
+/// Appending a fourth copy string would have fixed today and left the same trap
+/// armed, because a marker list made of prose retires itself the next time
+/// somebody edits the prose. `id="error-page-404"` and the `data-testid`
+/// attributes are what the page's own template is built from: they are not
+/// translated, they are not reworded, and a change to them is a change to the
+/// page rather than to its wording.
+///
+/// Measured on both storefronts on 2026-09-02, captured as
+/// `tests/fixtures/notfound-product-99999999*.html.gz`. The two captures are
+/// byte-identical apart from the hostname in three links, so this list is one
+/// page's structure and not two.
+const NOT_FOUND_STRUCTURE_MARKERS: &[&str] = &[
+    "id=\"error-page-404\"",
+    "data-testid=\"error-page-title\"",
+    "data-testid=\"error-page-content\"",
+    "data-testid=\"error-page-return-links\"",
+    "icon-page-not-found",
+];
+
+/// Not-found phrasing, compared case-insensitively against the document's own
+/// `<title>` rather than against the whole document.
+///
+/// Against the title because that is where a not-found page says so, and
+/// because the whole document is where a false positive comes from: a product
+/// review or a description is free to contain the words "page not found", and
+/// a title is not. Case-insensitively because iHerb itself spells it two ways
+/// on one page — `The page is not found!` in the `<title>`, `The Page is Not
+/// Found! | iHerb` in `og:title`.
+const NOT_FOUND_TITLE_MARKERS: &[&str] = &[
+    // What iHerb serves today, both storefronts.
+    "the page is not found",
+    // The three that were here before. They match nothing this repository has
+    // captured, but they presumably matched *something* once, and dropping a
+    // marker is a behaviour change nobody measured. They cost one pass over a
+    // title string.
+    "page not found",
+    "404 not found",
+];
+
+/// Does this HTML say the thing being asked for does not exist? (#59)
+///
+/// Two independent families of signal, either of which is enough:
+///
+///  1. **Structure** — [`NOT_FOUND_STRUCTURE_MARKERS`], the template hooks.
+///     Language-independent and copy-independent.
+///  2. **The title** — [`NOT_FOUND_TITLE_MARKERS`], read out of the `<title>`
+///     element and compared case-insensitively.
+///
+/// Either alone would work against the page iHerb serves today. Both are here
+/// so that the *next* change to that page has to break two unrelated things
+/// before this quietly starts answering `false` again.
+///
+/// A `true` here is what separates "stop asking about this id" from "the
+/// scraper is broken and a human should look". Nothing about the fetch is being
+/// judged — the page loaded, and `fetched_at` stays non-null on this path.
 pub fn is_not_found_page(html: &str) -> bool {
-    html.contains("Page Not Found")
-        || html.contains("<title>404</title>")
-        || html.contains("404 Not Found")
+    if NOT_FOUND_STRUCTURE_MARKERS
+        .iter()
+        .any(|marker| html.contains(marker))
+    {
+        return true;
+    }
+
+    // `<title>404</title>` used to be checked as a literal. A title that *is*
+    // the bare status number carries no phrase to match, so it is asked as the
+    // question it is rather than added to the phrase list, where `"404"` as a
+    // substring would match any page mentioning the number.
+    match document_title(html) {
+        Some(title) => {
+            let title = title.trim().to_lowercase();
+            title == "404"
+                || NOT_FOUND_TITLE_MARKERS
+                    .iter()
+                    .any(|marker| title.contains(marker))
+        }
+        None => false,
+    }
+}
+
+/// The text inside the document's first `<title>` element, unescaped only as
+/// far as a byte scan can manage — which is far enough, because every marker
+/// compared against it is plain ASCII words.
+///
+/// A hand-rolled scan rather than `Html::parse_document`, because this runs on
+/// every page the tool fetches and parsing a five-megabyte product page to read
+/// forty bytes of its head is the wrong trade. `<title` rather than `<title>`
+/// so an attribute on the tag does not hide it.
+fn document_title(html: &str) -> Option<&str> {
+    let open = html.find("<title")?;
+    let rest = &html[open + "<title".len()..];
+    let content_start = rest.find('>')? + 1;
+    let rest = &rest[content_start..];
+    let end = rest.find("</title>")?;
+    Some(&rest[..end])
 }
 
 /// The currency the page itself declares, or `None` when it declares none.

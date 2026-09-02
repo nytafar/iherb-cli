@@ -204,6 +204,53 @@ registry! {
     GASSERI_REUTERI_CFU = "product-132364-humanx-gasseri-reuteri-nok", "132364", "NOK", NO_STOREFRONT;
 }
 
+/// iHerb's own not-found page, US storefront, captured 2026-09-02 (#59).
+///
+/// `https://www.iherb.com/pr/item/99999999` — an id the catalogue has never
+/// had. Twelve kilobytes: a header, a search box, an error panel and a link
+/// home. It is here because `is_not_found_page` checked three copy strings the
+/// site does not serve, and nothing noticed for as long as no capture of this
+/// page existed to notice with.
+///
+/// It is also the corpus's only page carrying Cloudflare's `challenge-platform`
+/// bootstrap *and* nothing else — see [`NOT_FOUND_NO`] for the same page
+/// without it.
+pub const NOT_FOUND_US: Fixture = Fixture {
+    slug: "notfound-product-99999999",
+    product_id: "99999999",
+    currency: "",
+    base_url: US_STOREFRONT,
+    gz: include_bytes!("../fixtures/notfound-product-99999999.html.gz"),
+};
+
+/// The same page from the Norwegian storefront, captured in the same minute.
+///
+/// Byte-identical to [`NOT_FOUND_US`] apart from the hostname in three links —
+/// including the title, which is English on both. That is the finding, not a
+/// redundancy: a marker list checked against one storefront would have been a
+/// guess about the other, and this is what makes the pair of them a measurement.
+pub const NOT_FOUND_NO: Fixture = Fixture {
+    slug: "notfound-product-99999999-nok",
+    product_id: "99999999",
+    currency: "",
+    base_url: NO_STOREFRONT,
+    gz: include_bytes!("../fixtures/notfound-product-99999999-nok.html.gz"),
+};
+
+/// Pages that load like any other fixture but must never enter a sweep.
+///
+/// [`all`] means "every page a parser is expected to read", and every sweep
+/// written against it asserts something no error page can satisfy: that it
+/// declares a currency, that it is not mistaken for a 404. The not-found
+/// captures are neither product pages nor listings, so they are addressed by
+/// name — [`NOT_FOUND_US`], [`NOT_FOUND_NO`] — and inflated alongside the rest.
+const OFF_REGISTRY: &[Fixture] = &[NOT_FOUND_US, NOT_FOUND_NO];
+
+/// Both not-found captures, for the tests that must hold on either storefront.
+pub fn not_found_pages() -> impl Iterator<Item = Fixture> {
+    OFF_REGISTRY.iter().copied()
+}
+
 /// Every page the suite can load, for tests that sweep all of them.
 pub fn all() -> impl Iterator<Item = Fixture> {
     REGISTRY.iter().copied()
@@ -305,6 +352,7 @@ fn inflated() -> &'static HashMap<&'static str, String> {
     CACHE.get_or_init(|| {
         REGISTRY
             .iter()
+            .chain(OFF_REGISTRY.iter())
             .map(|f| {
                 let mut out = String::new();
                 flate2::read::GzDecoder::new(f.gz)

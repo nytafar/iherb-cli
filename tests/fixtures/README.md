@@ -17,7 +17,8 @@ There are **two corpora here, and they are not interchangeable.**
 | forms | veggie caps, gummies, softgels, one 250 g powder | capsules, softgels, tablets, micro tablets, delayed-release veggie caps, powder by the gram, liquid by the millilitre |
 | products in common | **none** | |
 
-Twenty files, 55.6 MB of HTML, 7.7 MB gzipped.
+Twenty files, 55.6 MB of HTML, 7.7 MB gzipped, plus the two error-page
+captures below, which belong to neither corpus.
 
 **New parser work should be designed against the current corpus.** It is the
 site as it is served today, in the storefront this tool is actually pointed at,
@@ -236,6 +237,49 @@ for being here.
 | `product-12081-country-life-coenzyme-b-complex-nok` | a twelve-nutrient blend mixing mg, mcg and **mcg DFE** in one panel. Its servings-per-container is `120` for a 240-capsule bottle, because the serving is two capsules — the same container-vs-serving split as BodyBio, but here the page states both numbers |
 | `product-132364-humanx-gasseri-reuteri-nok` | dosed in **CFU** — a count of live organisms, not a quantity of anything weighable |
 | `product-124094-nutricost-k2-mk7-nok` | the **single-nutrient** page for contrast with the blends, dosed in micrograms. It is the weakest of the twelve on its own: what it uniquely holds is the contrast, not a shape no other page has. Kept because a corpus of edge cases with no ordinary member cannot say which is which |
+
+## The error pages (#59)
+
+Two captures that are not product pages, not listings, and not read by any
+parser. They are here because a marker list with no capture behind it is a
+guess, and both of the marker lists this repository shipped turned out to be
+wrong ones.
+
+| slug | URL | exit before | exit after |
+|---|---|---|---|
+| `notfound-product-99999999` | `https://www.iherb.com/pr/item/99999999` | 41 `parse_failed` | 23 `product_not_found` |
+| `notfound-product-99999999-nok` | `https://no.iherb.com/pr/item/99999999` | 41 `parse_failed` | 23 `product_not_found` |
+
+Captured 2026-09-02 with
+`./target/release/iherb-cli product 99999999 --country <us|no> --currency <USD|NOK> --no-cache --debug`,
+then `gzip -9` of the dump `--debug` writes under `$(iherb-cli cache path)/dumps`.
+Twelve kilobytes each: a header, a search box, an error panel, a link home.
+
+**They are byte-identical apart from the hostname in three links.** The title is
+`The page is not found!` on both — English on the Norwegian storefront too — and
+`is_not_found_page` matched none of its three markers against either. That is
+what #59 is: exit code 23 had no live producer, so every dead id reported the
+scraper as broken.
+
+Two things about these pages are worth knowing before writing a test against
+them:
+
+- **`id="error-page-404"` and the `data-testid="error-page-*"` attributes are
+  the durable markers.** They carry no prose, so they survive the copy change
+  that would otherwise retire the detection a second time. The title is checked
+  too, as a second independent signal.
+- **The US capture carries Cloudflare's `challenge-platform` bootstrap and the
+  Norwegian one does not**, on the same page fetched seconds apart. Two ordinary
+  pages in the current corpus carry it as well —
+  `product-12949-nordic-ultimate-omega-nok` and
+  `search-vitamin-d3-price-asc-nok`. Any Cloudflare detector that matches
+  `challenge-platform` against the whole document therefore reports four
+  captured pages here as challenges, which is #23's caveat measured rather than
+  predicted.
+
+They are registered outside `REGISTRY` in `tests/parsers/fixture.rs`, so
+`fixture::all()` does not hand them to a sweep that assumes a content page.
+`fixture::not_found_pages()` is how a test asks for them.
 
 ## The JSON side-fixture
 
