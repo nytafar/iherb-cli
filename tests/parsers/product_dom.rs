@@ -795,14 +795,22 @@ fn one_product_page_carries_no_supplement_facts_and_it_is_the_toothpaste() {
     );
 }
 
-/// `servings_per_container` is optional, and four of #8's twelve captures prove
-/// it — for two different reasons, only one of which is the page's own doing.
+/// `servings_per_container` is absent on two pages, and on both of them that is
+/// the page's own answer (#54).
 ///
-/// This is the assertion the old sweep made that could not have failed: eight
-/// pages, all of which happened to state the row, all of which happened to
-/// spell it the one way the parser matches.
+/// It used to be four, "for two different reasons, only one of which is the
+/// page's own doing". #54 removed the reason that was ours: two pages spell the
+/// row `Serving Per Container`, singular, and the parser matched only the
+/// plural, so it read past a row the page had filled in. Those two now report
+/// what they state and have left this set, exactly as this test's old failure
+/// message said they should.
+///
+/// What is left is the honest half. Neither page below mentions a per-container
+/// count in any spelling, so `None` is the whole truth about them, and keeping
+/// them pinned here is what stops a later "fix" from inventing a number for a
+/// label that never published one.
 #[test]
-fn servings_per_container_is_absent_on_four_pages_for_two_different_reasons() {
+fn servings_per_container_is_absent_on_two_pages_that_never_stated_it() {
     let without: Vec<&str> = fixture::products()
         .filter_map(|f| parse_supplement_facts_html(&f.doc()).map(|facts| (f, facts)))
         .filter(|(_, facts)| facts.servings_per_container.is_none())
@@ -811,40 +819,104 @@ fn servings_per_container_is_absent_on_four_pages_for_two_different_reasons() {
 
     assert_eq!(
         without,
-        vec![
-            LITHIUM_MICRO_TABLETS.slug(),
-            SUPREME_C_TABLETS.slug(),
-            BUTYRATE_TWO_CAP_SERVING.slug(),
-            R_LIPOIC_TINY_ID.slug(),
-        ],
-        "the set of pages without a servings-per-container reading changed; if \
-         the parser was taught the singular spelling, the last two rows are the \
-         ones that should have left"
+        vec![LITHIUM_MICRO_TABLETS.slug(), SUPREME_C_TABLETS.slug()],
+        "the set of pages without a servings-per-container reading changed; a \
+         page joining it is a row being read past, and a page leaving it is a \
+         count being invented"
     );
 
-    // Reason one: the page never says it. Neither of these two pages contains
-    // the phrase in any spelling, so `None` is the whole truth about them.
+    // And the reason, measured rather than remembered: the phrase is not on
+    // either page, in any spelling or any case.
     for f in [LITHIUM_MICRO_TABLETS, SUPREME_C_TABLETS] {
-        assert!(
-            !f.html().to_lowercase().contains("per container"),
-            "{} does state a per-container count after all",
+        assert_eq!(
+            f.html().to_lowercase().matches("per container").count(),
+            0,
+            "{} does state a per-container count after all, so its `None` is \
+             this parser's fault rather than the page's",
             f.slug()
         );
     }
+}
 
-    // Reason two, and the one that is ours: these two pages *do* state it, and
-    // spell it "Serving Per Container" — singular. `parse_supplement_facts_html`
-    // matches `"servings per"`, so it reads past them and answers `None` for a
-    // page that gave an answer.
-    //
-    // Not fixed here. This commit adds fixtures; the gap it exposes is parser
-    // work, and a production change buried in a fixture commit is a change
-    // nobody reviews. Filed as #54, and this test is what will go red when it
-    // is fixed.
-    for f in [BUTYRATE_TWO_CAP_SERVING, R_LIPOIC_TINY_ID] {
+/// The singular spelling is read, and a page that states nothing still says
+/// nothing (#54).
+///
+/// # Both directions, because "None" has two causes and only one is a bug
+///
+/// `servings_per_container: None` means either
+///
+///  1. the page printed `Serving Per Container` and the parser missed it — the
+///     bug, and these pages have to start answering; or
+///  2. the page printed no such row at all — not a bug, and these pages have to
+///     keep answering `None`.
+///
+/// A test that only walked direction 1 would pass against a parser that had
+/// learned to guess: match loosely enough, or fall back to any number near the
+/// serving size, and the singular pages start answering while a page that
+/// published nothing starts answering too. Five of the twenty-five products in
+/// a recent ranking are direction 2 — product 692's HTML contains `per
+/// container` zero times, in any spelling — so the wrong fix would be wrong on
+/// a fifth of a real run and right on every fixture the singular half checks.
+///
+/// The values are pinned, not merely `is_some()`. "It reads *a* number now" is
+/// the assertion that passes when the parser has started reading the serving
+/// size instead.
+#[test]
+fn a_singular_serving_per_container_is_read_and_an_unstated_one_is_still_none() {
+    // Direction 1: stated in the singular, and now recovered.
+    for (f, stated) in [(BUTYRATE_TWO_CAP_SERVING, "125"), (R_LIPOIC_TINY_ID, "60")] {
         assert!(
             f.html().contains("Serving Per Container"),
             "{} was supposed to be a singular-spelling page",
+            f.slug()
+        );
+        assert!(
+            !f.html().contains("Servings Per Container"),
+            "{} spells it plural somewhere too, so it no longer isolates #54",
+            f.slug()
+        );
+
+        let facts = parse_supplement_facts_html(&f.doc())
+            .unwrap_or_else(|| panic!("{} has a Supplement Facts panel", f.slug()));
+        assert_eq!(
+            facts.servings_per_container.as_deref(),
+            Some(stated),
+            "{} prints `Serving Per Container: {}` and the parser must read it",
+            f.slug(),
+            stated
+        );
+    }
+
+    // Direction 2: never stated, and still nothing. This is the direction a
+    // loosened match breaks, and the one no singular fixture can check.
+    for f in [LITHIUM_MICRO_TABLETS, SUPREME_C_TABLETS] {
+        assert_eq!(
+            f.html().to_lowercase().matches("per container").count(),
+            0,
+            "{} is only evidence about direction 2 while it states nothing",
+            f.slug()
+        );
+
+        let facts = parse_supplement_facts_html(&f.doc())
+            .unwrap_or_else(|| panic!("{} has a Supplement Facts panel", f.slug()));
+        assert_eq!(
+            facts.servings_per_container,
+            None,
+            "{} publishes no serving count and the parser invented one: {:?}",
+            f.slug(),
+            facts.servings_per_container
+        );
+    }
+
+    // And the plural pages, which were never broken, are not broken now. The
+    // values rather than their presence, for the same reason as above.
+    for (f, stated) in [(ULTIMATE_OMEGA, "90"), (TWO_A_DAY, "30")] {
+        assert!(f.html().contains("Servings Per Container"), "{}", f.slug());
+        let facts = parse_supplement_facts_html(&f.doc()).unwrap();
+        assert_eq!(
+            facts.servings_per_container.as_deref(),
+            Some(stated),
+            "{}",
             f.slug()
         );
     }

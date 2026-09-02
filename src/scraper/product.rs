@@ -911,6 +911,34 @@ fn extract_rating_from_stars(doc: &Html) -> Option<f64> {
     title.split('/').next()?.trim().parse::<f64>().ok()
 }
 
+/// Whether a merged Supplement Facts row is the servings-per-container line
+/// (#54).
+///
+/// The match used to be `contains("servings per")`, plural, and iHerb is not
+/// consistent about it: some labels print `Servings Per Container`, some print
+/// `Serving Per Container`. On the singular pages the row was read past and
+/// `servings_per_container` came back `None` for a page that had stated it —
+/// two of the twelve captures in this repository, and both of them recovered
+/// by this.
+///
+/// It was invisible until #8 captured a corpus wide enough to contain a
+/// counterexample: every page here before that was a US supplement that
+/// happened to spell it plural, so the rule was one no available page could
+/// break.
+///
+/// # This does not make a missing row into a present one
+///
+/// The two halves both have to be there, and `"per container"` is the half that
+/// carries it: a page that never mentions a per-container count matches
+/// nothing here and still answers `None`, which is the right answer and a
+/// different fact from this bug. Five of the twenty-five products in a recent
+/// ranking were that case — NOW Foods publishes a serving size and no serving
+/// count on product 692 at all — and deriving a count for them is #40's
+/// problem, from the units in the title, not this one's.
+fn is_servings_per_container_row(lower: &str) -> bool {
+    lower.contains("serving") && lower.contains("per container")
+}
+
 pub fn parse_supplement_facts_html(doc: &Html) -> Option<SupplementFacts> {
     let table_sel =
         Selector::parse(".supplement-facts-container table, table.supplement-facts-table").ok()?;
@@ -935,7 +963,7 @@ pub fn parse_supplement_facts_html(doc: &Html) -> Option<SupplementFacts> {
             let lower = text.to_lowercase();
             if lower.contains("serving size") {
                 serving_size = text.split_once(':').map(|(_, v)| v.trim().to_string());
-            } else if lower.contains("servings per") {
+            } else if is_servings_per_container_row(&lower) {
                 servings_per_container = text.split_once(':').map(|(_, v)| v.trim().to_string());
             }
             continue;
