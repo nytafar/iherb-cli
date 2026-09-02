@@ -56,6 +56,7 @@
 mod fixture;
 
 mod cache_keys;
+mod cloudflare;
 mod golden;
 mod helpers;
 mod product_dom;

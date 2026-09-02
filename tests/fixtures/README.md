@@ -281,6 +281,46 @@ They are registered outside `REGISTRY` in `tests/parsers/fixture.rs`, so
 `fixture::all()` does not hand them to a sweep that assumes a content page.
 `fixture::not_found_pages()` is how a test asks for them.
 
+## The one page nobody received (#23)
+
+`cloudflare-managed-challenge-synthetic.html.gz` is **synthesized, not
+captured**, and it is named that way so no reader has to check.
+
+This programme has never been served a Cloudflare challenge: 28 searches and 12
+captures across two storefronts, not one interstitial. Clearance is therefore
+**unmeasured, not confirmed**, and there is no real challenge page to commit.
+The choice was a synthetic fixture or no positive test at all.
+
+Reconstructed from Cloudflare's published managed-challenge markup: the
+`#challenge-running` heading, the `#challenge-stage` wrapper, the
+`.cf-turnstile` widget with its `challenges.cloudflare.com` iframe, the
+`#challenge-form` POST, the `window._cf_chl_opt` block, and the footer's Ray ID
+and "Performance & security by Cloudflare" line. Every value that would be a
+real token reads `SYNTHETIC`.
+
+| | |
+|---|---|
+| proves | a page shaped like Cloudflare's own is classified `cloudflare_blocked` rather than falling through to extraction and being reported as a missing product |
+| does not prove | that iHerb's challenge, when one arrives, is shaped like this |
+| does not prove | that a challenge is ever cleared, or ever received |
+
+When a real one is captured it belongs here **beside** this file, not in place
+of it — the synthetic page is what pins the classifier's rules, and a capture
+would pin something different.
+
+The negative direction needs no synthesis and is the stronger half of #23's
+testing.  `cloudflare::no_page_iherb_served_is_classified_as_a_challenge` sweeps
+all twenty-three pages iHerb actually served — every page in `REGISTRY` plus the
+two not-found captures — under `content_present: Some(false)`, the setting that
+arms the weak tier. That is the mistake this change could introduce where none
+existed, and it is checked against real pages rather than reasoning.
+
+`cloudflare::the_forks_markers_hit_pages_that_are_not_challenges` pins why: the
+`caozhuozi` fork matches `Cloudflare`, `cf-turnstile` and `challenge-platform`
+against `documentElement.innerHTML`, and three captures here carry
+`challenge-platform` in a script tag. Not one carries any of those words in
+rendered text, which is why this repository reads `body.innerText` instead.
+
 ## The JSON side-fixture
 
 One parser is never fed page HTML and cannot be filled from these captures:

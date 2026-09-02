@@ -237,18 +237,63 @@ pub const NOT_FOUND_NO: Fixture = Fixture {
     gz: include_bytes!("../fixtures/notfound-product-99999999-nok.html.gz"),
 };
 
+/// A Cloudflare managed challenge — **synthesized, not captured** (#23).
+///
+/// This programme has never received a live challenge: 28 searches and 12
+/// captures, not one interstitial, so clearance is *unmeasured* rather than
+/// confirmed and there is no real page to commit here. The alternative to a
+/// synthetic fixture was no positive test at all, and the alternative to saying
+/// so is a suite that looks like it has seen something it has not.
+///
+/// Reconstructed from Cloudflare's published managed-challenge page: the
+/// `#challenge-running` heading, the `#challenge-stage` wrapper, the
+/// `.cf-turnstile` widget and its `challenges.cloudflare.com` iframe, the
+/// `#challenge-form` POST, the `window._cf_chl_opt` block, and the footer's
+/// Ray ID and "Performance & security by Cloudflare" line. Every value that
+/// would be a real token reads `SYNTHETIC`.
+///
+/// **What it proves:** that a page shaped like Cloudflare's own is classified
+/// `cloudflare_blocked` rather than falling through to extraction and being
+/// reported as a missing product. **What it does not prove:** that iHerb's
+/// challenge, when one finally arrives, is shaped like this one. Only a capture
+/// can prove that, and when one exists it belongs here beside this file rather
+/// than replacing it.
+pub const CHALLENGE_SYNTHETIC: Fixture = Fixture {
+    slug: "cloudflare-managed-challenge-synthetic",
+    product_id: "",
+    currency: "",
+    base_url: US_STOREFRONT,
+    gz: include_bytes!("../fixtures/cloudflare-managed-challenge-synthetic.html.gz"),
+};
+
 /// Pages that load like any other fixture but must never enter a sweep.
 ///
 /// [`all`] means "every page a parser is expected to read", and every sweep
 /// written against it asserts something no error page can satisfy: that it
-/// declares a currency, that it is not mistaken for a 404. The not-found
-/// captures are neither product pages nor listings, so they are addressed by
-/// name — [`NOT_FOUND_US`], [`NOT_FOUND_NO`] — and inflated alongside the rest.
-const OFF_REGISTRY: &[Fixture] = &[NOT_FOUND_US, NOT_FOUND_NO];
+/// declares a currency, that it is not mistaken for a 404. None of these is a
+/// product page or a listing, so each is addressed by name —
+/// [`NOT_FOUND_US`], [`NOT_FOUND_NO`], [`CHALLENGE_SYNTHETIC`] — and inflated
+/// alongside the rest.
+///
+/// [`CHALLENGE_SYNTHETIC`] carries a second reason: it is the one file here
+/// this repository did not receive from a server, and letting it into a sweep
+/// would put a page nobody has seen served on the same footing as
+/// twenty-three that were.
+const OFF_REGISTRY: &[Fixture] = &[NOT_FOUND_US, NOT_FOUND_NO, CHALLENGE_SYNTHETIC];
 
 /// Both not-found captures, for the tests that must hold on either storefront.
 pub fn not_found_pages() -> impl Iterator<Item = Fixture> {
-    OFF_REGISTRY.iter().copied()
+    [NOT_FOUND_US, NOT_FOUND_NO].into_iter()
+}
+
+/// Every page iHerb actually served to this repository.
+///
+/// [`all`] plus the two error captures, and pointedly **not**
+/// [`CHALLENGE_SYNTHETIC`], which nobody received. A sweep asserting "this is
+/// what the real site looks like" has to be able to say which files that
+/// covers.
+pub fn pages_iherb_served() -> impl Iterator<Item = Fixture> {
+    all().chain(not_found_pages())
 }
 
 /// Every page the suite can load, for tests that sweep all of them.

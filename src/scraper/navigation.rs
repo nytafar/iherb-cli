@@ -6,7 +6,175 @@ use std::time::Duration;
 
 const MAX_CLOUDFLARE_RETRIES: u32 = 3;
 const CLOUDFLARE_WAIT_SECS: u64 = 12;
-const CLOUDFLARE_TITLE_MARKERS: &[&str] = &["Just a moment", "Attention Required"];
+/// Elements only a Cloudflare interstitial carries (#23).
+///
+/// The **strong** signal, and the one that carries the detection: a challenge
+/// page is a challenge page whatever language it is written in, and these are
+/// the hooks its own markup hangs on. `document.title` alone — which is all
+/// this file checked before — is English-only twice over: it misses every
+/// localized interstitial, and it misses a Turnstile challenge that sets no
+/// matching title at all.
+///
+/// **Bounded on purpose.** The `caozhuozi` fork checks `"Cloudflare"`,
+/// `"cf-turnstile"` and `"challenge-platform"` against
+/// `documentElement.innerHTML`, and that is not a detector of challenges — it
+/// is a detector of iHerb, which is behind Cloudflare on every page it serves.
+/// Measured against this repository's captures:
+/// `product-12949-nordic-ultimate-omega-nok`,
+/// `search-vitamin-d3-price-asc-nok` and `notfound-product-99999999` all carry
+/// `challenge-platform` in a script tag, so the fork's list reports three
+/// ordinary pages as blocked. None of the twenty-three captures matches
+/// anything below.
+///
+/// `challenges.cloudflare.com` is matched on an `iframe` `src` rather than
+/// anywhere in the markup, because the bootstrap iHerb serves on ordinary pages
+/// is a *srcless* 1×1 iframe that later loads
+/// `/cdn-cgi/challenge-platform/scripts/jsd/main.js` into itself. It has no
+/// `src` of its own, so it does not match this, and a real challenge's visible
+/// widget does.
+pub const CHALLENGE_ELEMENT_SELECTORS: &[&str] = &[
+    "form#challenge-form",
+    "#challenge-running",
+    "#challenge-stage",
+    ".cf-turnstile",
+    "#cf-turnstile",
+    "#cf-error-details",
+    r#"iframe[src*="challenges.cloudflare.com"]"#,
+];
+
+/// Titles Cloudflare's interstitials set, compared case-insensitively against
+/// `document.title` alone.
+///
+/// The first two were already here. The two Chinese ones are **carried from the
+/// `caozhuozi` fork on the fork's word** — this programme has never received a
+/// live challenge, so nothing here has seen either of them arrive. They are
+/// safe to carry because they are matched against the title and nothing else:
+/// a wrong marker in this list costs a missed detection, never a false one.
+///
+/// The list is deliberately short rather than padded with guesses at the other
+/// storefront languages iHerb serves. An invented marker for a language nobody
+/// has checked would look like coverage and be none;
+/// [`CHALLENGE_ELEMENT_SELECTORS`] is what actually covers them, because markup
+/// is not translated.
+const CHALLENGE_TITLE_MARKERS: &[&str] = &[
+    "just a moment",
+    "attention required",
+    "请稍候",
+    "正在进行安全验证",
+];
+
+/// Cloudflare's own visible copy, compared case-insensitively against
+/// `body.innerText`.
+///
+/// The **weak** signal, and it is never enough on its own — see
+/// [`is_challenge_page`]. `innerText` rather than `innerHTML` is what makes it
+/// weak-but-usable: script and style contents are not in it, so the
+/// `challenge-platform` bootstrap that every iHerb page carries cannot reach
+/// this comparison. Measured: not one of the twenty-three captured pages has
+/// any of these words in its visible text.
+const CHALLENGE_TEXT_MARKERS: &[&str] = &[
+    "cloudflare",
+    "turnstile",
+    "verify you are human",
+    "verifying you are human",
+    "checking your browser",
+    "security of your connection",
+];
+
+/// What one look at a page saw, for [`is_challenge_page`] to judge (#23).
+///
+/// A struct rather than a `bool` returned from the browser, so that the
+/// *decision* is a pure function of named facts and can be asserted without a
+/// browser. The facts themselves still come from the browser — the whole point
+/// of `innerText` is that it is what a renderer computed — but which
+/// combination of them means "blocked" is the part that was wrong, and it is
+/// the part a test can now reach.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+pub struct ChallengeSignals {
+    /// `document.title`.
+    pub title: String,
+    /// `body.innerText`, truncated. Rendered text only: no script or style
+    /// contents, and no markup.
+    pub body_text: String,
+    /// Whether any of [`CHALLENGE_ELEMENT_SELECTORS`] is in the document.
+    pub challenge_element: bool,
+    /// Whether a selector proving *this page's own data* rendered is present.
+    ///
+    /// `None` when the target has no such selector to check
+    /// ([`ReadinessTarget::DocumentComplete`]), which is a different answer
+    /// from "no content" and is treated as one: a weak signal alone never
+    /// blocks a run on a page whose shape nothing here knows.
+    pub content_present: Option<bool>,
+}
+
+/// Is this page a Cloudflare challenge rather than the page that was asked for?
+/// (#23)
+///
+/// Two tiers, because the cost of the two mistakes is not the same. A missed
+/// challenge is reported as `product_not_found` or `parse_failed`, and the
+/// agent abandons a valid id or a human is paged about selectors that are fine.
+/// A false detection is reported as `cloudflare_blocked` after three waits, and
+/// the agent abandons a page that was right there. Both are bad; the second is
+/// the one this change could create where none existed, so the weak tier is
+/// fenced.
+///
+/// **Strong — blocked on its own:**
+///
+///  1. A challenge element is present ([`CHALLENGE_ELEMENT_SELECTORS`]).
+///  2. The title is one Cloudflare sets ([`CHALLENGE_TITLE_MARKERS`]).
+///
+/// **Weak — blocked only together with the absence of the page's own content:**
+///
+///  3. Cloudflare's visible copy is in `body.innerText`
+///     ([`CHALLENGE_TEXT_MARKERS`]) **and** no readiness selector for this
+///     target is present. This is the second half of #23's proposal, and the
+///     readiness work from #11 is what makes it answerable: "no product or
+///     search selector appeared and something says Cloudflare" is a challenge,
+///     where either half alone is not.
+///
+/// # What this is not tested against
+///
+/// A live challenge. This programme has run 28 searches and 12 captures without
+/// ever receiving one, so clearance is **unmeasured, not confirmed**, and the
+/// positive case in `tests/parsers/cloudflare.rs` is synthesized from
+/// Cloudflare's published interstitial markup rather than captured. What the
+/// tests do prove is the direction that can be measured here: that none of the
+/// twenty-three real pages in this repository is classified as a challenge.
+pub fn is_challenge_page(signals: &ChallengeSignals) -> bool {
+    if signals.challenge_element {
+        return true;
+    }
+
+    let title = signals.title.to_lowercase();
+    if CHALLENGE_TITLE_MARKERS
+        .iter()
+        .any(|marker| title.contains(marker))
+    {
+        return true;
+    }
+
+    // The weak tier. `Some(false)` and nothing else: `None` means the target
+    // had no selector to check, which is not evidence that content is missing.
+    if signals.content_present == Some(false) {
+        let text = signals.body_text.to_lowercase();
+        if CHALLENGE_TEXT_MARKERS
+            .iter()
+            .any(|marker| text.contains(marker))
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// How much of `body.innerText` is read back from the browser.
+///
+/// Enough to hold a challenge page's whole visible text several times over, and
+/// far short of a product page's. The markers are all near the top of an
+/// interstitial because an interstitial has nothing else on it.
+const BODY_TEXT_SAMPLE: usize = 4_000;
 
 /// The domain iHerb's own cookies are scoped to, so one preference covers every
 /// storefront subdomain exactly as the site's own picker does.
@@ -415,7 +583,7 @@ impl Navigator {
         timing.goto = started.elapsed();
 
         let cloudflare_started = std::time::Instant::now();
-        let cloudflare = self.clear_cloudflare(page).await;
+        let cloudflare = self.clear_cloudflare(page, readiness).await;
         timing.cloudflare_check = cloudflare_started.elapsed();
         cloudflare?;
 
@@ -492,9 +660,13 @@ impl Navigator {
     /// Lifted out of [`Navigator::navigate`] unchanged in behaviour, so that
     /// `--timing` can charge it its own phase rather than folding it into the
     /// readiness wait it precedes.
-    async fn clear_cloudflare(&self, page: &Page) -> Result<(), IherbError> {
+    async fn clear_cloudflare(
+        &self,
+        page: &Page,
+        readiness: ReadinessTarget,
+    ) -> Result<(), IherbError> {
         for attempt in 1..=MAX_CLOUDFLARE_RETRIES {
-            if !self.is_cloudflare_challenge(page).await {
+            if !self.is_cloudflare_challenge(page, readiness).await {
                 break;
             }
 
@@ -529,7 +701,7 @@ impl Navigator {
             let total_checks = (CLOUDFLARE_WAIT_SECS * 1000) / check_interval_ms;
             for _ in 0..total_checks {
                 tokio::time::sleep(Duration::from_millis(check_interval_ms)).await;
-                if !self.is_cloudflare_challenge(page).await {
+                if !self.is_cloudflare_challenge(page, readiness).await {
                     tracing::info!("Cloudflare challenge resolved early");
                     break;
                 }
@@ -571,21 +743,90 @@ impl Navigator {
         Err(last_err.unwrap())
     }
 
-    async fn is_cloudflare_challenge(&self, page: &Page) -> bool {
-        match page.evaluate("document.title").await {
-            Ok(val) => {
-                let title = val.into_value::<String>().unwrap_or_default();
-                CLOUDFLARE_TITLE_MARKERS
-                    .iter()
-                    .any(|marker| title.contains(marker))
-            }
-            Err(_) => false,
+    /// Read the four facts [`is_challenge_page`] judges, in one round trip.
+    ///
+    /// One `evaluate` rather than four, because this runs before every
+    /// readiness wait and again once a second while a challenge is being waited
+    /// out. The content probe is a single `querySelector` and never a wait: the
+    /// phase order in [`Navigator::navigate`] exists because an interstitial is
+    /// a complete page containing none of the readiness selectors, and spending
+    /// the readiness budget here would give that back.
+    ///
+    /// A failed evaluation answers "not a challenge". It always did. The
+    /// alternative is to block a run because a CDP call did not come back,
+    /// which converts a transport hiccup into a wrong classification of a page
+    /// nobody looked at.
+    async fn probe_challenge(&self, page: &Page, readiness: ReadinessTarget) -> ChallengeSignals {
+        let script = challenge_probe_script(readiness.selectors());
+
+        let Ok(value) = page.evaluate(script.as_str()).await else {
+            return ChallengeSignals::default();
+        };
+        let Ok(json) = value.into_value::<String>() else {
+            return ChallengeSignals::default();
+        };
+        serde_json::from_str(&json).unwrap_or_default()
+    }
+
+    async fn is_cloudflare_challenge(&self, page: &Page, readiness: ReadinessTarget) -> bool {
+        let signals = self.probe_challenge(page, readiness).await;
+        let blocked = is_challenge_page(&signals);
+        if blocked {
+            tracing::debug!(
+                "Challenge signals: title={:?} element={} content_present={:?}",
+                signals.title,
+                signals.challenge_element,
+                signals.content_present,
+            );
         }
+        blocked
     }
 
     pub async fn rate_limit_delay(&self) {
         tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
     }
+}
+
+/// The script [`Navigator::probe_challenge`] evaluates, for `content_selectors`.
+///
+/// A free function so a test can read what is sent. The failure it exists to
+/// catch is silent: rename a field here or in [`ChallengeSignals`] and
+/// deserialization falls back to `Default`, which is "not a challenge" for every
+/// page forever, with nothing in the log to say so.
+pub fn challenge_probe_script(content_selectors: &[&str]) -> String {
+    format!(
+        r#"(function () {{
+    const any = (list) => list.some((s) => {{
+        try {{ return document.querySelector(s) !== null; }} catch (e) {{ return false; }}
+    }});
+    const body = document.body;
+    return JSON.stringify({{
+        title: document.title || "",
+        body_text: (body && body.innerText ? body.innerText : "").slice(0, {sample}),
+        challenge_element: any({challenge}),
+        content_present: {content}
+    }});
+}})()"#,
+        sample = BODY_TEXT_SAMPLE,
+        challenge = json_string_array(CHALLENGE_ELEMENT_SELECTORS),
+        content = if content_selectors.is_empty() {
+            "null".to_string()
+        } else {
+            format!("any({})", json_string_array(content_selectors))
+        },
+    )
+}
+
+/// A Rust `&[&str]` as a JavaScript array literal.
+///
+/// Through `serde_json` rather than by joining with quotes, because a selector
+/// containing a `"` — `iframe[src*="challenges.cloudflare.com"]` does — would
+/// otherwise end the string early and produce a script that throws. The
+/// selectors are compile-time constants, so this cannot fail on anything a
+/// caller supplies; it is here because the escaping has to be right, not
+/// because the input is untrusted.
+fn json_string_array(items: &[&str]) -> String {
+    serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Name a navigation failure while `chromiumoxide`'s own error is still typed.
