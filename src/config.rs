@@ -91,6 +91,73 @@ pub fn parse_duration(text: &str) -> Result<Duration, IherbError> {
         })
 }
 
+/// Where a caller named the browser executable.
+///
+/// Carried rather than discarded (#55) for two reasons, and the second is the
+/// one that matters. The first is that an error can then say *which* of the
+/// three to go and edit. The second is that the source is the only thing that
+/// could have justified treating the three differently — and having it in hand
+/// is what makes the decision below a decision rather than an accident of them
+/// sharing a type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowserPathSource {
+    /// `--browser-path`, on this invocation.
+    Flag,
+    /// The `IHERB_BROWSER_PATH` environment variable.
+    Env,
+    /// `browser_path` under `[defaults]` in the named config file.
+    ConfigFile(PathBuf),
+}
+
+impl BrowserPathSource {
+    /// How to name this source to someone who has to go and correct it.
+    pub fn describe(&self) -> String {
+        match self {
+            BrowserPathSource::Flag => "--browser-path".to_string(),
+            BrowserPathSource::Env => "IHERB_BROWSER_PATH".to_string(),
+            BrowserPathSource::ConfigFile(path) => {
+                format!("browser_path in {}", path.display())
+            }
+        }
+    }
+}
+
+/// A browser executable the caller named, and where they named it.
+///
+/// # All three sources bind, and that is the decision (#55)
+///
+/// `--browser-path /nonexistent` used to exit 0 with `ok: true` and a full
+/// record, having quietly used system Chrome. #55 asks that an explicit flag
+/// stop doing that, and asks separately that whatever happens to the
+/// environment variable and the config file be *decided* rather than inherited
+/// from the three sharing an `Option<PathBuf>`.
+///
+/// They are decided the same way: **a browser you named is the browser that
+/// runs, or the run fails.** The argument for exempting the config file is that
+/// a months-old entry pointing at a moved binary would break a setup that a
+/// fall-through would have rescued. It does not survive contact with what the
+/// fall-through actually costs. The substitution is silent, the record that
+/// comes back is indistinguishable from one the named browser produced, and
+/// #12 makes that concretely dangerous: Cloudflare clearance earned in a
+/// profile belongs to *a browser*, so a run that silently used a different one
+/// looks like clearance that stopped working. Against that, a hard failure
+/// that names the path and the file to edit costs one correction, once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatedBrowserPath {
+    pub path: PathBuf,
+    pub source: BrowserPathSource,
+}
+
+impl StatedBrowserPath {
+    pub fn new(path: PathBuf, source: BrowserPathSource) -> Self {
+        Self { path, source }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub country: String,
@@ -110,7 +177,12 @@ pub struct AppConfig {
     pub debug: bool,
     /// A browser window you can see. Says nothing about logging (#62).
     pub headful: bool,
-    pub browser_path: Option<PathBuf>,
+    /// The browser executable the caller named, with the source that named it.
+    ///
+    /// `None` means nobody named one, which is the only case
+    /// [`crate::browser::resolve::resolve_chrome`] is still free to fall
+    /// through on (#55).
+    pub browser_path: Option<StatedBrowserPath>,
     pub cache_dir: PathBuf,
     pub data_dir: PathBuf,
 }
@@ -119,6 +191,11 @@ pub struct AppConfig {
 struct ConfigFile {
     #[serde(default)]
     defaults: ConfigDefaults,
+    /// The file these defaults were read from, so an error about one of them
+    /// can name the file to edit (#55). Not a key in the file: filled in by
+    /// [`read_config_file`], and empty for the defaults nobody read.
+    #[serde(skip)]
+    path: PathBuf,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -197,8 +274,19 @@ impl AppConfig {
         let browser_path = args
             .browser_path
             .clone()
-            .or_else(|| browser_path_env.map(PathBuf::from))
-            .or_else(|| file_config.defaults.browser_path.map(PathBuf::from));
+            .map(|path| StatedBrowserPath::new(path, BrowserPathSource::Flag))
+            .or_else(|| {
+                browser_path_env
+                    .map(|path| StatedBrowserPath::new(PathBuf::from(path), BrowserPathSource::Env))
+            })
+            .or_else(|| {
+                file_config.defaults.browser_path.clone().map(|path| {
+                    StatedBrowserPath::new(
+                        PathBuf::from(path),
+                        BrowserPathSource::ConfigFile(file_config.path.clone()),
+                    )
+                })
+            });
 
         let cache_ttl = match args.cache_ttl.as_deref() {
             Some(text) => parse_duration(text)?,
@@ -293,6 +381,9 @@ fn read_config_file(path: &Path) -> Result<ConfigFile, IherbError> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         IherbError::InvalidInput(format!("Could not read {}: {}", path.display(), e))
     })?;
-    toml::from_str(&content)
-        .map_err(|e| IherbError::InvalidInput(format!("Could not parse {}: {}", path.display(), e)))
+    let mut config: ConfigFile = toml::from_str(&content).map_err(|e| {
+        IherbError::InvalidInput(format!("Could not parse {}: {}", path.display(), e))
+    })?;
+    config.path = path.to_path_buf();
+    Ok(config)
 }

@@ -41,6 +41,14 @@ iherb-cli product 12949 --browser-path /usr/bin/chromium
 cannot set an environment variable on a subprocess had no way to reach steps 1
 or 2 and fell through to a download (#22).
 
+**A browser you name binds.** If the path in step 1 does not exist, the run
+fails with `invalid_input` (2) and names both the path and where you named it.
+It used to warn on stderr and quietly use system Chrome instead, so
+`--browser-path /nonexistent --json` exited 0 with `ok: true` and a full record
+produced by a browser you never asked for (#55). All three sources in step 1
+behave this way — the flag, the environment variable and the config file — and
+only steps 2 and 3 fall through, because nobody named those.
+
 ## Usage
 
 ```
@@ -147,7 +155,7 @@ Take 1 capsule daily with or without food.
 | `--no-cache` | Touch the cache for neither reads nor writes | — |
 | `--refresh` | Skip the cache on the way in, write the result on the way out | — |
 | `--cache-ttl <duration>` | How long an entry stays usable: `30d`, `12h`, `45m`, `90s`, `2w` | `30d` |
-| `--browser-path <path>` | Chrome or Chromium executable. Outranks `IHERB_BROWSER_PATH` and the config file | — |
+| `--browser-path <path>` | Chrome or Chromium executable. Outranks `IHERB_BROWSER_PATH` and the config file. A path that does not exist is `invalid_input` (2), never a silent fallback | — |
 | `--config <path>` | Read this config file instead of the one under the user's config dir | — |
 | `--delay <ms>` | Delay between requests in milliseconds | `2000` |
 | `--json` | Emit one JSON document on stdout instead of Markdown — see below | — |
@@ -435,7 +443,9 @@ country = "ch"
 currency = "CHF"
 # Optional. Same spelling as --cache-ttl.
 cache_ttl = "12h"
-# Optional. Outranked by --browser-path and IHERB_BROWSER_PATH.
+# Optional. Outranked by --browser-path and IHERB_BROWSER_PATH. A path here
+# that does not exist fails the run naming this file, rather than falling
+# through to system Chrome (#55).
 browser_path = "/usr/bin/chromium"
 delay_ms = 2000
 ```

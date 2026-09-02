@@ -25,7 +25,9 @@ use std::time::{Duration, SystemTime};
 
 use iherb_cli::cache::{Cache, CacheKey, ClearFilter};
 use iherb_cli::cli::{GlobalArgs, SortOrder};
-use iherb_cli::config::{parse_duration, AppConfig, CacheMode, DEFAULT_CACHE_TTL};
+use iherb_cli::config::{
+    parse_duration, AppConfig, BrowserPathSource, CacheMode, DEFAULT_CACHE_TTL,
+};
 use iherb_cli::error::{classify_error, ErrorKind};
 
 /// Serializes the tests that mutate the process environment. See the module
@@ -265,6 +267,11 @@ fn the_two_cache_flags_resolve_as_documented() {
 ///
 /// All three sources are populated at once and each is distinct, so the test
 /// says which one won rather than merely that something was resolved.
+///
+/// Since #55 it also asserts the *source* that won, not only the path. The
+/// source is what an error about a path that does not exist names, and a
+/// resolution that produced the right path under the wrong label would send a
+/// caller to edit the wrong place.
 #[test]
 fn the_browser_path_flag_outranks_the_environment_and_the_file() {
     let _guard = env_lock();
@@ -287,7 +294,9 @@ fn the_browser_path_flag_outranks_the_environment_and_the_file() {
         ..GlobalArgs::none()
     })
     .expect("config");
-    assert_eq!(with_flag.browser_path.as_deref(), Some(from_flag.as_path()));
+    let with_flag = with_flag.browser_path.expect("the flag names a browser");
+    assert_eq!(with_flag.path(), from_flag.as_path());
+    assert_eq!(with_flag.source, BrowserPathSource::Flag);
 
     // Drop the flag and the environment takes over; drop that and the file does.
     let without_flag = AppConfig::load(&GlobalArgs {
@@ -295,18 +304,27 @@ fn the_browser_path_flag_outranks_the_environment_and_the_file() {
         ..GlobalArgs::none()
     })
     .expect("config");
-    assert_eq!(
-        without_flag.browser_path.as_deref(),
-        Some(from_env.as_path())
-    );
+    let without_flag = without_flag
+        .browser_path
+        .expect("the environment names one");
+    assert_eq!(without_flag.path(), from_env.as_path());
+    assert_eq!(without_flag.source, BrowserPathSource::Env);
 
     std::env::remove_var("IHERB_BROWSER_PATH");
+    let config_path_for_source = config_path.clone();
     let file_only = AppConfig::load(&GlobalArgs {
         config: Some(config_path),
         ..GlobalArgs::none()
     })
     .expect("config");
-    assert_eq!(file_only.browser_path.as_deref(), Some(from_file.as_path()));
+    let file_only = file_only.browser_path.expect("the file names one");
+    assert_eq!(file_only.path(), from_file.as_path());
+    assert_eq!(
+        file_only.source,
+        BrowserPathSource::ConfigFile(config_path_for_source),
+        "a path read out of a config file has to remember which file, so the \
+         error #55 added can name the file to edit"
+    );
 }
 
 /// **`--config` reads the file it names, and complains when it cannot.**

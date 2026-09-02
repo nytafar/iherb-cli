@@ -94,6 +94,13 @@ pub struct GlobalArgs {
     /// downloads Chrome for Testing on first use — which is a slow surprise for
     /// an agent that cannot set an environment variable on a subprocess and had
     /// no flag to reach for (#22).
+    ///
+    /// A path you name here binds: if it does not exist the run fails with
+    /// `invalid_input` (2) naming the path, rather than quietly using some
+    /// other browser (#55). The same is true of the environment variable and
+    /// the config file. Only the automatic search — system Chrome, then a
+    /// previously downloaded Chrome, then the download — falls through, because
+    /// nobody named those.
     #[arg(long, global = true, value_name = "PATH", verbatim_doc_comment)]
     pub browser_path: Option<std::path::PathBuf>,
 
