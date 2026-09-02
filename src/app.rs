@@ -133,7 +133,7 @@ pub async fn run(cli: Cli) -> ExitCode {
     // before the shutdown below can take the session out of it. That is what
     // the block is for.
     let outcome = {
-        let command = dispatch(cli.command, &config, &mut browser_session);
+        let command = dispatch(cli.command, &config, &mut browser_session, json);
         tokio::pin!(command);
 
         tokio::select! {
@@ -209,6 +209,7 @@ async fn dispatch(
     command: Commands,
     config: &AppConfig,
     browser_session: &mut Option<BrowserSession>,
+    json: bool,
 ) -> Result<CommandOutcome, Failure> {
     match command {
         Commands::Search {
@@ -227,8 +228,22 @@ async fn dispatch(
             )
             .await
         }
-        Commands::Product { id_or_url, section } => {
-            cmd_product(config, browser_session, &id_or_url, section).await
+        Commands::Product {
+            ids,
+            stdin,
+            concurrency,
+            section,
+        } => {
+            cmd_product(
+                config,
+                browser_session,
+                ids,
+                stdin,
+                concurrency,
+                section,
+                json,
+            )
+            .await
         }
         // No browser, no network, no page. `cache` is file operations over the
         // directory `config` resolved, and the failure it can produce has
@@ -403,22 +418,99 @@ pub async fn cmd_search(
     })
 }
 
+/// Fetch one product, or many (#10).
+///
+/// One id, given on the command line and not through `--stdin`, is the
+/// original single-document path: unchanged, because that is exactly the
+/// contract `--json` callers already depend on — one document on stdout,
+/// always. Anything else — more than one id, or `--stdin` even for a single
+/// id — is the batch pipeline in [`crate::batch`], which streams its own
+/// output directly and hands back [`CommandOutcome::Batch`] rather than
+/// something for [`render`] to print.
 pub async fn cmd_product(
     config: &AppConfig,
     browser_session: &mut Option<BrowserSession>,
-    id_or_url: &str,
+    ids: Vec<String>,
+    use_stdin: bool,
+    concurrency: Option<usize>,
     section: Option<Section>,
+    json: bool,
 ) -> Result<CommandOutcome, Failure> {
-    let target = ProductTarget::new(config, id_or_url)?;
-    let fetched = fetch(&target, config, browser_session).await?;
+    if use_stdin && !ids.is_empty() {
+        return Err(IherbError::InvalidInput(
+            "product takes ids on the command line or on stdin with --stdin, not both.".to_string(),
+        )
+        .into());
+    }
 
-    Ok(CommandOutcome::Product {
-        provenance: fetched.provenance,
-        product: Box::new(fetched.data),
-        // Resolved here, once, from the flag. Both renderings below read the
-        // answer; neither re-derives it. See [`ProductView`].
-        view: ProductView::for_section(section),
-    })
+    let ids = if use_stdin { read_stdin_ids()? } else { ids };
+
+    if ids.is_empty() {
+        return Err(IherbError::InvalidInput(
+            "product needs at least one id: pass one or more on the command line, or pipe \
+             ids in, one per line, with --stdin."
+                .to_string(),
+        )
+        .into());
+    }
+
+    let view = ProductView::for_section(section);
+
+    // The original path, verbatim: one id, no --stdin, is not a batch of one
+    // — it is the single-document contract every existing `--json` caller
+    // already relies on, so it goes through the pipeline that always has.
+    if ids.len() == 1 && !use_stdin {
+        let target = ProductTarget::new(config, &ids[0])?;
+        let fetched = fetch(&target, config, browser_session).await?;
+
+        return Ok(CommandOutcome::Product {
+            provenance: fetched.provenance,
+            product: Box::new(fetched.data),
+            // Resolved here, once, from the flag. Both renderings below read
+            // the answer; neither re-derives it. See [`ProductView`].
+            view,
+        });
+    }
+
+    let concurrency = match concurrency {
+        None => 1,
+        Some(0) => {
+            return Err(
+                IherbError::InvalidInput("--concurrency must be at least 1.".to_string()).into(),
+            )
+        }
+        Some(n) => n,
+    };
+
+    let mut stdout = std::io::stdout().lock();
+    let exit_code = crate::batch::run(
+        config,
+        browser_session,
+        &ids,
+        concurrency,
+        &view,
+        json,
+        &mut stdout,
+    )
+    .await
+    .map_err(Failure::from)?;
+
+    Ok(CommandOutcome::Batch { exit_code })
+}
+
+/// Read product ids from stdin, one per line, blank lines skipped.
+fn read_stdin_ids() -> Result<Vec<String>, Failure> {
+    use std::io::BufRead;
+
+    std::io::stdin()
+        .lock()
+        .lines()
+        .map(|line| {
+            line.map_err(|e| anyhow::Error::new(e).context("Failed to read ids from stdin"))
+        })
+        .filter(|line| !matches!(line, Ok(l) if l.trim().is_empty()))
+        .map(|line| line.map(|l| l.trim().to_string()).map_err(Failure::from))
+        .collect()
 }
 
 /// What a command produced, before anything decides how to show it.
@@ -447,6 +539,14 @@ pub enum CommandOutcome {
     Cache { report: Box<CacheReport> },
     /// A `setup` invocation, and the profile directory it prepared (#12).
     Setup { profile_dir: std::path::PathBuf },
+    /// A batch `product` invocation (#10): more than one id, or `--stdin`.
+    ///
+    /// Carries nothing for [`render`] to print — [`crate::batch::run`] has
+    /// already streamed every line to stdout as each id resolved, which is
+    /// the whole point of NDJSON output that does not wait for the batch to
+    /// finish. Only the exit code is decided after the fact, once every id
+    /// has been seen.
+    Batch { exit_code: u8 },
 }
 
 /// What a `cache` invocation produced.
@@ -474,6 +574,10 @@ impl CommandOutcome {
             // read nothing off it. Dating the document as though it had scraped
             // something would be the fabrication #44 removed.
             CommandOutcome::Setup { .. } => None,
+            // A batch reads many pages at many instants, and has already
+            // reported each of them on its own line — there is no single
+            // provenance left to fold into a document nobody is printing.
+            CommandOutcome::Batch { .. } => None,
         }
     }
 }
@@ -491,6 +595,14 @@ fn render(
     json: bool,
     emitted_at: SystemTime,
 ) -> (String, u8) {
+    // A batch has already printed itself, one line per id, as each resolved
+    // (#10) — that is what makes it streamed rather than buffered. There is
+    // nothing left here to render; only the exit code, decided once every id
+    // has been seen, is still to hand back.
+    if let CommandOutcome::Batch { exit_code } = outcome {
+        return (String::new(), *exit_code);
+    }
+
     if json {
         render_json(outcome, config, emitted_at)
     } else {
@@ -530,6 +642,10 @@ fn render_markdown(outcome: &CommandOutcome, config: &AppConfig, emitted_at: Sys
         // directory as it is right now, and there is no fetch for it to date.
         CommandOutcome::Cache { report } => output::format_cache_report(report, config),
         CommandOutcome::Setup { profile_dir } => output::format_setup_report(profile_dir),
+        // Never reached: `render` returns before calling this for a batch.
+        CommandOutcome::Batch { .. } => {
+            unreachable!("a batch outcome is handled by `render` before this is called")
+        }
     }
 }
 
@@ -553,6 +669,10 @@ fn render_json(
         // output convention would make `--json` two contracts (#22).
         CommandOutcome::Cache { report } => output::format_cache_json(report, config),
         CommandOutcome::Setup { profile_dir } => output::format_setup_json(profile_dir),
+        // Never reached: `render` returns before calling this for a batch.
+        CommandOutcome::Batch { .. } => {
+            unreachable!("a batch outcome is handled by `render` before this is called")
+        }
     };
 
     json_document(meta, data)

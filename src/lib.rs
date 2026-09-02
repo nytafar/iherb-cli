@@ -5,6 +5,7 @@
 //! exercise the code directly instead of shelling out to the built executable.
 
 pub mod app;
+pub mod batch;
 pub mod browser;
 pub mod cache;
 pub mod cli;

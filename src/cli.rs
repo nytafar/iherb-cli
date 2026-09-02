@@ -274,10 +274,47 @@ pub enum Commands {
         category: Option<String>,
     },
 
-    /// Get detailed product information
+    /// Get detailed product information for one product, or many in one
+    /// browser session
+    ///
+    /// One id prints a single document, exactly as before. More than one id —
+    /// on the command line or piped in with `--stdin` — switches to the batch
+    /// pipeline (#10): one browser launch for the whole batch, one page per
+    /// product, and under `--json` one compact JSON line per product,
+    /// streamed as each resolves rather than held until the batch ends. A bad
+    /// id in the middle of a batch fails that line and nothing else; the
+    /// batch keeps going.
+    ///
+    /// The natural pipeline this is for:
+    ///
+    /// `iherb-cli search "magnesium malate" --limit 60 --json \
+    ///   | jq -r '.data.products[].product_id' \
+    ///   | iherb-cli product --stdin --json`
+    #[command(verbatim_doc_comment)]
     Product {
-        /// Numeric product ID or full iHerb product URL
-        id_or_url: String,
+        /// One or more numeric product IDs or full iHerb product URLs.
+        ///
+        /// Omit entirely when piping ids in with `--stdin`; naming both is an
+        /// error, since there would be two lists to reconcile.
+        ids: Vec<String>,
+
+        /// Read ids from stdin instead, one per line. Blank lines are
+        /// skipped. Always the batch pipeline, even for a single id, because
+        /// asking for it is asking for streaming output.
+        #[arg(long)]
+        stdin: bool,
+
+        /// How many products a batch fetches at once, in the one browser
+        /// (default: 1).
+        ///
+        /// Every worker shares the browser but navigates on its own tab, so
+        /// `N` workers hold `N` tabs open at once. `--delay` is what stays
+        /// polite between *one worker's* successive navigations; it is not
+        /// divided among workers, so raising `--concurrency` raises the
+        /// overall request rate roughly in proportion. Ignored outside batch
+        /// mode, where there is only one product to fetch.
+        #[arg(long, value_name = "N", verbatim_doc_comment)]
+        concurrency: Option<usize>,
 
         /// Only show a specific section: overview, description, ingredients, nutrition, suggested-use, warnings, reviews
         #[arg(long, value_enum)]

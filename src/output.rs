@@ -1084,6 +1084,16 @@ pub struct Envelope {
     pub error_type: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Which id this line answers, in a batch (#10). `None` outside batch
+    /// mode, where the envelope is the whole document and there is only one
+    /// id to name.
+    ///
+    /// Carried on both outcomes rather than only on failure, even though a
+    /// success line's `data.product_id` already says the same thing: a
+    /// consumer reading NDJSON one line at a time should not have to look in
+    /// two different places depending on `ok`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
 }
 
 impl Envelope {
@@ -1095,6 +1105,7 @@ impl Envelope {
             data: Some(data),
             error_type: None,
             message: None,
+            product_id: None,
         }
     }
 
@@ -1106,7 +1117,14 @@ impl Envelope {
             data: None,
             error_type: Some(kind.error_type()),
             message: Some(message),
+            product_id: None,
         }
+    }
+
+    /// This envelope, naming the batch id it answers (#10).
+    pub fn for_product_id(mut self, product_id: impl Into<String>) -> Self {
+        self.product_id = Some(product_id.into());
+        self
     }
 
     /// The document, ready to write to stdout, newline-terminated.
@@ -1122,6 +1140,24 @@ impl Envelope {
             Ok(json) => format!("{}\n", json),
             Err(e) => format!(
                 "{{\n  \"ok\": false,\n  \"schema_version\": {},\n  \"error_type\": \"json_error\",\n  \"message\": {}\n}}\n",
+                SCHEMA_VERSION,
+                Value::String(e.to_string())
+            ),
+        }
+    }
+
+    /// One compact line: the same envelope [`Envelope::render`] pretty-prints,
+    /// on a single line (#10).
+    ///
+    /// This is what a batch prints per id. NDJSON means exactly one JSON value
+    /// per line, so pretty-printing — which `render` uses for the single-
+    /// document case — is not a formatting preference here, it is a shape the
+    /// output would stop being NDJSON without.
+    pub fn render_line(&self) -> String {
+        match serde_json::to_string(self) {
+            Ok(json) => format!("{}\n", json),
+            Err(e) => format!(
+                "{{\"ok\":false,\"schema_version\":{},\"error_type\":\"json_error\",\"message\":{}}}\n",
                 SCHEMA_VERSION,
                 Value::String(e.to_string())
             ),
