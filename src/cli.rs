@@ -122,6 +122,34 @@ pub struct GlobalArgs {
     #[arg(long, global = true, verbatim_doc_comment)]
     pub delay: Option<u64>,
 
+    /// How many times one page is fetched before the run gives up (default: 3).
+    ///
+    /// A total, not a count of retries on top of a first try, so `1` means
+    /// "try once and report what happened". Between tries the wait doubles:
+    /// 1s, then 2s, then 4s.
+    ///
+    /// A Cloudflare block ends the sequence whatever this says. Retrying
+    /// seconds later from the same address with the same fingerprint cannot
+    /// succeed, and it spends the rate limit a later run — or a hand-cleared
+    /// profile from `iherb-cli setup` — will want (#23).
+    #[arg(long, global = true, value_name = "N", verbatim_doc_comment)]
+    pub attempts: Option<u32>,
+
+    /// How many times one page is checked for a Cloudflare interstitial
+    /// (default: 3).
+    ///
+    /// Each look after the first waits up to 12 seconds for the challenge to
+    /// clear itself, re-checking every second, so the default is worth up to
+    /// 24 seconds per page. Raise it on a storefront that challenges often and
+    /// you are willing to wait out; drop it to `1` to fail fast and let a
+    /// caller decide.
+    ///
+    /// This is spent *inside* one navigation attempt, so the worst case is
+    /// this many looks per `--attempts` — except that a block does not lead to
+    /// another attempt (#23).
+    #[arg(long, global = true, value_name = "N", verbatim_doc_comment)]
+    pub cloudflare_attempts: Option<u32>,
+
     /// Print how long each phase of every navigation took, on stderr.
     ///
     /// One `key=value` line per page: `goto_ms`, `cloudflare_check_ms`,
@@ -213,6 +241,8 @@ impl GlobalArgs {
             browser_path: None,
             config: None,
             delay: None,
+            attempts: None,
+            cloudflare_attempts: None,
             timing: false,
             profile_dir: None,
             no_profile: false,

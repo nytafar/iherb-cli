@@ -158,6 +158,8 @@ Take 1 capsule daily with or without food.
 | `--browser-path <path>` | Chrome or Chromium executable. Outranks `IHERB_BROWSER_PATH` and the config file. A path that does not exist is `invalid_input` (2), never a silent fallback | — |
 | `--config <path>` | Read this config file instead of the one under the user's config dir | — |
 | `--delay <ms>` | Politeness delay *between* requests in milliseconds | `500` |
+| `--attempts <n>` | How many times one page is fetched before the run gives up. A total, not retries on top of a first try. A Cloudflare block ends the sequence whatever this says | `3` |
+| `--cloudflare-attempts <n>` | How many times one page is checked for a Cloudflare interstitial. Each look after the first waits up to 12s for the challenge to clear | `3` |
 | `--timing` | Print per-phase navigation durations on stderr | — |
 | `--profile-dir <path>` | Keep the browser profile here. Never deleted by this tool | default profile under the data dir |
 | `--no-profile` | Use a throwaway profile that is deleted when the run ends | — |
@@ -516,6 +518,10 @@ cache_ttl = "12h"
 # through to system Chrome (#55).
 browser_path = "/usr/bin/chromium"
 delay_ms = 500
+# Optional. Same meaning as --attempts and --cloudflare-attempts. Zero is
+# refused on both, here and on the command line.
+attempts = 3
+cloudflare_attempts = 3
 ```
 
 `--config <path>` reads exactly that file. A path given there must exist and

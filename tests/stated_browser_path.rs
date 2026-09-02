@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use iherb_cli::browser::resolve::resolve_chrome;
 use iherb_cli::config::{
     AppConfig, BrowserPathSource, CacheMode, ProfileChoice, StatedBrowserPath, DEFAULT_CACHE_TTL,
+    DEFAULT_CLOUDFLARE_ATTEMPTS, DEFAULT_NAVIGATION_ATTEMPTS,
 };
 use iherb_cli::error::{classify_error, ErrorKind};
 
@@ -60,6 +61,8 @@ fn config_with(scratch: &std::path::Path, browser_path: Option<StatedBrowserPath
         cache_mode: CacheMode::Off,
         cache_ttl: DEFAULT_CACHE_TTL,
         delay_ms: 0,
+        attempts: DEFAULT_NAVIGATION_ATTEMPTS,
+        cloudflare_attempts: DEFAULT_CLOUDFLARE_ATTEMPTS,
         debug: false,
         headful: false,
         timing: false,

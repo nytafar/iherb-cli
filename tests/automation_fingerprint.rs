@@ -29,7 +29,10 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 use iherb_cli::browser::session::BrowserSession;
-use iherb_cli::config::{AppConfig, CacheMode, ProfileChoice, DEFAULT_CACHE_TTL};
+use iherb_cli::config::{
+    AppConfig, CacheMode, ProfileChoice, DEFAULT_CACHE_TTL, DEFAULT_CLOUDFLARE_ATTEMPTS,
+    DEFAULT_NAVIGATION_ATTEMPTS,
+};
 
 static ONE_AT_A_TIME: Mutex<()> = Mutex::const_new(());
 
@@ -68,6 +71,8 @@ fn config(scratch: &Path) -> AppConfig {
         cache_mode: CacheMode::Off,
         cache_ttl: DEFAULT_CACHE_TTL,
         delay_ms: 0,
+        attempts: DEFAULT_NAVIGATION_ATTEMPTS,
+        cloudflare_attempts: DEFAULT_CLOUDFLARE_ATTEMPTS,
         debug: false,
         headful: false,
         timing: false,

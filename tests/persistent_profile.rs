@@ -35,7 +35,10 @@ use std::path::{Path, PathBuf};
 use tokio::sync::Mutex;
 
 use iherb_cli::browser::session::BrowserSession;
-use iherb_cli::config::{AppConfig, CacheMode, ProfileChoice, DEFAULT_CACHE_TTL};
+use iherb_cli::config::{
+    AppConfig, CacheMode, ProfileChoice, DEFAULT_CACHE_TTL, DEFAULT_CLOUDFLARE_ATTEMPTS,
+    DEFAULT_NAVIGATION_ATTEMPTS,
+};
 
 /// Chrome refuses to run two instances against one profile, so these tests are
 /// serial among themselves as well as against the rest of the suite's launches.
@@ -76,6 +79,8 @@ fn config(scratch: &Path, profile: ProfileChoice) -> AppConfig {
         cache_mode: CacheMode::Off,
         cache_ttl: DEFAULT_CACHE_TTL,
         delay_ms: 0,
+        attempts: DEFAULT_NAVIGATION_ATTEMPTS,
+        cloudflare_attempts: DEFAULT_CLOUDFLARE_ATTEMPTS,
         debug: false,
         headful: false,
         timing: false,

@@ -16,9 +16,6 @@ use crate::cache::{Cache, CacheKey};
 use crate::config::AppConfig;
 use crate::scraper::navigation::{Navigator, Storefront};
 
-/// Navigation attempts after the first, per page.
-const NAVIGATION_RETRIES: u32 = 2;
-
 pub use crate::scraper::navigation::ReadinessTarget;
 
 /// Whether the pipeline should walk another page of a paginated target.
@@ -322,6 +319,7 @@ async fn read_target<T: FetchTarget>(
         config.delay_ms,
         Storefront::requested(config),
         config.timing,
+        config.cloudflare_attempts,
     );
     let readiness = target.readiness();
 
@@ -335,7 +333,7 @@ async fn read_target<T: FetchTarget>(
 
         let url = target.url(page_num);
         let html = navigator
-            .navigate_with_retry(page, &url, NAVIGATION_RETRIES, readiness)
+            .navigate_with_retry(page, &url, config.attempts, readiness)
             .await
             .context(target.navigation_context())?;
 

@@ -30,7 +30,9 @@ use tokio::sync::Mutex;
 
 use iherb_cli::browser::session::BrowserSession;
 use iherb_cli::cache::CacheKey;
-use iherb_cli::config::{AppConfig, ProfileChoice};
+use iherb_cli::config::{
+    AppConfig, ProfileChoice, DEFAULT_CLOUDFLARE_ATTEMPTS, DEFAULT_NAVIGATION_ATTEMPTS,
+};
 use iherb_cli::fetch::{fetch_on, FetchTarget, Paging, Provenance};
 
 /// A config that touches nothing on disk that matters: caching off, no delay,
@@ -48,6 +50,8 @@ fn test_config(scratch: &Path, debug: bool, headful: bool) -> AppConfig {
         cache_mode: iherb_cli::config::CacheMode::Off,
         cache_ttl: iherb_cli::config::DEFAULT_CACHE_TTL,
         delay_ms: 0,
+        attempts: DEFAULT_NAVIGATION_ATTEMPTS,
+        cloudflare_attempts: DEFAULT_CLOUDFLARE_ATTEMPTS,
         debug,
         headful,
         timing: false,

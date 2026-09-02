@@ -24,7 +24,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use iherb_cli::browser::session::BrowserSession;
-use iherb_cli::config::{AppConfig, CacheMode, ProfileChoice, DEFAULT_CACHE_TTL, DEFAULT_DELAY_MS};
+use iherb_cli::config::{
+    AppConfig, CacheMode, ProfileChoice, DEFAULT_CACHE_TTL, DEFAULT_CLOUDFLARE_ATTEMPTS,
+    DEFAULT_DELAY_MS, DEFAULT_NAVIGATION_ATTEMPTS,
+};
 use iherb_cli::scraper::navigation::{
     wait_for_selectors, NavigationTiming, Navigator, Readiness, ReadinessTarget, READINESS_BUDGET,
     READINESS_POLL,
@@ -376,6 +379,8 @@ async fn a_real_navigation_no_longer_pays_the_delay_per_page() {
         // the old code slept before looking at the page, and the assertion
         // below is that it is not slept.
         delay_ms: SENTINEL_DELAY_MS,
+        attempts: DEFAULT_NAVIGATION_ATTEMPTS,
+        cloudflare_attempts: DEFAULT_CLOUDFLARE_ATTEMPTS,
         debug: false,
         headful: false,
         timing: false,
@@ -389,7 +394,7 @@ async fn a_real_navigation_no_longer_pays_the_delay_per_page() {
         .await
         .expect("failed to launch the browser");
     let page = session.new_page().await.expect("failed to open a page");
-    let navigator = Navigator::new(config.delay_ms, None, false);
+    let navigator = Navigator::new(config.delay_ms, None, false, DEFAULT_CLOUDFLARE_ATTEMPTS);
 
     // Once to warm the connection, then measured: the first navigation of a
     // process pays Chrome's own start-up costs, which are not what is under

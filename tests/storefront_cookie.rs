@@ -34,7 +34,9 @@ use std::path::PathBuf;
 
 use tokio::sync::Mutex;
 
-use iherb_cli::config::{AppConfig, ProfileChoice};
+use iherb_cli::config::{
+    AppConfig, ProfileChoice, DEFAULT_CLOUDFLARE_ATTEMPTS, DEFAULT_NAVIGATION_ATTEMPTS,
+};
 use iherb_cli::scraper::navigation::{Navigator, ReadinessTarget, Storefront};
 
 fn config(country: &str, currency: Option<&str>) -> AppConfig {
@@ -44,6 +46,8 @@ fn config(country: &str, currency: Option<&str>) -> AppConfig {
         cache_mode: iherb_cli::config::CacheMode::Off,
         cache_ttl: iherb_cli::config::DEFAULT_CACHE_TTL,
         delay_ms: 0,
+        attempts: DEFAULT_NAVIGATION_ATTEMPTS,
+        cloudflare_attempts: DEFAULT_CLOUDFLARE_ATTEMPTS,
         debug: false,
         headful: false,
         timing: false,
@@ -203,7 +207,12 @@ async fn navigating_with_a_requested_storefront_sets_the_cookies() {
         .expect("failed to launch the browser");
     let page = session.new_page().await.expect("failed to open a page");
 
-    let navigator = Navigator::new(0, Storefront::requested(&cfg), false);
+    let navigator = Navigator::new(
+        0,
+        Storefront::requested(&cfg),
+        false,
+        DEFAULT_CLOUDFLARE_ATTEMPTS,
+    );
     navigator
         .navigate(
             &page,
@@ -279,7 +288,12 @@ async fn navigating_without_a_requested_storefront_sets_nothing() {
         .expect("failed to launch the browser");
     let page = session.new_page().await.expect("failed to open a page");
 
-    let navigator = Navigator::new(0, Storefront::requested(&cfg), false);
+    let navigator = Navigator::new(
+        0,
+        Storefront::requested(&cfg),
+        false,
+        DEFAULT_CLOUDFLARE_ATTEMPTS,
+    );
     navigator
         .navigate(
             &page,

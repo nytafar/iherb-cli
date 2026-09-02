@@ -4,8 +4,54 @@ use chromiumoxide::error::CdpError;
 use chromiumoxide::Page;
 use std::time::Duration;
 
-const MAX_CLOUDFLARE_RETRIES: u32 = 3;
 const CLOUDFLARE_WAIT_SECS: u64 = 12;
+
+/// How often the page is re-checked while a challenge is being waited out.
+const CLOUDFLARE_POLL: Duration = Duration::from_millis(1000);
+
+/// How much patience one navigation has for a Cloudflare interstitial (#23).
+///
+/// `attempts` used to be a hardcoded `MAX_CLOUDFLARE_RETRIES = 3`, which is what
+/// #23's last acceptance criterion is about: the number is a rate-limit
+/// negotiation with a third party, and the caller is the only one who knows how
+/// much of their budget one page is worth. It arrives from `--cloudflare-attempts`.
+///
+/// The two durations are **not** flags and are here only so
+/// [`clear_challenge`] can be driven at test speed. Twelve seconds of real
+/// waiting per attempt is the behaviour; a test that had to sit through it
+/// would be a test nobody runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChallengeBudget {
+    /// How many times the page is looked at before the run gives up. Never
+    /// zero: one look is the minimum that can decide anything.
+    pub attempts: u32,
+    /// How long one challenge is given to clear itself.
+    pub wait: Duration,
+    /// How often the page is re-checked inside `wait`.
+    pub poll: Duration,
+}
+
+impl ChallengeBudget {
+    /// The production budget for `attempts` looks at the page.
+    pub fn new(attempts: u32) -> Self {
+        Self {
+            attempts: attempts.max(1),
+            wait: Duration::from_secs(CLOUDFLARE_WAIT_SECS),
+            poll: CLOUDFLARE_POLL,
+        }
+    }
+
+    /// How many times the page is re-checked inside one wait.
+    ///
+    /// Zero when either duration is zero, which is what makes a test budget
+    /// cost exactly `attempts` probes and no wall clock.
+    fn checks_per_wait(&self) -> u32 {
+        if self.poll.is_zero() {
+            return 0;
+        }
+        (self.wait.as_millis() / self.poll.as_millis()) as u32
+    }
+}
 /// Elements only a Cloudflare interstitial carries (#23).
 ///
 /// The **strong** signal, and the one that carries the detection: a challenge
@@ -410,6 +456,120 @@ where
     }
 }
 
+/// Wait a Cloudflare interstitial out, up to `budget.attempts` looks (#23).
+///
+/// # Why the probe and the nudge are parameters
+///
+/// The same reason [`wait_for_selectors`] takes one: the claims worth testing
+/// here are about *counts* — how many times the page is looked at before the run
+/// gives up, and that the count is the one the caller configured — and driving
+/// them through `Page` would make them browser tests. With a zero `wait` the
+/// probe is called exactly `budget.attempts` times and the whole thing costs no
+/// wall clock.
+///
+/// `nudge` is the Turnstile checkbox click, which is a best-effort poke at a
+/// cross-origin iframe and fails silently by design; it is separate from the
+/// probe because it happens once per attempt and the probe happens once per
+/// poll.
+pub async fn clear_challenge<P, PFut, N, NFut>(
+    budget: ChallengeBudget,
+    mut is_challenge: P,
+    mut nudge: N,
+) -> Result<(), IherbError>
+where
+    P: FnMut() -> PFut,
+    PFut: std::future::Future<Output = bool>,
+    N: FnMut() -> NFut,
+    NFut: std::future::Future<Output = ()>,
+{
+    let attempts = budget.attempts.max(1);
+    for attempt in 1..=attempts {
+        if !is_challenge().await {
+            return Ok(());
+        }
+
+        if attempt == attempts {
+            return Err(IherbError::CloudflareBlocked(attempts));
+        }
+
+        tracing::info!(
+            "Cloudflare challenge detected (attempt {}/{}), waiting up to {:?}...",
+            attempt,
+            attempts,
+            budget.wait
+        );
+
+        nudge().await;
+
+        for _ in 0..budget.checks_per_wait() {
+            tokio::time::sleep(budget.poll).await;
+            if !is_challenge().await {
+                tracing::info!("Cloudflare challenge resolved early");
+                return Ok(());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Is `error` worth another navigation attempt? (#23)
+///
+/// Everything except a Cloudflare block. A block is the one failure where
+/// trying again is not merely useless but actively harmful: the retry arrives
+/// seconds later from the same address with the same fingerprint, which is what
+/// Cloudflare was scoring in the first place, and it spends rate limit the run
+/// will want when a human clears the profile by hand (`iherb-cli setup`, #12).
+/// Note that a block already cost `--cloudflare-attempts` looks and up to
+/// twelve seconds of waiting *each* before it was raised, so the page has been
+/// given its chance inside [`clear_challenge`] rather than denied one here.
+pub fn is_worth_retrying(error: &IherbError) -> bool {
+    !matches!(error, IherbError::CloudflareBlocked(_))
+}
+
+/// Run `navigate` up to `attempts` times, backing off between tries (#23).
+///
+/// `attempts` is a **total**, not a retry count on top of a first try: one is a
+/// legal value and means "try once". It arrives from `--attempts`, which used to
+/// be the file-private `NAVIGATION_RETRIES = 2`.
+///
+/// A parameter for the same reason [`clear_challenge`]'s probe is one — the
+/// claim is a count, and a count is testable without a browser.
+pub async fn retry_navigation<F, Fut>(attempts: u32, mut navigate: F) -> Result<String, IherbError>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = Result<String, IherbError>>,
+{
+    let attempts = attempts.max(1);
+    let mut last_err = None;
+
+    for attempt in 1..=attempts {
+        match navigate(attempt).await {
+            Ok(html) => return Ok(html),
+            Err(e) => {
+                if !is_worth_retrying(&e) {
+                    tracing::warn!(
+                        "Navigation attempt {}/{} was blocked, and a block is not retried: {}",
+                        attempt,
+                        attempts,
+                        e
+                    );
+                    return Err(e);
+                }
+                tracing::warn!("Navigation attempt {}/{} failed: {}", attempt, attempts, e);
+                last_err = Some(e);
+                if attempt < attempts {
+                    let backoff = Duration::from_secs(2u64.pow(attempt - 1));
+                    tracing::info!("Retrying in {:?}...", backoff);
+                    tokio::time::sleep(backoff).await;
+                }
+            }
+        }
+    }
+
+    Err(last_err.expect("a loop of at least one attempt that returned no Ok left an error"))
+}
+
 /// What each phase of one navigation cost, for `--timing` (#11).
 ///
 /// Reported so the improvement is measurable rather than assumed, and because
@@ -470,14 +630,23 @@ pub struct Navigator {
     storefront: Option<Storefront>,
     /// Whether `--timing` asked for the per-phase durations on stderr (#11).
     timing: bool,
+    /// How much patience one navigation has for an interstitial, from
+    /// `--cloudflare-attempts` (#23).
+    challenge: ChallengeBudget,
 }
 
 impl Navigator {
-    pub fn new(delay_ms: u64, storefront: Option<Storefront>, timing: bool) -> Self {
+    pub fn new(
+        delay_ms: u64,
+        storefront: Option<Storefront>,
+        timing: bool,
+        cloudflare_attempts: u32,
+    ) -> Self {
         Self {
             delay_ms,
             storefront,
             timing,
+            challenge: ChallengeBudget::new(cloudflare_attempts),
         }
     }
 
@@ -655,36 +824,26 @@ impl Navigator {
     }
 
     /// Detect a Cloudflare interstitial and wait it out, up to
-    /// [`MAX_CLOUDFLARE_RETRIES`] attempts.
+    /// `--cloudflare-attempts` looks at the page.
     ///
-    /// Lifted out of [`Navigator::navigate`] unchanged in behaviour, so that
-    /// `--timing` can charge it its own phase rather than folding it into the
-    /// readiness wait it precedes.
+    /// The loop itself is [`clear_challenge`]; this binds it to a real `Page`.
+    /// It is a phase of its own so that `--timing` can charge it separately
+    /// rather than folding it into the readiness wait it precedes.
     async fn clear_cloudflare(
         &self,
         page: &Page,
         readiness: ReadinessTarget,
     ) -> Result<(), IherbError> {
-        for attempt in 1..=MAX_CLOUDFLARE_RETRIES {
-            if !self.is_cloudflare_challenge(page, readiness).await {
-                break;
-            }
-
-            if attempt == MAX_CLOUDFLARE_RETRIES {
-                return Err(IherbError::CloudflareBlocked(MAX_CLOUDFLARE_RETRIES));
-            }
-
-            tracing::info!(
-                "Cloudflare challenge detected (attempt {}/{}), waiting up to {}s...",
-                attempt,
-                MAX_CLOUDFLARE_RETRIES,
-                CLOUDFLARE_WAIT_SECS
-            );
-
-            // Try clicking the Cloudflare Turnstile checkbox (may fail due to cross-origin, but worth trying)
-            let _ = page
-                .evaluate(
-                    r#"
+        clear_challenge(
+            self.challenge,
+            || self.is_cloudflare_challenge(page, readiness),
+            || async {
+                // Best effort at the Turnstile checkbox. Cross-origin, so it
+                // usually cannot be reached at all; when it can, it is the
+                // cheapest way out of the wait.
+                let _ = page
+                    .evaluate(
+                        r#"
                     try {
                         const iframe = document.querySelector('iframe[src*="challenges"]');
                         if (iframe && iframe.contentDocument) {
@@ -693,54 +852,24 @@ impl Navigator {
                         }
                     } catch(e) {}
                     "#,
-                )
-                .await;
-
-            // Wait for Cloudflare to resolve, but check periodically for early exit
-            let check_interval_ms = 1000;
-            let total_checks = (CLOUDFLARE_WAIT_SECS * 1000) / check_interval_ms;
-            for _ in 0..total_checks {
-                tokio::time::sleep(Duration::from_millis(check_interval_ms)).await;
-                if !self.is_cloudflare_challenge(page, readiness).await {
-                    tracing::info!("Cloudflare challenge resolved early");
-                    break;
-                }
-            }
-        }
-
-        Ok(())
+                    )
+                    .await;
+            },
+        )
+        .await
     }
 
+    /// Navigate, and try again up to `attempts` times in total (#23).
+    ///
+    /// A Cloudflare block ends it immediately; see [`is_worth_retrying`].
     pub async fn navigate_with_retry(
         &self,
         page: &Page,
         url: &str,
-        max_retries: u32,
+        attempts: u32,
         readiness: ReadinessTarget,
     ) -> Result<String, IherbError> {
-        let mut last_err = None;
-
-        for attempt in 1..=max_retries + 1 {
-            match self.navigate(page, url, readiness).await {
-                Ok(html) => return Ok(html),
-                Err(e) => {
-                    tracing::warn!(
-                        "Navigation attempt {}/{} failed: {}",
-                        attempt,
-                        max_retries + 1,
-                        e
-                    );
-                    last_err = Some(e);
-                    if attempt <= max_retries {
-                        let backoff = Duration::from_secs(2u64.pow(attempt - 1));
-                        tracing::info!("Retrying in {:?}...", backoff);
-                        tokio::time::sleep(backoff).await;
-                    }
-                }
-            }
-        }
-
-        Err(last_err.unwrap())
+        retry_navigation(attempts, |_| self.navigate(page, url, readiness)).await
     }
 
     /// Read the four facts [`is_challenge_page`] judges, in one round trip.

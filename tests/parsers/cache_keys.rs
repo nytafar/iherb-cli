@@ -13,7 +13,9 @@ use std::path::PathBuf;
 
 use iherb_cli::cache::{Cache, CacheKey};
 use iherb_cli::cli::SortOrder;
-use iherb_cli::config::{AppConfig, ProfileChoice};
+use iherb_cli::config::{
+    AppConfig, ProfileChoice, DEFAULT_CLOUDFLARE_ATTEMPTS, DEFAULT_NAVIGATION_ATTEMPTS,
+};
 use iherb_cli::fetch::FetchTarget;
 use iherb_cli::model::{ProductDetail, ProductSummary, SearchFetch, SearchResult};
 use iherb_cli::targets::{ProductTarget, SearchTarget};
@@ -64,6 +66,8 @@ fn config(country: &str, currency: &str, cache_dir: PathBuf) -> AppConfig {
         cache_mode: iherb_cli::config::CacheMode::ReadWrite,
         cache_ttl: iherb_cli::config::DEFAULT_CACHE_TTL,
         delay_ms: 0,
+        attempts: DEFAULT_NAVIGATION_ATTEMPTS,
+        cloudflare_attempts: DEFAULT_CLOUDFLARE_ATTEMPTS,
         debug: false,
         headful: false,
         timing: false,

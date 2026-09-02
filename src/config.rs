@@ -22,6 +22,24 @@ pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// this is only the gap between one request and the next.
 pub const DEFAULT_DELAY_MS: u64 = 500;
 
+/// How many times a page is fetched before a run gives up, when `--attempts`
+/// says nothing.
+///
+/// Three, which is what this tool has always done — it was the file-private
+/// `NAVIGATION_RETRIES = 2` in `fetch.rs`, counted as retries on top of a first
+/// try. Counted as a total here, because "attempts" is the word on the flag and
+/// off-by-one between a flag and its constant is not worth inheriting.
+pub const DEFAULT_NAVIGATION_ATTEMPTS: u32 = 3;
+
+/// How many times a page is checked for a Cloudflare interstitial, when
+/// `--cloudflare-attempts` says nothing.
+///
+/// Three, which is what the hardcoded `MAX_CLOUDFLARE_RETRIES` was. #23's last
+/// acceptance criterion is that this number stop being hardcoded: how much of a
+/// rate-limit budget one page is worth is the caller's question, not this
+/// file's.
+pub const DEFAULT_CLOUDFLARE_ATTEMPTS: u32 = 3;
+
 /// What a run is allowed to do with the cache.
 ///
 /// Three states rather than a `no_cache: bool`, because the bool could not say
@@ -235,6 +253,14 @@ pub struct AppConfig {
     pub cache_mode: CacheMode,
     pub cache_ttl: Duration,
     pub delay_ms: u64,
+    /// How many times one page is fetched before the run gives up (#23).
+    ///
+    /// A total, so one is a legal value and means "try once". Never zero:
+    /// [`AppConfig::load`] refuses it, because a run that is not allowed to
+    /// look at the page cannot report anything about it.
+    pub attempts: u32,
+    /// How many times one page is checked for a Cloudflare interstitial (#23).
+    pub cloudflare_attempts: u32,
     /// Verbose logging and the HTML dump. Says nothing about the window (#62).
     pub debug: bool,
     /// A browser window you can see. Says nothing about logging (#62).
@@ -275,6 +301,10 @@ struct ConfigDefaults {
     currency: Option<String>,
     browser_path: Option<String>,
     delay_ms: Option<u64>,
+    /// Same meaning as `--attempts` and `--cloudflare-attempts`, and refused
+    /// the same way when zero.
+    attempts: Option<u32>,
+    cloudflare_attempts: Option<u32>,
     /// Same spelling as `--cache-ttl`: `30d`, `12h`. Parsed and reported like
     /// the flag, so a typo in the file fails the same way a typo on the command
     /// line does.
@@ -394,7 +424,22 @@ impl AppConfig {
             .or(file_config.defaults.delay_ms)
             .unwrap_or(DEFAULT_DELAY_MS);
 
+        // Flag, then config file, then the default — the same chain `--delay`
+        // has, and for the same reason: an agent that cannot set an environment
+        // variable on a subprocess still has a flag, and a person who always
+        // wants the same number has a file (#22, #23).
+        let attempts = args
+            .attempts
+            .or(file_config.defaults.attempts)
+            .unwrap_or(DEFAULT_NAVIGATION_ATTEMPTS);
+        let cloudflare_attempts = args
+            .cloudflare_attempts
+            .or(file_config.defaults.cloudflare_attempts)
+            .unwrap_or(DEFAULT_CLOUDFLARE_ATTEMPTS);
+
         Self::validate_country(&country)?;
+        validate_attempts("--attempts", attempts)?;
+        validate_attempts("--cloudflare-attempts", cloudflare_attempts)?;
 
         Ok(AppConfig {
             country,
@@ -402,6 +447,8 @@ impl AppConfig {
             cache_mode: CacheMode::from_flags(args.no_cache, args.refresh),
             cache_ttl,
             delay_ms,
+            attempts,
+            cloudflare_attempts,
             debug: args.debug,
             headful: args.headful,
             timing: args.timing,
@@ -435,6 +482,23 @@ impl AppConfig {
             format!("https://{}.iherb.com", self.country)
         }
     }
+}
+
+/// Zero attempts is refused rather than clamped to one (#23).
+///
+/// Clamping would be the friendlier reading, and it is the wrong one: a caller
+/// who wrote `--attempts 0` meant something, and what they meant is not "try
+/// once". Silently doing the opposite of a number they typed is how a run that
+/// was supposed to be a dry check turns into a request against iHerb.
+fn validate_attempts(flag: &str, attempts: u32) -> Result<(), IherbError> {
+    if attempts == 0 {
+        return Err(IherbError::InvalidInput(format!(
+            "{} must be at least 1. A page that is never looked at cannot be \
+             reported on, and 0 is not a way to skip the request.",
+            flag
+        )));
+    }
+    Ok(())
 }
 
 /// The config file at the default location, which most runs do not have.
