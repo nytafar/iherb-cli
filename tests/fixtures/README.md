@@ -103,7 +103,7 @@ separately because its provenance argument is different from the rest: it is the
 | storefront | `NO` — `COUNTRY_CODE = "NO"` |
 | currency | `NOK` — `CURRENCY_CODE = "NOK"`, `"priceCurrency":"NOK"`, price 880.63 |
 | siteVersion | 1.0.22698 |
-| capture method | `iherb-cli product 12949 --country no --currency NOK --no-cache --debug`, then `gzip -9 -n` of the `/tmp/iherb_product_12949.html` dump that `--debug` writes |
+| capture method | `iherb-cli product 12949 --country no --currency NOK --no-cache --debug`, then `gzip -9 -n` of the dump that `--debug` writes under `$(iherb-cli cache path)/dumps` (it was `/tmp/iherb_product_12949.html` at capture time; #63 moved it) |
 
 Same shape as the other seven: the whole page as served, after hydration,
 nothing trimmed. It is the **same product** as
@@ -168,7 +168,10 @@ Every one was captured the same way, which is the way `#5` established:
 
 ```sh
 iherb-cli product <id> --country no --currency NOK --no-cache --debug
-gzip -9 -n /tmp/iherb_product_<id>.html > product-<id>-<slug>-nok.html.gz
+# The dump lands in $(iherb-cli cache path)/dumps, named
+# iherb_product_<id>_<timestamp>_<pid>.html since #63; it was
+# /tmp/iherb_product_<id>.html when these were captured.
+gzip -9 -n <the dump> > product-<id>-<slug>-nok.html.gz
 ```
 
 Serially, one at a time, at the default 2000 ms delay. **iHerb never presented a

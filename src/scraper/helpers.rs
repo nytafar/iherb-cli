@@ -1,4 +1,7 @@
 use scraper::{Html, Selector};
+use std::path::PathBuf;
+use std::time::SystemTime;
+use time::OffsetDateTime;
 
 /// Parse a price string by extracting digits, periods, and commas, then
 /// determine the decimal separator based on position and context.
@@ -148,13 +151,65 @@ fn grouped_integer(run: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Dump HTML to /tmp for debugging when debug level is enabled.
+/// The name a dump of `label`, taken at `at` by process `pid`, is filed under.
+///
+/// `iherb_<label>_<UTC timestamp>_<pid>.html`. The label used to be the *whole*
+/// name, so two runs against the same target overwrote each other and the one
+/// thing a kept dump is for — diffing what iHerb served before and after it
+/// changed something — needed files moved by hand (#63). The timestamp is
+/// milliseconds and sorts lexically, which is also chronologically; the pid is
+/// what keeps two processes fetching the same id in the same millisecond off
+/// each other's file, which #10's batch work makes likelier rather than less.
+///
+/// `at` and `pid` are arguments rather than read inside, so a test can name two
+/// instants and see two names.
+pub fn dump_file_name(label: &str, at: SystemTime, pid: u32) -> String {
+    let safe_label: String = label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // A search label is a user's query, so anything can be in it. Replacing a
+    // space was never enough: a `/` made the write land somewhere else or fail,
+    // silently either way, because the write is deliberately unchecked.
+    let at = OffsetDateTime::from(at);
+    format!(
+        "iherb_{}_{:04}{:02}{:02}T{:02}{:02}{:02}.{:03}Z_{}.html",
+        safe_label,
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second(),
+        at.millisecond(),
+        pid,
+    )
+}
+
+/// Where a dump of `label` taken right now would go.
+pub fn dump_path(label: &str) -> PathBuf {
+    crate::config::dumps_dir().join(dump_file_name(label, SystemTime::now(), std::process::id()))
+}
+
+/// Dump HTML under the cache directory for debugging when debug level is
+/// enabled.
+///
+/// The write stays unchecked: a full disk or an unwritable cache directory must
+/// cost a diagnostic, never the run that was asked for.
 pub fn debug_dump_html(html: &str, label: &str) {
     if tracing::enabled!(tracing::Level::DEBUG) {
-        let safe_label = label.replace(' ', "_");
-        let dump_path = format!("/tmp/iherb_{}.html", safe_label);
-        let _ = std::fs::write(&dump_path, html);
-        tracing::debug!("Dumped HTML to {}", dump_path);
+        let path = dump_path(label);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&path, html);
+        tracing::debug!("Dumped HTML to {}", path.display());
     }
 }
 

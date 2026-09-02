@@ -501,6 +501,41 @@ and facts share a record. So is putting the country in a search entry's file
 name, which would need a cache-generation bump and would abandon every entry
 users already have.
 
+### HTML dumps
+
+`--debug` writes every page it fetched to disk, and that dump is the cheapest
+way to find out what iHerb actually served when a selector stops matching. #51
+and #54 were both found by staring at one. It needs no display: `--debug` is
+headless, so the dump is available in CI, over SSH and in an unattended run.
+
+Dumps go in the `dumps` subdirectory of the cache directory `cache path` prints:
+
+```bash
+iherb-cli product 12949 --no-cache --debug
+ls "$(iherb-cli cache path)/dumps"
+# iherb_product_12949_20260902T134501.882Z_74213.html
+```
+
+The name carries the target, the UTC instant and the process id, so successive
+runs accumulate rather than overwriting each other and two concurrent runs on
+the same id cannot collide. The timestamp sorts lexically as well as
+chronologically, so `ls` lists the newest last and diffing yesterday's capture
+against today's is a `diff` on two file names.
+
+**`cache stats` does not count dumps and `cache clear` does not remove them.**
+Both are documented above as touching regular `.json` files sitting *directly*
+in the cache directory — never a symlink, never a subdirectory — and that
+guarantee is worth more than the tidiness of sweeping the dumps with it. They
+are yours to remove, and nothing else will:
+
+```bash
+rm -rf "$(iherb-cli cache path)/dumps"
+```
+
+That matters, because a dump is around 3 MB per page and nothing ages one out.
+The write is deliberately unchecked: a full disk costs you the diagnostic, never
+the run you asked for, which also means a dump can silently fail to appear.
+
 ### Freshness
 
 Every Markdown document ends with a footer saying where its data came from and

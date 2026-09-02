@@ -133,13 +133,40 @@ struct ConfigDefaults {
     cache_ttl: Option<String>,
 }
 
+/// The cache directory this tool uses on this platform.
+///
+/// `~/Library/Caches/iherb-cli` on macOS, `~/.cache/iherb-cli` on Linux, and a
+/// relative `.cache/iherb-cli` when the platform will not say. Its own function
+/// rather than a line inside [`AppConfig::load`] because the HTML dumps need
+/// the same answer and are written from the scrapers, which have no config in
+/// hand (#63). One resolution, two callers, rather than two resolutions that
+/// can drift.
+pub fn resolve_cache_dir() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from(".cache"))
+        .join("iherb-cli")
+}
+
+/// Where `--debug` writes the HTML it fetched.
+///
+/// A `dumps` subdirectory of the cache directory, so the dumps inherit the
+/// platform logic that already existed instead of landing in a hardcoded `/tmp`
+/// path (#63), and so `cache path` names the directory they are under.
+///
+/// **They are not cache entries and nothing here treats them as any.**
+/// `cache stats` does not count them and `cache clear` does not remove them:
+/// both are documented as touching regular `.json` files sitting *directly* in
+/// the cache directory, never a subdirectory, and that guarantee is worth more
+/// than sweeping the dumps with it. Removing them is `rm -r` on this path.
+pub fn dumps_dir() -> PathBuf {
+    resolve_cache_dir().join("dumps")
+}
+
 impl AppConfig {
     /// Resolve the configuration from the global flags, the environment and the
     /// config file, in that order of priority.
     pub fn load(args: &GlobalArgs) -> Result<Self, IherbError> {
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from(".cache"))
-            .join("iherb-cli");
+        let cache_dir = resolve_cache_dir();
         let data_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from(".local/share"))
             .join("iherb-cli");
