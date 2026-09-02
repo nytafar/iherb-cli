@@ -62,6 +62,7 @@ fn config_with(scratch: &std::path::Path, browser_path: Option<StatedBrowserPath
         delay_ms: 0,
         debug: false,
         headful: false,
+        timing: false,
         browser_path,
         profile: ProfileChoice::Throwaway,
         cache_dir: scratch.join("cache"),

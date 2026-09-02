@@ -66,6 +66,7 @@ fn config(country: &str, currency: &str, cache_dir: PathBuf) -> AppConfig {
         delay_ms: 0,
         debug: false,
         headful: false,
+        timing: false,
         browser_path: None,
         profile: ProfileChoice::Throwaway,
         cache_dir,

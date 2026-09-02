@@ -19,17 +19,7 @@ use crate::scraper::navigation::{Navigator, Storefront};
 /// Navigation attempts after the first, per page.
 const NAVIGATION_RETRIES: u32 = 2;
 
-/// What the pipeline waits for before reading a page's HTML.
-///
-/// Every target waits the same way today: [`Navigator`] sleeps for the
-/// configured delay, then polls `document.readyState`. #11 replaces that with a
-/// per-target readiness probe, and this is the seam it plugs into. Until then
-/// there is one variant and behaviour is unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadinessTarget {
-    /// Wait for `document.readyState === "complete"`.
-    DocumentComplete,
-}
+pub use crate::scraper::navigation::ReadinessTarget;
 
 /// Whether the pipeline should walk another page of a paginated target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,7 +165,12 @@ pub trait FetchTarget {
         1
     }
 
-    /// What the pipeline waits for before reading each page. See #11.
+    /// What the pipeline waits for before reading each page (#11).
+    ///
+    /// The default is the weakest answer — `document.readyState` — and a target
+    /// that knows what its own data looks like should say so instead. It is a
+    /// default rather than a required method because a new target that has not
+    /// yet chosen a selector set should behave, not fail to compile.
     fn readiness(&self) -> ReadinessTarget {
         ReadinessTarget::DocumentComplete
     }
@@ -323,13 +318,12 @@ async fn read_target<T: FetchTarget>(
     // The storefront goes to the navigator because asking for one is part of
     // making the request, not part of reading the answer: iHerb carries the
     // preference in a cookie that has to be set before the page is fetched (#5).
-    let navigator = Navigator::new(config.delay_ms, Storefront::requested(config));
-
-    // Exhaustive so that #11 has to decide what a new variant means here.
-    // `Navigator` already implements DocumentComplete.
-    match target.readiness() {
-        ReadinessTarget::DocumentComplete => {}
-    }
+    let navigator = Navigator::new(
+        config.delay_ms,
+        Storefront::requested(config),
+        config.timing,
+    );
+    let readiness = target.readiness();
 
     let page_count = target.page_count();
     let mut acc = T::Accumulator::default();
@@ -341,7 +335,7 @@ async fn read_target<T: FetchTarget>(
 
         let url = target.url(page_num);
         let html = navigator
-            .navigate_with_retry(page, &url, NAVIGATION_RETRIES)
+            .navigate_with_retry(page, &url, NAVIGATION_RETRIES, readiness)
             .await
             .context(target.navigation_context())?;
 

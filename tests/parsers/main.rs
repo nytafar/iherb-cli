@@ -61,4 +61,5 @@ mod helpers;
 mod product_dom;
 mod product_json;
 mod provenance;
+mod readiness;
 mod search;

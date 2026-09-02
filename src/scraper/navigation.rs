@@ -105,6 +105,187 @@ impl Storefront {
     }
 }
 
+/// How often a readiness probe is retried (#11).
+///
+/// 250 ms, from the fork. Short enough that a warm page — ready in about
+/// 300 ms — is read almost as soon as it is ready, rather than after a fixed
+/// two seconds.
+pub const READINESS_POLL: Duration = Duration::from_millis(250);
+
+/// The longest a readiness probe waits before giving up and reading the page
+/// anyway.
+///
+/// Eight seconds. A *bound*, not a gate: see [`wait_for_selectors`].
+pub const READINESS_BUDGET: Duration = Duration::from_secs(8);
+
+/// How long `document.readyState` is polled for the targets that have no
+/// selector to wait on. Unchanged from before #11.
+const READY_STATE_BUDGET: Duration = Duration::from_secs(10);
+const READY_STATE_POLL: Duration = Duration::from_millis(500);
+
+/// What a page has to show before the pipeline reads it (#11).
+///
+/// Every navigation used to sleep for `--delay` — 2000 ms by default, charged
+/// **per navigation** — and then poll `document.readyState` for up to another
+/// ten seconds. `readyState == "complete"` fires when the document and its
+/// subresources have loaded, which on a Next.js page says nothing about whether
+/// the data being scraped is in the DOM, so the sleep was there to compensate
+/// for a signal that answers the wrong question. Two seconds is simultaneously
+/// too long for a warm page and too short for a cold one.
+///
+/// The replacement waits for a selector that proves *the data* has rendered.
+/// Measured on a 25-product comparison against the Norwegian storefront, the
+/// fixed delay was roughly a third of the wall clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadinessTarget {
+    /// Nothing specific to wait for: poll `document.readyState` as before.
+    ///
+    /// Kept rather than removed because it is the honest answer for a page
+    /// whose shape nothing here knows. A target that acquires a selector set
+    /// moves off it.
+    DocumentComplete,
+    /// A product page.
+    Product,
+    /// A search or category results page.
+    Search,
+}
+
+impl ReadinessTarget {
+    /// The selectors any one of which proves this page's data has rendered.
+    ///
+    /// Any, not all: a product page carries JSON-LD *or* the DOM headings, and
+    /// requiring both would wait out the budget on a page that is ready.
+    ///
+    /// Every selector here except `.no-results` is checked against a captured
+    /// page in `tests/parsers/readiness.rs`, so a selector that stops matching
+    /// the real site is a test failure rather than eight seconds of silence.
+    /// **`.no-results` is the exception and is unverified**: this repository
+    /// holds no capture of an empty result set, so it is carried from the fork
+    /// on the fork's word. It costs nothing if it is wrong — see the bound
+    /// below — and it is what makes an empty search return at once if it is
+    /// right.
+    pub fn selectors(self) -> &'static [&'static str] {
+        match self {
+            ReadinessTarget::DocumentComplete => &[],
+            ReadinessTarget::Product => &[
+                "script[type=\"application/ld+json\"]",
+                "h1#name",
+                "#product-specs-list",
+                "#product-overview",
+            ],
+            ReadinessTarget::Search => &[
+                "div.product-cell-container",
+                "#product-count",
+                // A genuinely empty result set. Without it an empty search
+                // waits out the whole budget to learn what the page said
+                // immediately.
+                ".no-results",
+            ],
+        }
+    }
+}
+
+/// How a readiness wait ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Readiness {
+    /// This selector matched. Named so the log and `--timing` can say which.
+    Ready(&'static str),
+    /// Nothing matched inside [`READINESS_BUDGET`]. The page is read anyway.
+    TimedOut,
+    /// The target has no selectors; `document.readyState` was polled instead.
+    ReadyState,
+}
+
+/// Wait until one of `selectors` is present, or the budget runs out.
+///
+/// # A bound, not a gate
+///
+/// A budget that expires is **not** an error and does not fail the run. A
+/// selector set is a claim about the shape of iHerb's pages, and iHerb changes
+/// them; a wait that failed the run would turn every such change into a hard
+/// outage instead of a slow read, and the scrapers below already have layered
+/// fallbacks and a `parse_failed` for the case where the page genuinely cannot
+/// be read. The budget's job is to stop *waiting*, not to decide anything.
+///
+/// # Why the probe is a parameter
+///
+/// So the timing can be asserted without a browser. The claim #11 makes is that
+/// nothing is slept through before the page is checked, and the only way to test
+/// that is to hand this function a probe that answers immediately and measure
+/// how long it takes to return. Driving it through `Page` would make that a
+/// browser test, and a browser test that measures 300 ms against a 2000 ms
+/// regression is one the suite cannot run offline.
+pub async fn wait_for_selectors<F, Fut>(selectors: &[&'static str], mut probe: F) -> Readiness
+where
+    F: FnMut(&'static str) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    if selectors.is_empty() {
+        return Readiness::ReadyState;
+    }
+
+    let deadline = std::time::Instant::now() + READINESS_BUDGET;
+    loop {
+        // Checked before any sleep, on every pass including the first. That is
+        // the whole of "no unconditional sleep before content extraction": a
+        // page that is already there costs one round trip per selector and
+        // nothing else.
+        for selector in selectors {
+            if probe(selector).await {
+                return Readiness::Ready(selector);
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Readiness::TimedOut;
+        }
+        tokio::time::sleep(READINESS_POLL).await;
+    }
+}
+
+/// What each phase of one navigation cost, for `--timing` (#11).
+///
+/// Reported so the improvement is measurable rather than assumed, and because
+/// an agent deciding whether a slow run is worth retrying wants to know which
+/// phase was slow: a long `cloudflare_check_ms` and a long `wait_selector_ms`
+/// call for opposite responses.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct NavigationTiming {
+    pub goto: Duration,
+    pub cloudflare_check: Duration,
+    pub wait_selector: Duration,
+    pub html_extract: Duration,
+}
+
+impl NavigationTiming {
+    /// Everything the four phases took together.
+    pub fn total(&self) -> Duration {
+        self.goto + self.cloudflare_check + self.wait_selector + self.html_extract
+    }
+
+    /// One line for stderr.
+    ///
+    /// `key=value` pairs rather than prose, because the reader is as likely to
+    /// be an agent as a person, and milliseconds rather than a formatted
+    /// duration for the same reason.
+    pub fn render(&self, url: &str, readiness: Readiness) -> String {
+        format!(
+            "timing goto_ms={} cloudflare_check_ms={} wait_selector_ms={} \
+             html_extract_ms={} total_ms={} ready={} url={}",
+            self.goto.as_millis(),
+            self.cloudflare_check.as_millis(),
+            self.wait_selector.as_millis(),
+            self.html_extract.as_millis(),
+            self.total().as_millis(),
+            match readiness {
+                Readiness::Ready(selector) => selector,
+                Readiness::TimedOut => "none-matched",
+                Readiness::ReadyState => "document-complete",
+            },
+            url
+        )
+    }
+}
+
 pub struct Navigator {
     delay_ms: u64,
     /// The storefront to ask for, or `None` to take whatever iHerb serves.
@@ -119,13 +300,16 @@ pub struct Navigator {
     /// saying is read off the page as it always was, and
     /// [`crate::targets::check_currency`] is what compares the two.
     storefront: Option<Storefront>,
+    /// Whether `--timing` asked for the per-phase durations on stderr (#11).
+    timing: bool,
 }
 
 impl Navigator {
-    pub fn new(delay_ms: u64, storefront: Option<Storefront>) -> Self {
+    pub fn new(delay_ms: u64, storefront: Option<Storefront>, timing: bool) -> Self {
         Self {
             delay_ms,
             storefront,
+            timing,
         }
     }
 
@@ -188,7 +372,33 @@ impl Navigator {
         );
     }
 
-    pub async fn navigate(&self, page: &Page, url: &str) -> Result<String, IherbError> {
+    /// Navigate, wait for the page to be worth reading, and return its HTML.
+    ///
+    /// # There is no sleep before the page is checked (#11)
+    ///
+    /// There used to be: `--delay`, 2000 ms by default, charged **per
+    /// navigation**, before anything looked at the page at all. On a 25-product
+    /// comparison against the Norwegian storefront that was roughly a third of
+    /// the wall clock, against a warm page that is ready in about 300 ms — and
+    /// it was still not enough for a cold one, which is why extraction
+    /// sometimes fell through to the DOM scraper and returned partial data.
+    ///
+    /// `--delay` now does the job its name describes: politeness *between*
+    /// requests, in [`Navigator::rate_limit_delay`]. It is not a guess at page
+    /// load time any more, so its default drops to 500 ms.
+    ///
+    /// # The phase order is the order the answers arrive in
+    ///
+    /// Cloudflare is checked before the readiness selectors, not after. An
+    /// interstitial is a complete, ready page that contains none of the
+    /// selectors, so probing first would spend the whole readiness budget
+    /// learning what the title says immediately.
+    pub async fn navigate(
+        &self,
+        page: &Page,
+        url: &str,
+        readiness: ReadinessTarget,
+    ) -> Result<String, IherbError> {
         tracing::info!("Navigating to: {}", url);
 
         // Before the navigation, not after: the cookies are read by the server
@@ -196,28 +406,93 @@ impl Navigator {
         // would change nothing about the HTML we are about to read.
         self.request_storefront(page).await;
 
+        let mut timing = NavigationTiming::default();
+        let started = std::time::Instant::now();
+
         page.goto(url)
             .await
             .map_err(|e| navigation_failure(format_args!("Failed to navigate to {}", url), e))?;
+        timing.goto = started.elapsed();
 
-        // Wait for initial page load
-        tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+        let cloudflare_started = std::time::Instant::now();
+        let cloudflare = self.clear_cloudflare(page).await;
+        timing.cloudflare_check = cloudflare_started.elapsed();
+        cloudflare?;
 
-        // Wait for document.readyState === 'complete' (up to 10s)
-        for _ in 0..20 {
+        let wait_started = std::time::Instant::now();
+        let outcome = self.wait_until_ready(page, readiness).await;
+        timing.wait_selector = wait_started.elapsed();
+
+        if outcome == Readiness::TimedOut {
+            tracing::warn!(
+                "None of the {:?} readiness selectors appeared within {:?}; reading the \
+                 page as it stands. Extraction may fall through to its weaker strategies.",
+                readiness,
+                READINESS_BUDGET
+            );
+        }
+
+        let extract_started = std::time::Instant::now();
+        let html = page
+            .content()
+            .await
+            .map_err(|e| navigation_failure("Failed to get page content", e))?;
+        timing.html_extract = extract_started.elapsed();
+
+        // stderr directly rather than through `tracing`, because `--timing` is
+        // a request for these numbers and not a request to turn logging up:
+        // routing it through the subscriber would make it arrive only under
+        // `--debug`, or make `--timing` change the level of everything else.
+        if self.timing {
+            eprintln!("{}", timing.render(url, outcome));
+        }
+        tracing::debug!("{}", timing.render(url, outcome));
+
+        Ok(html)
+    }
+
+    /// Wait for the page to show that the data being scraped has rendered.
+    async fn wait_until_ready(&self, page: &Page, readiness: ReadinessTarget) -> Readiness {
+        let selectors = readiness.selectors();
+        if selectors.is_empty() {
+            self.wait_for_ready_state(page).await;
+            return Readiness::ReadyState;
+        }
+        wait_for_selectors(selectors, |selector| async move {
+            page.find_element(selector).await.is_ok()
+        })
+        .await
+    }
+
+    /// The pre-#11 wait, kept for [`ReadinessTarget::DocumentComplete`].
+    ///
+    /// `readyState` is the wrong signal for a page whose data arrives after the
+    /// document does, which is why the selectors exist — but for a target
+    /// nothing here knows the shape of, it is the only signal there is, and it
+    /// is better than reading the page mid-parse.
+    async fn wait_for_ready_state(&self, page: &Page) {
+        let deadline = std::time::Instant::now() + READY_STATE_BUDGET;
+        loop {
             let ready = page
                 .evaluate("document.readyState")
                 .await
                 .ok()
                 .and_then(|v| v.into_value::<String>().ok())
                 .unwrap_or_default();
-            if ready == "complete" {
-                break;
+            if ready == "complete" || std::time::Instant::now() >= deadline {
+                return;
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(READY_STATE_POLL).await;
         }
+    }
 
-        // Check for and handle Cloudflare challenge
+    /// Detect a Cloudflare interstitial and wait it out, up to
+    /// [`MAX_CLOUDFLARE_RETRIES`] attempts.
+    ///
+    /// Lifted out of [`Navigator::navigate`] unchanged in behaviour, so that
+    /// `--timing` can charge it its own phase rather than folding it into the
+    /// readiness wait it precedes.
+    async fn clear_cloudflare(&self, page: &Page) -> Result<(), IherbError> {
         for attempt in 1..=MAX_CLOUDFLARE_RETRIES {
             if !self.is_cloudflare_challenge(page).await {
                 break;
@@ -261,12 +536,7 @@ impl Navigator {
             }
         }
 
-        let html = page
-            .content()
-            .await
-            .map_err(|e| navigation_failure("Failed to get page content", e))?;
-
-        Ok(html)
+        Ok(())
     }
 
     pub async fn navigate_with_retry(
@@ -274,11 +544,12 @@ impl Navigator {
         page: &Page,
         url: &str,
         max_retries: u32,
+        readiness: ReadinessTarget,
     ) -> Result<String, IherbError> {
         let mut last_err = None;
 
         for attempt in 1..=max_retries + 1 {
-            match self.navigate(page, url).await {
+            match self.navigate(page, url, readiness).await {
                 Ok(html) => return Ok(html),
                 Err(e) => {
                     tracing::warn!(

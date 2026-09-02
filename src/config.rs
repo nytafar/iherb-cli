@@ -13,6 +13,15 @@ use std::time::Duration;
 /// interim: one number, and the caller picks it.
 pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// How long a run waits between requests when `--delay` says nothing.
+///
+/// 500 ms since #11, down from 2000. The old number was never a politeness
+/// figure: it was slept *before every navigation*, as a guess at how long a page
+/// takes to render, and a 25-product comparison spent roughly a third of its
+/// wall clock in it. Readiness selectors answer that question properly now, so
+/// this is only the gap between one request and the next.
+pub const DEFAULT_DELAY_MS: u64 = 500;
+
 /// What a run is allowed to do with the cache.
 ///
 /// Three states rather than a `no_cache: bool`, because the bool could not say
@@ -230,6 +239,13 @@ pub struct AppConfig {
     pub debug: bool,
     /// A browser window you can see. Says nothing about logging (#62).
     pub headful: bool,
+    /// Per-phase navigation durations on stderr (#11).
+    ///
+    /// Its own flag rather than part of `--debug`, for the reason #62 split the
+    /// window off it: a caller that wants to know where the seconds went does
+    /// not necessarily want every debug line and an HTML dump per page, and one
+    /// line per navigation is cheap enough to ask for on its own.
+    pub timing: bool,
     /// The browser executable the caller named, with the source that named it.
     ///
     /// `None` means nobody named one, which is the only case
@@ -368,7 +384,15 @@ impl AppConfig {
             .map(|c| c.trim().to_uppercase())
             .filter(|c| !c.is_empty());
 
-        let delay_ms = args.delay.or(file_config.defaults.delay_ms).unwrap_or(2000);
+        // 500, not the 2000 it was. The old default was doing two jobs — a
+        // guess at page-load time *and* politeness between requests — and #11
+        // moved the first job to the readiness selectors. What is left is the
+        // gap between one request and the next, and half a second of that is
+        // still polite for the handful of pages a run fetches.
+        let delay_ms = args
+            .delay
+            .or(file_config.defaults.delay_ms)
+            .unwrap_or(DEFAULT_DELAY_MS);
 
         Self::validate_country(&country)?;
 
@@ -380,6 +404,7 @@ impl AppConfig {
             delay_ms,
             debug: args.debug,
             headful: args.headful,
+            timing: args.timing,
             browser_path,
             profile: ProfileChoice::from_flags(args.profile_dir.as_deref(), args.no_profile)?,
             cache_dir,

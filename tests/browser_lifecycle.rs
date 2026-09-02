@@ -50,6 +50,7 @@ fn test_config(scratch: &Path, debug: bool, headful: bool) -> AppConfig {
         delay_ms: 0,
         debug,
         headful,
+        timing: false,
         browser_path: None,
         profile: ProfileChoice::Throwaway,
         cache_dir: scratch.join("cache"),

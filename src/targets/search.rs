@@ -9,7 +9,7 @@ use crate::cache::CacheKey;
 use crate::cli::SortOrder;
 use crate::config::AppConfig;
 use crate::error::IherbError;
-use crate::fetch::{FetchTarget, Paging};
+use crate::fetch::{FetchTarget, Paging, ReadinessTarget};
 use crate::model::{ProductSummary, SearchFetch, SearchResult};
 use crate::scraper;
 use crate::scraper::search::CategoryId;
@@ -179,6 +179,13 @@ impl FetchTarget for SearchTarget {
 
     fn navigation_context(&self) -> String {
         "Failed to navigate to search page".to_string()
+    }
+
+    /// Wait for the result cards, the result count, or the page's own
+    /// "no results" — the third being what stops an empty search from waiting
+    /// out the whole readiness budget (#11).
+    fn readiness(&self) -> ReadinessTarget {
+        ReadinessTarget::Search
     }
 
     fn has_enough(&self, acc: &Self::Accumulator) -> bool {

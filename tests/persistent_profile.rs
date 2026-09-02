@@ -78,6 +78,7 @@ fn config(scratch: &Path, profile: ProfileChoice) -> AppConfig {
         delay_ms: 0,
         debug: false,
         headful: false,
+        timing: false,
         browser_path: None,
         profile,
         cache_dir: scratch.join("cache"),

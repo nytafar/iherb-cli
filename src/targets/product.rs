@@ -6,7 +6,7 @@ use chromiumoxide::Page;
 use crate::cache::CacheKey;
 use crate::config::AppConfig;
 use crate::error::IherbError;
-use crate::fetch::{FetchTarget, Paging};
+use crate::fetch::{FetchTarget, Paging, ReadinessTarget};
 use crate::model::{ProductDetail, Source};
 use crate::scraper;
 use crate::targets::check_currency;
@@ -78,6 +78,11 @@ impl FetchTarget for ProductTarget {
 
     fn navigation_context(&self) -> String {
         "Failed to navigate to product page".to_string()
+    }
+
+    /// Wait for the product data itself, not for `document.readyState` (#11).
+    fn readiness(&self) -> ReadinessTarget {
+        ReadinessTarget::Product
     }
 
     async fn extract<'a>(

@@ -113,9 +113,27 @@ pub struct GlobalArgs {
     #[arg(long, global = true, value_name = "PATH", verbatim_doc_comment)]
     pub config: Option<std::path::PathBuf>,
 
-    /// Delay between requests in milliseconds (default: 2000)
-    #[arg(long, global = true)]
+    /// Delay between requests in milliseconds (default: 500)
+    ///
+    /// Politeness between one request and the next, and nothing else. Until
+    /// #11 it was also slept before every navigation as a guess at page-load
+    /// time — 2000 ms, charged per page, about a third of a 25-product
+    /// comparison's wall clock — which is now the readiness selectors' job.
+    #[arg(long, global = true, verbatim_doc_comment)]
     pub delay: Option<u64>,
+
+    /// Print how long each phase of every navigation took, on stderr.
+    ///
+    /// One `key=value` line per page: `goto_ms`, `cloudflare_check_ms`,
+    /// `wait_selector_ms`, `html_extract_ms`, the total, and which readiness
+    /// selector matched. This is what makes a slow run diagnosable rather than
+    /// merely slow — a long Cloudflare check and a long selector wait call for
+    /// opposite responses.
+    ///
+    /// Independent of `--debug`, which turns every log line up and writes an
+    /// HTML dump per page.
+    #[arg(long, global = true, verbatim_doc_comment)]
+    pub timing: bool,
 
     /// Keep the browser profile in this directory instead of the default one.
     ///
@@ -195,6 +213,7 @@ impl GlobalArgs {
             browser_path: None,
             config: None,
             delay: None,
+            timing: false,
             profile_dir: None,
             no_profile: false,
             json: false,

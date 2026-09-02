@@ -157,7 +157,8 @@ Take 1 capsule daily with or without food.
 | `--cache-ttl <duration>` | How long an entry stays usable: `30d`, `12h`, `45m`, `90s`, `2w` | `30d` |
 | `--browser-path <path>` | Chrome or Chromium executable. Outranks `IHERB_BROWSER_PATH` and the config file. A path that does not exist is `invalid_input` (2), never a silent fallback | — |
 | `--config <path>` | Read this config file instead of the one under the user's config dir | — |
-| `--delay <ms>` | Delay between requests in milliseconds | `2000` |
+| `--delay <ms>` | Politeness delay *between* requests in milliseconds | `500` |
+| `--timing` | Print per-phase navigation durations on stderr | — |
 | `--profile-dir <path>` | Keep the browser profile here. Never deleted by this tool | default profile under the data dir |
 | `--no-profile` | Use a throwaway profile that is deleted when the run ends | — |
 | `--json` | Emit one JSON document on stdout instead of Markdown — see below | — |
@@ -190,6 +191,37 @@ iherb-cli product 61864 --config ./ci.toml
 > name says. There is no alias and no deprecation period: nothing has been
 > released (#38), so the break costs no consumer anything.
 
+
+### Timing and page readiness
+
+Every navigation used to sleep `--delay` — 2000 ms, charged **per page** —
+before anything looked at the page, then poll `document.readyState`. That
+signal fires when the document and its subresources have loaded, which on a
+Next.js page says nothing about whether the data being scraped is in the DOM,
+so the sleep was compensating for a signal that answers the wrong question. On
+a 25-product comparison against the Norwegian storefront it was roughly a third
+of the wall clock.
+
+A fetch now waits for a selector that proves *its own data* has rendered:
+JSON-LD or the product headings for a product page, the result cards or the
+result count for a search — plus the page's own "no results", so an empty search
+returns at once instead of waiting out a timeout. Selectors are polled every
+250 ms for up to 8 seconds, and the budget is a bound rather than a verdict: a
+page that never matches is read as it stands, with a warning, because a selector
+set is a claim about iHerb's markup and iHerb changes it.
+
+`--delay` now does only what its name says — the gap between one request and the
+next — so its default drops to 500 ms.
+
+`--timing` prints one line per navigation on stderr:
+
+```
+timing goto_ms=412 cloudflare_check_ms=7 wait_selector_ms=263 html_extract_ms=31 total_ms=713 ready=h1#name url=https://no.iherb.com/pr/x/12949
+```
+
+Independent of `--debug`, which turns every log line up and writes an HTML dump
+per page. A long `cloudflare_check_ms` and a long `wait_selector_ms` call for
+opposite responses, which is the point of separating them.
 
 ### The browser profile
 
@@ -483,7 +515,7 @@ cache_ttl = "12h"
 # that does not exist fails the run naming this file, rather than falling
 # through to system Chrome (#55).
 browser_path = "/usr/bin/chromium"
-delay_ms = 2000
+delay_ms = 500
 ```
 
 `--config <path>` reads exactly that file. A path given there must exist and
