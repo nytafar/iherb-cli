@@ -25,12 +25,20 @@ use tokio::sync::Notify;
 use crate::browser::session::BrowserSession;
 use crate::cache::{Cache, CacheClearReport, CacheStats, ClearFilter};
 use crate::cli::{CacheCommand, Cli, Commands, Section, SortOrder};
-use crate::config::{parse_duration, AppConfig};
+use crate::config::{parse_duration, AppConfig, ProfileChoice};
 use crate::error::{classify_error, ErrorKind, IherbError};
 use crate::fetch::{fetch, Failure, Provenance};
 use crate::model::{ProductDetail, SearchResult};
 use crate::output::{self, Envelope, Freshness, Meta, ProductView};
+use crate::scraper::navigation::navigation_failure;
 use crate::targets::{ProductTarget, SearchTarget};
+
+/// How often `setup` checks whether the window is still open.
+///
+/// A second: long enough that a command whose job is to wait costs nothing to
+/// run, short enough that closing the window ends the command while the person
+/// is still looking at the terminal.
+const SETUP_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Run the CLI: configure logging, load config, dispatch the subcommand, and
 /// render whatever came back.
@@ -227,7 +235,80 @@ async fn dispatch(
         // nothing to do with a fetch — so it carries no provenance, and the
         // envelope's `fetched_at` is `null` because no page was read.
         Commands::Cache { action } => cmd_cache(config, action).map_err(Failure::from),
+        Commands::Setup => cmd_setup(config, browser_session).await,
     }
+}
+
+/// Open a window on the storefront and wait, so a human can prepare the profile
+/// every later run will reuse (#12).
+///
+/// The whole command is the waiting. Chrome is launched against the profile
+/// directory the flags resolved, pointed at the storefront, and left alone until
+/// the person closes it; whatever they did — cleared a challenge, picked a
+/// country and currency, signed in — is in the profile directory when they do.
+///
+/// # It waits on the window, not on stdin
+///
+/// The obvious alternative is "press Enter when done", and it is wrong for this
+/// tool: `iherb-cli` is run by agents, and a prompt an agent cannot answer is a
+/// hang rather than a handshake. Watching the browser's own tab list asks the
+/// question the command actually cares about — is the window still open — and
+/// answers it the same way whether a person closes the window or Ctrl+C ends
+/// the run.
+pub async fn cmd_setup(
+    config: &AppConfig,
+    browser_session: &mut Option<BrowserSession>,
+) -> Result<CommandOutcome, Failure> {
+    if config.profile == ProfileChoice::Throwaway {
+        return Err(IherbError::InvalidInput(
+            "`setup` prepares a profile for later runs to reuse, and --no-profile              deletes the profile when the run ends. Drop --no-profile, or name a              directory with --profile-dir."
+                .to_string(),
+        )
+        .into());
+    }
+
+    // A window, whatever the flags said. A headless `setup` would be a command
+    // that asks a human to do something they cannot see, so this is one of the
+    // two places `--headful` is not the caller's to withhold.
+    let headful = AppConfig {
+        headful: true,
+        ..config.clone()
+    };
+
+    let session = crate::fetch::get_or_launch_browser(&headful, browser_session).await?;
+    let profile_dir = session.profile_dir().to_path_buf();
+    let url = config.base_url();
+
+    let page = session.new_page().await.map_err(Failure::from)?;
+    page.goto(&url).await.map_err(|e| {
+        Failure::from(navigation_failure(
+            format_args!("Failed to open {}", url),
+            e,
+        ))
+    })?;
+
+    eprintln!(
+        "A browser window is open on {}.
+         Clear any Cloudflare challenge, set the country and currency you want,          and sign in if you use an account.
+         Close the window when you are done. Everything is saved in {}.",
+        url,
+        profile_dir.display()
+    );
+
+    // Polled rather than awaited on an event, because "the window is gone" is
+    // not one event: the person may close the last tab, quit Chrome, or the
+    // process may die. An empty tab list and a browser that has stopped
+    // answering are the same answer to the only question being asked.
+    loop {
+        tokio::time::sleep(SETUP_POLL).await;
+        match session.open_page_urls().await {
+            Ok(urls) if urls.is_empty() => break,
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+
+    Ok(CommandOutcome::Setup { profile_dir })
 }
 
 /// Inspect or manage the cache directory (#22).
@@ -364,6 +445,8 @@ pub enum CommandOutcome {
     /// an enum is as wide as its widest variant, and a clear report carries a
     /// list of file names.
     Cache { report: Box<CacheReport> },
+    /// A `setup` invocation, and the profile directory it prepared (#12).
+    Setup { profile_dir: std::path::PathBuf },
 }
 
 /// What a `cache` invocation produced.
@@ -387,6 +470,10 @@ impl CommandOutcome {
             CommandOutcome::Search { provenance, .. } => Some(*provenance),
             CommandOutcome::Product { provenance, .. } => Some(*provenance),
             CommandOutcome::Cache { .. } => None,
+            // Nor does `setup`: it opened a page for a person to look at and
+            // read nothing off it. Dating the document as though it had scraped
+            // something would be the fabrication #44 removed.
+            CommandOutcome::Setup { .. } => None,
         }
     }
 }
@@ -442,6 +529,7 @@ fn render_markdown(outcome: &CommandOutcome, config: &AppConfig, emitted_at: Sys
         // No freshness footer: a `cache` document describes the cache
         // directory as it is right now, and there is no fetch for it to date.
         CommandOutcome::Cache { report } => output::format_cache_report(report, config),
+        CommandOutcome::Setup { profile_dir } => output::format_setup_report(profile_dir),
     }
 }
 
@@ -464,6 +552,7 @@ fn render_json(
         // The same envelope, because a new command that invented a second
         // output convention would make `--json` two contracts (#22).
         CommandOutcome::Cache { report } => output::format_cache_json(report, config),
+        CommandOutcome::Setup { profile_dir } => output::format_setup_json(profile_dir),
     };
 
     json_document(meta, data)

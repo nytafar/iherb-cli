@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use iherb_cli::cache::{Cache, CacheKey};
 use iherb_cli::cli::SortOrder;
-use iherb_cli::config::AppConfig;
+use iherb_cli::config::{AppConfig, ProfileChoice};
 use iherb_cli::fetch::FetchTarget;
 use iherb_cli::model::{ProductDetail, ProductSummary, SearchFetch, SearchResult};
 use iherb_cli::targets::{ProductTarget, SearchTarget};
@@ -67,6 +67,7 @@ fn config(country: &str, currency: &str, cache_dir: PathBuf) -> AppConfig {
         debug: false,
         headful: false,
         browser_path: None,
+        profile: ProfileChoice::Throwaway,
         cache_dir,
         data_dir: PathBuf::from("/nonexistent"),
     }

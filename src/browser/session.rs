@@ -1,9 +1,10 @@
-use crate::config::AppConfig;
+use crate::config::{AppConfig, ProfileChoice};
 use crate::error::IherbError;
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::Page;
 use futures::StreamExt;
-use std::path::PathBuf;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -34,6 +35,12 @@ const STEALTH_DISABLED_FEATURES: &[&str] = &["IsolateOrigins", "site-per-process
 /// How many times a profile directory removal is attempted before giving up.
 const CLEANUP_ATTEMPTS: u32 = 4;
 
+/// How long a graceful browser close is given before it is killed (#12).
+///
+/// Three seconds, which is the fork's number and is long enough for a Chrome
+/// that is going to answer. What it bounds is a Chrome that is not.
+const CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// How long to wait between those attempts.
 ///
 /// Chrome's child processes are killed by `kill_on_drop`, which chromiumoxide
@@ -42,7 +49,7 @@ const CLEANUP_ATTEMPTS: u32 = 4;
 /// and the wait is what turns the first answer into the second.
 const CLEANUP_SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
 
-/// A temporary profile directory that removes itself.
+/// The Chrome profile directory a session runs against.
 ///
 /// # Why a guard and not an error arm
 ///
@@ -64,17 +71,90 @@ const CLEANUP_SETTLE: std::time::Duration = std::time::Duration::from_millis(400
 /// on exactly the paths where no session came into existence, and on none where
 /// one did. A boolean would be a second thing to keep in step with the move
 /// that already says it.
-struct ProfileDir {
-    path: PathBuf,
+///
+/// # Two variants, and the removal belongs to one of them (#12)
+///
+/// A persistent profile is the entire point of #12: cookies, storefront
+/// preferences and Cloudflare clearance are exactly what a throwaway directory
+/// threw away every run. So the variant records who created the directory, and
+/// [`Drop`] removes only the one this run made. A `owns: bool` beside a path
+/// would be the same thing said worse — the variants make "removed on drop"
+/// and "never removed" two types rather than two states of one.
+enum ProfileDir {
+    /// Created by this run under the temp directory, and removed when the
+    /// session ends. `--no-profile`, and the fallback when a default
+    /// persistent profile is already in use.
+    Temporary { path: PathBuf },
+    /// A directory that outlives the run: the one `--profile-dir` named, or
+    /// the default under the data directory. **Never removed by this tool.**
+    ///
+    /// The lock is held for the life of the session and released by the OS when
+    /// the process ends, however it ends. It is what stops two concurrent runs
+    /// from sharing one profile, which Chrome answers with a `SingletonLock`
+    /// failure that says nothing about who is holding it.
+    Persistent { path: PathBuf, _lock: File },
 }
 
+/// The advisory lock file inside a persistent profile directory.
+///
+/// Ours rather than Chrome's `SingletonLock`, and the difference matters. That
+/// file is a symlink naming a host and a pid, it survives a crash, and reading
+/// it means guessing whether a pid from a previous boot is alive. An advisory
+/// lock on a file we open is released by the kernel when the holder dies —
+/// crash, `kill -9` and clean exit alike — so there is no stale state to
+/// misread.
+const PROFILE_LOCK: &str = ".iherb-cli-profile.lock";
+
 impl ProfileDir {
-    /// Create a profile directory no other run can be using.
+    /// The profile directory this run should use, per [`ProfileChoice`].
+    ///
+    /// The three arms differ only in what happens when the directory is already
+    /// in use, and that difference is #55's rule applied here: a path the
+    /// caller stated binds, and one nobody stated may fall back.
+    fn for_choice(choice: &ProfileChoice, data_dir: &Path) -> Result<Self, IherbError> {
+        match choice {
+            ProfileChoice::Throwaway => Self::temporary(),
+            ProfileChoice::Stated(path) => match Self::persistent(path)? {
+                Some(dir) => Ok(dir),
+                // Stated, so it binds. Falling back here would hand the caller
+                // a run against a profile that is not the one they named, and
+                // the clearance they set up would appear not to work.
+                None => Err(IherbError::BrowserLaunch(format!(
+                    "The profile directory {} is in use by another iherb-cli \
+                     run. A profile Chrome has open cannot be shared. Wait for \
+                     that run, name a different --profile-dir, or pass \
+                     --no-profile to use a throwaway profile.",
+                    path.display()
+                ))),
+            },
+            ProfileChoice::Default => {
+                let path = ProfileChoice::default_dir(data_dir);
+                match Self::persistent(&path)? {
+                    Some(dir) => Ok(dir),
+                    // Nobody named this one, so degrading is honest rather than
+                    // a substitution — but it is said out loud, because the run
+                    // that degrades is the run whose clearance will not persist.
+                    None => {
+                        tracing::warn!(
+                            "The default profile directory {} is in use by another run; \
+                             this run gets a throwaway profile, so nothing it does in \
+                             the browser will be kept. Pass --profile-dir to use a \
+                             second profile of your own.",
+                            path.display()
+                        );
+                        Self::temporary()
+                    }
+                }
+            }
+        }
+    }
+
+    /// A profile directory no other run can be using.
     ///
     /// The name carries the pid and a millisecond timestamp to avoid the
     /// `SingletonLock` conflict two concurrent runs would otherwise hit, and to
     /// avoid inheriting a stale lock left behind by a previous one.
-    fn create() -> Result<Self, IherbError> {
+    fn temporary() -> Result<Self, IherbError> {
         let path = std::env::temp_dir().join(format!(
             "iherb-cli-{}-{}",
             std::process::id(),
@@ -90,17 +170,72 @@ impl ProfileDir {
                 e
             ))
         })?;
-        Ok(Self { path })
+        Ok(Self::Temporary { path })
+    }
+
+    /// A persistent profile directory, locked for this run.
+    ///
+    /// `Ok(None)` means the directory exists and another run holds it — a fact
+    /// the caller decides what to do about, because the answer depends on
+    /// whether the caller named it. `Err` is reserved for a directory that
+    /// could not be created or locked at all.
+    fn persistent(path: &Path) -> Result<Option<Self>, IherbError> {
+        std::fs::create_dir_all(path).map_err(|e| {
+            IherbError::BrowserLaunch(format!(
+                "Failed to create profile dir {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        let lock_path = path.join(PROFILE_LOCK);
+        let lock = File::create(&lock_path).map_err(|e| {
+            IherbError::BrowserLaunch(format!(
+                "Failed to open the profile lock {}: {}",
+                lock_path.display(),
+                e
+            ))
+        })?;
+
+        match lock.try_lock() {
+            Ok(()) => Ok(Some(Self::Persistent {
+                path: path.to_path_buf(),
+                _lock: lock,
+            })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(IherbError::BrowserLaunch(format!(
+                "Failed to lock the profile dir {}: {}",
+                path.display(),
+                e
+            ))),
+        }
     }
 
     fn path(&self) -> &std::path::Path {
-        &self.path
+        match self {
+            ProfileDir::Temporary { path } => path,
+            ProfileDir::Persistent { path, .. } => path,
+        }
+    }
+
+    /// Whether this run will remove the directory when it ends.
+    ///
+    /// Exposed so a test can assert the ownership rule against the session
+    /// rather than against the flag that produced it (#12).
+    fn is_temporary(&self) -> bool {
+        matches!(self, ProfileDir::Temporary { .. })
     }
 }
 
 impl Drop for ProfileDir {
     fn drop(&mut self) {
-        remove_profile_dir(&self.path);
+        // The whole of #12's "a user-supplied profile dir is never deleted by
+        // the tool": the removal is reachable from one variant, so there is no
+        // path — panic, interrupt, or an ordinary close — on which a persistent
+        // profile can be removed by accident.
+        if let ProfileDir::Temporary { path } = self {
+            remove_profile_dir(path);
+        }
     }
 }
 
@@ -165,7 +300,12 @@ impl BrowserSession {
         // exists — so [`ProfileDir`] owns it from the moment it exists until a
         // session takes it over. Chrome that will not start is exactly when a
         // launch gets retried, so this is the leak that repeats (#46).
-        Self::launch_into(chrome_path, config, ProfileDir::create()?).await
+        Self::launch_into(
+            chrome_path,
+            config,
+            ProfileDir::for_choice(&config.profile, &config.data_dir)?,
+        )
+        .await
     }
 
     /// The launch proper, on a profile directory that already exists.
@@ -273,13 +413,24 @@ impl BrowserSession {
         Ok(page)
     }
 
-    /// The temporary profile directory Chrome was launched against.
+    /// The profile directory Chrome was launched against.
     ///
     /// Exposed so a test can watch the directory rather than take the code's
     /// word for it (#46). Callers no longer need it to finish a cleanup someone
-    /// else abandoned: dropping the session is the cleanup, on every path.
+    /// else abandoned: dropping the session is the cleanup, on every path — and
+    /// since #12 there are paths where the correct cleanup is none at all.
     pub fn profile_dir(&self) -> &std::path::Path {
         self.profile.path()
+    }
+
+    /// Whether this session will remove its profile directory when it ends.
+    ///
+    /// The ownership rule #12 asks for, asked of the session rather than of the
+    /// flag that produced it: "a user-supplied profile dir is never deleted by
+    /// the tool" is a property of what the session holds, and a test that
+    /// checked the flag would be checking its own fixture.
+    pub fn profile_is_temporary(&self) -> bool {
+        self.profile.is_temporary()
     }
 
     /// The URL of every tab this browser currently has open.
@@ -318,13 +469,50 @@ impl BrowserSession {
     /// said, and drops the same way when a panic unwinds past a session or an
     /// interrupt abandons one.
     pub async fn close(self) -> Result<(), IherbError> {
-        let closed =
-            {
-                let mut browser = self.browser.lock().await;
-                browser.close().await.map(|_| ()).map_err(|e| {
+        let closed = {
+            let mut browser = self.browser.lock().await;
+            // Bounded, because it used to not be (#12). `Browser::close` waits
+            // for Chrome to answer a CDP request, and a Chrome that has stopped
+            // answering never does — so a hung browser hung the CLI at exit
+            // with nothing to interrupt but the process. The timeout turns that
+            // into a kill, which is the answer `kill_on_drop` would have
+            // reached eventually anyway; this only stops the wait from being
+            // unbounded on the way there.
+            let shutdown = async {
+                browser.close().await.map_err(|e| {
                     IherbError::BrowserLaunch(format!("Failed to close browser: {}", e))
-                })
+                })?;
+                // Asking Chrome to close is not Chrome having closed, and the
+                // difference is observable: the cookie jar, the preferences and
+                // the storefront state a persistent profile exists to keep are
+                // flushed on the way out (#12). A run that returned at the
+                // acknowledgement dropped the `Browser` immediately afterwards,
+                // and `kill_on_drop` then killed a process that was still
+                // writing. Waiting is what makes "the profile survives the run"
+                // true rather than usually true.
+                let _ = browser.wait().await;
+                Ok::<(), IherbError>(())
             };
+
+            match tokio::time::timeout(CLOSE_TIMEOUT, shutdown).await {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(
+                        "The browser did not close within {:?}; killing it.",
+                        CLOSE_TIMEOUT
+                    );
+                    match browser.kill().await {
+                        Some(Err(e)) => Err(IherbError::BrowserLaunch(format!(
+                            "The browser would not close and could not be killed: {}",
+                            e
+                        ))),
+                        // `None` is chromiumoxide saying it no longer holds the
+                        // child — which is the outcome asked for, not a failure.
+                        _ => Ok(()),
+                    }
+                }
+            }
+        };
 
         // Explicit, because the ordering is the point: this kills Chrome and
         // then removes the profile directory, in that order, before the result

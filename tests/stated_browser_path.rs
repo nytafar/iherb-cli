@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use iherb_cli::browser::resolve::resolve_chrome;
 use iherb_cli::config::{
-    AppConfig, BrowserPathSource, CacheMode, StatedBrowserPath, DEFAULT_CACHE_TTL,
+    AppConfig, BrowserPathSource, CacheMode, ProfileChoice, StatedBrowserPath, DEFAULT_CACHE_TTL,
 };
 use iherb_cli::error::{classify_error, ErrorKind};
 
@@ -63,6 +63,7 @@ fn config_with(scratch: &std::path::Path, browser_path: Option<StatedBrowserPath
         debug: false,
         headful: false,
         browser_path,
+        profile: ProfileChoice::Throwaway,
         cache_dir: scratch.join("cache"),
         data_dir: scratch.join("data"),
     }

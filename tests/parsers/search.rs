@@ -1076,6 +1076,7 @@ fn search_config() -> iherb_cli::config::AppConfig {
         debug: false,
         headful: false,
         browser_path: None,
+        profile: iherb_cli::config::ProfileChoice::Throwaway,
         cache_dir: std::path::PathBuf::from("/nonexistent"),
         data_dir: std::path::PathBuf::from("/nonexistent"),
     }

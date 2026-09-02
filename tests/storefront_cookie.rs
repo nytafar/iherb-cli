@@ -34,7 +34,7 @@ use std::path::PathBuf;
 
 use tokio::sync::Mutex;
 
-use iherb_cli::config::AppConfig;
+use iherb_cli::config::{AppConfig, ProfileChoice};
 use iherb_cli::scraper::navigation::{Navigator, Storefront};
 
 fn config(country: &str, currency: Option<&str>) -> AppConfig {
@@ -47,6 +47,7 @@ fn config(country: &str, currency: Option<&str>) -> AppConfig {
         debug: false,
         headful: false,
         browser_path: None,
+        profile: ProfileChoice::Throwaway,
         cache_dir: std::env::temp_dir().join("iherb-cli-storefront-cookie-cache"),
         data_dir: std::env::temp_dir().join("iherb-cli-storefront-cookie-data"),
     }

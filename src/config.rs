@@ -158,6 +158,59 @@ impl StatedBrowserPath {
     }
 }
 
+/// Which Chrome profile directory a run uses (#12).
+///
+/// Every run used to get a fresh throwaway profile under the temp directory,
+/// deleted on the way out — a cold, cookie-less, history-less browser, which is
+/// the fingerprint Cloudflare scores worst, and clearance earned by one run
+/// thrown away before the next could use it. Storefront preferences could not
+/// persist either.
+///
+/// Three states rather than an `Option<PathBuf>`, because "no directory named"
+/// and "no persistence wanted" are different requests and the second has to be
+/// sayable. The default is now persistent, so the benefit is on without a flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileChoice {
+    /// `--profile-dir <path>`. The caller named it, so it binds the way a
+    /// stated browser path does (#55): the tool uses that directory or fails,
+    /// and it never removes it.
+    Stated(PathBuf),
+    /// No flag. A persistent profile under the data directory, which degrades
+    /// to a throwaway one with a warning if another run holds it.
+    Default,
+    /// `--no-profile`. A throwaway profile under the temp directory, removed on
+    /// the way out. What every run did before #12.
+    Throwaway,
+}
+
+impl ProfileChoice {
+    /// What the two flags resolve to.
+    ///
+    /// The pair is a contradiction rather than a redundancy, so it is refused
+    /// rather than ordered by strength the way `--no-cache` and `--refresh`
+    /// are: there is no reading of "use this directory, and use no directory"
+    /// that honours both.
+    pub fn from_flags(profile_dir: Option<&Path>, no_profile: bool) -> Result<Self, IherbError> {
+        match (profile_dir, no_profile) {
+            (Some(path), false) => Ok(ProfileChoice::Stated(path.to_path_buf())),
+            (None, true) => Ok(ProfileChoice::Throwaway),
+            (None, false) => Ok(ProfileChoice::Default),
+            (Some(path), true) => Err(IherbError::InvalidInput(format!(
+                "--profile-dir {} and --no-profile ask for opposite things: a \
+                 profile kept at that path, and no profile kept at all. Pass \
+                 one.",
+                path.display()
+            ))),
+        }
+    }
+
+    /// Where the default persistent profile lives, under the data directory
+    /// `data_dir` names.
+    pub fn default_dir(data_dir: &Path) -> PathBuf {
+        data_dir.join("profile")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub country: String,
@@ -183,6 +236,8 @@ pub struct AppConfig {
     /// [`crate::browser::resolve::resolve_chrome`] is still free to fall
     /// through on (#55).
     pub browser_path: Option<StatedBrowserPath>,
+    /// Which Chrome profile directory this run uses (#12).
+    pub profile: ProfileChoice,
     pub cache_dir: PathBuf,
     pub data_dir: PathBuf,
 }
@@ -326,6 +381,7 @@ impl AppConfig {
             debug: args.debug,
             headful: args.headful,
             browser_path,
+            profile: ProfileChoice::from_flags(args.profile_dir.as_deref(), args.no_profile)?,
             cache_dir,
             data_dir,
         })

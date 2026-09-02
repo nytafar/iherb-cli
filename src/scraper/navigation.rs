@@ -154,10 +154,15 @@ impl Navigator {
             .unwrap_or(0.0);
 
         for (cookie, value) in storefront.cookies() {
-            // Written from scratch rather than merged into whatever is there,
-            // which is right for the profile this runs in: every session gets a
-            // fresh, empty user-data directory, so there is nothing to preserve
-            // and a read-modify-write would only add a way to get it wrong.
+            // Written from scratch rather than merged into whatever is there.
+            // It was right when every session got a fresh, empty user-data
+            // directory; since #12 a profile can be persistent, and it is still
+            // right — CDP replaces a cookie of the same name, domain and path,
+            // these two carry every sub-key the site's own picker writes, and a
+            // preference the caller stated on this invocation is the one that
+            // should win over whatever a previous run left. A read-modify-write
+            // would only add a way to merge a stale storefront into a fresh
+            // request.
             let mut param = CookieParam::new(cookie, value);
             param.url = Some(COOKIE_URL.to_string());
             param.domain = Some(COOKIE_DOMAIN.to_string());

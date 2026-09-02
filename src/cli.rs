@@ -117,6 +117,32 @@ pub struct GlobalArgs {
     #[arg(long, global = true)]
     pub delay: Option<u64>,
 
+    /// Keep the browser profile in this directory instead of the default one.
+    ///
+    /// A profile is where Chrome keeps cookies, storefront preferences and
+    /// whatever Cloudflare clearance a run earned, so reusing one is what lets
+    /// clearance survive between runs (#12). Run `iherb-cli setup` against a
+    /// directory once to clear a challenge by hand; every later run pointed at
+    /// it starts from that state.
+    ///
+    /// **A directory you name here is never deleted by this tool**, and it
+    /// binds: if another run already holds it the run fails rather than
+    /// quietly using somewhere else. The default profile, under the data
+    /// directory, degrades to a throwaway one with a warning instead — nobody
+    /// named it, so there is no constraint to break.
+    #[arg(long, global = true, value_name = "PATH", verbatim_doc_comment)]
+    pub profile_dir: Option<std::path::PathBuf>,
+
+    /// Use a throwaway profile that is deleted when the run ends.
+    ///
+    /// What every run did before #12. Each run then starts cold and
+    /// cookie-less, which is the fingerprint Cloudflare scores worst, and any
+    /// clearance it earns dies with it. Useful for a run that must leave
+    /// nothing behind, and for two runs that would otherwise contend for one
+    /// profile directory.
+    #[arg(long, global = true, verbatim_doc_comment)]
+    pub no_profile: bool,
+
     /// Emit one JSON document on stdout instead of Markdown.
     ///
     /// Success or failure, exactly one document and nothing else: logging goes
@@ -169,6 +195,8 @@ impl GlobalArgs {
             browser_path: None,
             config: None,
             delay: None,
+            profile_dir: None,
+            no_profile: false,
             json: false,
             debug: false,
             headful: false,
@@ -212,6 +240,22 @@ pub enum Commands {
         #[command(subcommand)]
         action: CacheCommand,
     },
+
+    /// Open a browser window on the storefront and wait, so a profile can be
+    /// prepared by hand
+    ///
+    /// Chrome opens on the storefront `--country` selects and stays there until
+    /// you close the window. Whatever you do in it — clear a Cloudflare
+    /// challenge, pick a country and currency, sign in — is written to the
+    /// profile directory, and every later run pointed at that directory starts
+    /// from it (#12).
+    ///
+    /// The window is not optional here: a headless `setup` would be a command
+    /// that asks a human to do something they cannot see. `--headful` is
+    /// implied, and `--no-profile` is refused, because a profile deleted on the
+    /// way out is nothing to set up.
+    #[command(verbatim_doc_comment)]
+    Setup,
 }
 
 /// What `cache` can be asked to do.

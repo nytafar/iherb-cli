@@ -772,6 +772,27 @@ pub fn format_cache_report(report: &CacheReport, config: &AppConfig) -> String {
     }
 }
 
+/// What `setup` prepared, for a human (#12).
+pub fn format_setup_report(profile_dir: &std::path::Path) -> String {
+    format!(
+        "## Profile ready\n- **Path:** {}\n- **Reuse it with:** `--profile-dir {}`\n",
+        profile_dir.display(),
+        profile_dir.display()
+    )
+}
+
+/// The same fact for a machine.
+///
+/// One key, and it is the path, because that is the whole of what the command
+/// produced: an agent that runs `setup` needs to know what to pass to the next
+/// run. Reporting anything about the Cloudflare clearance itself would be a
+/// claim this tool cannot check — the browser does not say whether it holds one.
+pub fn format_setup_json(profile_dir: &std::path::Path) -> Result<Value, serde_json::Error> {
+    Ok(serde_json::json!({
+        "profile_dir": profile_dir.display().to_string(),
+    }))
+}
+
 fn format_cache_stats(stats: &CacheStats, config: &AppConfig) -> String {
     let mut out = String::from("## Cache\n");
     out.push_str(&format!("- **Path:** {}\n", stats.dir.display()));

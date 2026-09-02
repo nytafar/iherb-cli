@@ -5,7 +5,7 @@
 use iherb_cli::browser::session::BrowserSession;
 use iherb_cli::cache::CacheKey;
 use iherb_cli::cli::SortOrder;
-use iherb_cli::config::AppConfig;
+use iherb_cli::config::{AppConfig, ProfileChoice};
 use iherb_cli::error::IherbError;
 use iherb_cli::fetch::fetch_on;
 use iherb_cli::fetch::FetchTarget;
@@ -86,6 +86,7 @@ fn test_config() -> AppConfig {
         debug: false,
         headful: false,
         browser_path: None,
+        profile: ProfileChoice::Throwaway,
         cache_dir: std::path::PathBuf::from("/nonexistent"),
         data_dir: std::path::PathBuf::from("/nonexistent"),
     }

@@ -30,7 +30,7 @@ use tokio::sync::Mutex;
 
 use iherb_cli::browser::session::BrowserSession;
 use iherb_cli::cache::CacheKey;
-use iherb_cli::config::AppConfig;
+use iherb_cli::config::{AppConfig, ProfileChoice};
 use iherb_cli::fetch::{fetch_on, FetchTarget, Paging, Provenance};
 
 /// A config that touches nothing on disk that matters: caching off, no delay,
@@ -51,6 +51,7 @@ fn test_config(scratch: &Path, debug: bool, headful: bool) -> AppConfig {
         debug,
         headful,
         browser_path: None,
+        profile: ProfileChoice::Throwaway,
         cache_dir: scratch.join("cache"),
         data_dir: scratch.join("data"),
     }

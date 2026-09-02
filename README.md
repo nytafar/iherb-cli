@@ -158,6 +158,8 @@ Take 1 capsule daily with or without food.
 | `--browser-path <path>` | Chrome or Chromium executable. Outranks `IHERB_BROWSER_PATH` and the config file. A path that does not exist is `invalid_input` (2), never a silent fallback | — |
 | `--config <path>` | Read this config file instead of the one under the user's config dir | — |
 | `--delay <ms>` | Delay between requests in milliseconds | `2000` |
+| `--profile-dir <path>` | Keep the browser profile here. Never deleted by this tool | default profile under the data dir |
+| `--no-profile` | Use a throwaway profile that is deleted when the run ends | — |
 | `--json` | Emit one JSON document on stdout instead of Markdown — see below | — |
 | `--debug` | Log at debug level, dump every fetched page to disk, and print the provenance table. Headless, so it works in CI and over SSH | — |
 | `--headful` | Show a real browser window. Implies nothing else | — |
@@ -188,6 +190,40 @@ iherb-cli product 61864 --config ./ci.toml
 > name says. There is no alias and no deprecation period: nothing has been
 > released (#38), so the break costs no consumer anything.
 
+
+### The browser profile
+
+A Chrome profile is where cookies, storefront preferences and any Cloudflare
+clearance live. Every run used to get a fresh throwaway profile under the temp
+directory and delete it on the way out, so every run was a cold, cookie-less
+browser and nothing it learned survived it (#12).
+
+Runs now share a persistent profile under the data directory by default.
+
+```bash
+# Prepare a profile by hand, once: a window opens on the storefront and waits.
+iherb-cli setup --profile-dir ./iherb-profile --country no
+
+# Every later run against that directory starts from what you left there.
+iherb-cli product 12949 --profile-dir ./iherb-profile --country no --currency NOK
+```
+
+Three rules, and they follow the same principle `--browser-path` does:
+
+- **A directory you name is never deleted by this tool.** Only the throwaway
+  profile it created itself is removed.
+- **A directory you name binds.** Chrome cannot share a profile between
+  processes, so a second concurrent run against the same `--profile-dir` fails
+  and says which directory is in use, rather than quietly running somewhere
+  else. The *default* profile degrades to a throwaway one with a warning
+  instead, because nobody named it.
+- **`--no-profile` is the old behaviour**, for a run that must leave nothing
+  behind or that would otherwise contend for the default profile.
+
+`setup` opens a real window whatever the other flags say — a headless `setup`
+would ask a human to do something they cannot see — and refuses `--no-profile`,
+because a profile deleted on the way out is nothing to set up. It ends when you
+close the window.
 
 ### What `--currency` does
 
