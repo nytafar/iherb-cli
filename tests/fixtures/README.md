@@ -9,16 +9,16 @@ There are **two corpora here, and they are not interchangeable.**
 
 | | legacy regression corpus | current corpus |
 |---|---|---|
-| what | seven pages inherited from an upstream fork | thirteen pages this repository captured |
-| storefront | US, all seven | Norway, all thirteen |
+| what | seven pages inherited from an upstream fork | fifteen pages this repository captured |
+| storefront | US, all seven | Norway, all fifteen |
 | currency | USD | NOK |
 | siteVersion | 1.0.19891 – 1.0.20071 | 1.0.22698 |
-| captured | 2026-05-29 – 2026-06-05 (commit dates; capture dates unrecorded) | 2026-08-31 and 2026-09-01 |
+| captured | 2026-05-29 – 2026-06-05 (commit dates; capture dates unrecorded) | 2026-08-31 to 2026-09-02 |
 | forms | veggie caps, gummies, softgels, one 250 g powder | capsules, softgels, tablets, micro tablets, delayed-release veggie caps, powder by the gram, liquid by the millilitre |
 | products in common | **none** | |
 
-Twenty files, 55.6 MB of HTML, 7.7 MB gzipped, plus the two error-page
-captures below, which belong to neither corpus.
+Twenty-two files, plus the two error-page captures below, which belong to
+neither corpus.
 
 **New parser work should be designed against the current corpus.** It is the
 site as it is served today, in the storefront this tool is actually pointed at,
@@ -34,7 +34,7 @@ that can tell a parser change from a site change.
 The legacy corpus was a monoculture, and a monoculture makes assertions that
 cannot fail. Two bugs are already on record:
 
-- **#51** (`shipping_weight` returns its whole info tooltip) was invisible to
+- **#51** (`shipping_weight` returned its whole info tooltip) was invisible to
   all seven pages and appeared the instant a current page was captured.
 - **#52** (a bare `$` read as USD) and four currency sweeps that "could never
   have failed" were both consequences of every page being priced in one
@@ -238,6 +238,25 @@ for being here.
 | `product-132364-humanx-gasseri-reuteri-nok` | dosed in **CFU** — a count of live organisms, not a quantity of anything weighable |
 | `product-124094-nutricost-k2-mk7-nok` | the **single-nutrient** page for contrast with the blends, dosed in micrograms. It is the weakest of the twelve on its own: what it uniquely holds is the contrast, not a shape no other page has. Kept because a corpus of edge cases with no ordinary member cannot say which is which |
 
+## The two hand-authored panels (#65)
+
+Captured **2026-09-02**, Norwegian storefront, the same way as the twelve above.
+They are here for one reason: every other Supplement Facts panel in this corpus
+is generated markup, and all twenty write their column header the same way.
+These two do not, and the parser read the header row as a nutrient on both.
+
+Both were in a 113-product boswellia comparison, which is how a bug that had
+been shipping since the first parser was written finally met a page that could
+show it.
+
+| slug | product id | what its header row does |
+|---|---|---|
+| `product-159500-vitacost-root2-boswellia-nok` | `159500` | labels the first column **`Nutrient`**. The old rule looked for `amount per` in the first cell, and a page that puts a word there walked straight past it. It is also the corpus's only page with **no `Package quantity` spec row** |
+| `product-159125-vitacost-5-loxin-boswellia-nok` | `159125` | puts a **zero-width space** (`U+200B`) in that cell instead. Unicode does not call it whitespace, so `trim()` leaves it and "the first cell is empty" answers `false` for a cell nobody can see. Its one nutrient name is also split by a `<br>`, which is what pins cell text being joined with a space rather than with nothing |
+
+Neither is in `registry-map.md`: they are not products the user buys, and they
+are not here to be priced. They are here to be misread.
+
 ## The error pages (#59)
 
 Two captures that are not product pages, not listings, and not read by any
@@ -341,9 +360,9 @@ Rendered Markdown, regenerated with `UPDATE_GOLDEN=1 cargo test` — exactly `1`
 any other value still asserts. Read the diff before committing a change to one.
 
 `product-143499-full` is the first golden of a Norwegian page and the first of a
-product that is not a dietary supplement. The `Shipping Weight` line in it
-carries #51's tooltip text: that is characterized, not endorsed, and when #51
-lands this golden changes and the diff is the proof.
+product that is not a dietary supplement. Its `Shipping Weight` line carried
+#51's tooltip text for as long as #51 was open; #51 has landed, and the one-line
+diff in that golden is the proof it did.
 
 **The goldens cover Markdown only.** #9 (`--json` output with a typed error
 taxonomy) changes what callers consume and is not protected by anything here;

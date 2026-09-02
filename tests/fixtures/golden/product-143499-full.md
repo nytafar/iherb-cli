@@ -6,7 +6,7 @@
 - **Rating:** 4.8/5 (233 reviews)
 - **Availability:** In Stock
 - **Product Code:** BDI-00217
-- **Shipping Weight:** 0.09 kg Shipping weight The Shipping Weight includes the product, protective packaging material and the actual shipping box. In addition, the Shipping Weight may be adjusted for the Dimensional Weight (e.g. length, width & height) of a package. It is important to note that certain types of products (e.g. glass containers, liquids, fragile, refrigerated or ice packed) will often require protective packaging material. As such, these products will reflect a higher Shipping Weight compared to the unprotected product.
+- **Shipping Weight:** 0.09 kg
 
 ## Description
 Fluoride-Free Smile Professional Strength Removes Biofilm Plaque Whiten Teeth Freshens Breath Powered by Biocidin® 18 We Believe In Sustainable Solutions Suitable For Sensitive Teeth Serious Science Behind Every Smile™ For results you can see and feel because whole body health begins in your mouth.

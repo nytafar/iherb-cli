@@ -124,7 +124,7 @@ fn no_page_iherb_served_is_classified_as_a_challenge() {
         checked += 1;
     }
     assert_eq!(
-        checked, 23,
+        checked, 25,
         "the sweep must cover every captured page; it covered {}",
         checked
     );

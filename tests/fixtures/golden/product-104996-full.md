@@ -36,13 +36,13 @@ Over 25 Vitamins and Minerals Featuring Methyl B12, L-MethylFolate, and Querceti
 | Inositol | 50 mg | † |
 | Alpha Lipoic Acid | 25 mg | † |
 | Mixed Tocopherols | 20 mg | † |
-| Quercetin Phospholipid Matrix Quercetin from Japanese Sophora Extract (flower), Sunflower Lecithin (Phospholipids) | 15 mg | † |
+| Quercetin Phospholipid Matrix Quercetin from Japanese Sophora Extract (flower), Sunflower Lecithin (Phospholipids) | 15 mg | † |
 | Lutein (from Marigold Extract(Tagetes erects)(flower) | 10 mg | † |
 | Apigenin (from Chamomile Extract)(Matricaria recutita)(flower) | 5 mg | † |
 | Lycopene (from Tomato Extract) (Solanum lycopersicum)(fruit) | 4 mg | † |
 | Boron (as Boron Chelate) | 3 mg | † |
 | Amla Extract (Phyllanthus emblica)(fruit) | 2.5 mg | † |
-| Zeaxanthin(from marigold extract)(tagetes erecta)(flower) | 550 mcg | † |
+| Zeaxanthin (from marigold extract)(tagetes erecta)(flower) | 550 mcg | † |
 
 - **Serving Size:** 2 Capsules
 - **Servings Per Container:** 30

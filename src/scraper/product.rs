@@ -619,7 +619,17 @@ pub fn parse_product_specs(doc: &Html) -> Vec<(String, String)> {
     // The "what does shipping weight mean" popover, which lives *inside* the
     // `Shipping weight` row. It is page chrome, not the value, and the old
     // "everything after the first colon" rule swallowed all 500 words of it.
-    let Ok(tooltip_sel) = Selector::parse("#cms-popover-tooltip, cms-popover") else {
+    //
+    // `cms-popover-tooltip` is a **class** on the wrapping `<div>`, and this
+    // selector asked for it as an id (#51). The id never matched anything, and
+    // the `cms-popover` element it also names is a grandchild of the row rather
+    // than a child, so the walk below never saw it either: every page still
+    // reported the tooltip glued to the weight. Both spellings are kept — the
+    // id costs nothing if some storefront writes it that way — but the class is
+    // the one every capture in this repository carries.
+    let Ok(tooltip_sel) =
+        Selector::parse(".cms-popover-tooltip, #cms-popover-tooltip, cms-popover")
+    else {
         return Vec::new();
     };
 
@@ -939,6 +949,74 @@ fn is_servings_per_container_row(lower: &str) -> bool {
     lower.contains("serving") && lower.contains("per container")
 }
 
+/// One Supplement Facts cell, as text a caller can compare and parse.
+///
+/// Two things happen here that `ElementRef::text().collect()` does not do.
+///
+/// Zero-width characters are dropped. iHerb's CMS leaves `U+200B` behind in
+/// hand-edited panels — product 159125 writes its header's first cell as
+/// `<strong>​</strong><br>`, one zero-width space and nothing else. `trim()`
+/// does not remove it, because Unicode does not call it whitespace, so an
+/// "empty first cell" test written the obvious way answers `false` and the
+/// header row is read as a nutrient named `"​"` (#65).
+///
+/// Line breaks become spaces. The cells are authored HTML: `Boswellia serrata
+/// Extract<br>(gum resin) 5-LOXIN®` is one name split across two lines, and
+/// joining the text nodes with nothing wrote `Extract(gum resin)`. Any
+/// remaining run of whitespace — the `&nbsp;` iHerb writes inside `About 29`
+/// included — collapses to a single space.
+fn cell_text(cell: scraper::ElementRef<'_>) -> String {
+    let joined: String = cell.text().collect::<Vec<_>>().join(" ");
+    joined
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' | '\u{ad}'
+            )
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether a multi-cell row is the table's own column header rather than a
+/// nutrient (#65).
+///
+/// iHerb has no one markup for this. Across the captures in this repository the
+/// header row appears as `&nbsp; | Amount Per Serving | % Daily Value`, as
+/// `Nutrient | Amount Per Serving | %Daily Value`, and as a zero-width space in
+/// place of the first cell. The old rule looked only at the first cell and only
+/// for `amount per`, `% daily`, `supplement` or emptiness, so it caught the
+/// first spelling and let the other two through as nutrients — one of them
+/// named `"Nutrient"`, one named with an invisible character, both carrying
+/// `"Amount Per Serving"` where a caller summing amounts expects a quantity.
+///
+/// # Why a header is not just "it says Daily Value somewhere"
+///
+/// `*Daily Value not established.` is a footnote, and on a table that writes it
+/// across three cells instead of one merged cell that phrase alone would
+/// condemn a real row. So a header also has to state no quantity: every
+/// nutrient row this tool has seen puts a digit in its amount, and no header
+/// row does. Both halves have to hold.
+fn is_header_row(cells: &[String]) -> bool {
+    let first = cells[0].to_lowercase();
+    if first.is_empty() || first == "nutrient" || first.contains("supplement") {
+        return true;
+    }
+
+    let names_a_column = cells[1..].iter().any(|c| {
+        let lower = c.to_lowercase();
+        lower.starts_with("amount per") || lower.contains("daily value")
+    });
+    let states_a_quantity = cells[1..]
+        .iter()
+        .any(|c| c.chars().any(|ch| ch.is_ascii_digit()));
+
+    names_a_column && !states_a_quantity
+}
+
 pub fn parse_supplement_facts_html(doc: &Html) -> Option<SupplementFacts> {
     let table_sel =
         Selector::parse(".supplement-facts-container table, table.supplement-facts-table").ok()?;
@@ -952,10 +1030,7 @@ pub fn parse_supplement_facts_html(doc: &Html) -> Option<SupplementFacts> {
     let mut servings_per_container = None;
 
     for row in table.select(&row_sel) {
-        let cells: Vec<String> = row
-            .select(&cell_sel)
-            .map(|c| c.text().collect::<Vec<_>>().join("").trim().to_string())
-            .collect();
+        let cells: Vec<String> = row.select(&cell_sel).map(cell_text).collect();
 
         // Check for serving size info in merged cells
         if cells.len() == 1 {
@@ -971,12 +1046,7 @@ pub fn parse_supplement_facts_html(doc: &Html) -> Option<SupplementFacts> {
 
         // Skip header rows
         if cells.len() >= 2 {
-            let first_lower = cells[0].to_lowercase();
-            if first_lower.contains("amount per")
-                || first_lower.contains("% daily")
-                || first_lower.contains("supplement")
-                || first_lower.is_empty()
-            {
+            if is_header_row(&cells) {
                 continue;
             }
             // Skip dagger footnotes

@@ -202,6 +202,29 @@ registry! {
     /// **CFU**, which is a count of organisms and not a quantity of anything
     /// weighable.
     GASSERI_REUTERI_CFU = "product-132364-humanx-gasseri-reuteri-nok", "132364", "NOK", NO_STOREFRONT;
+
+    // -----------------------------------------------------------------------
+    // Two hand-authored Supplement Facts panels, captured 2026-09-02 for #65.
+    //
+    // Every panel above is generated markup, and all twenty of them write their
+    // column header the same way. These two do not, which is how a header row
+    // reached `nutrients` on a real run: they were both in the 113-product
+    // boswellia comparison that found it.
+    // -----------------------------------------------------------------------
+
+    /// Vitacost Root2 Boswellia Serrata, 60 capsules. Its facts panel labels
+    /// the first column **`Nutrient`** — a header cell with a word in it, where
+    /// every other capture leaves that cell blank (#65).
+    ROOT2_NAMED_HEADER = "product-159500-vitacost-root2-boswellia-nok", "159500", "NOK", NO_STOREFRONT;
+
+    /// Vitacost Synergy 5-Loxin Boswellia Extract, 120 capsules. The same
+    /// header row with a **zero-width space** (`U+200B`) where the word would
+    /// be: invisible, not whitespace by Unicode's reckoning, and therefore not
+    /// removed by `trim()` (#65).
+    ///
+    /// Its one nutrient name is also split by a `<br>`, so it is what pins the
+    /// cell text being joined with a space rather than with nothing.
+    LOXIN_ZERO_WIDTH_HEADER = "product-159125-vitacost-5-loxin-boswellia-nok", "159125", "NOK", NO_STOREFRONT;
 }
 
 /// iHerb's own not-found page, US storefront, captured 2026-09-02 (#59).

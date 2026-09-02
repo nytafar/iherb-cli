@@ -12,8 +12,9 @@ use iherb_cli::scraper::product::{
 
 use crate::fixture::{
     self, BASE_URL, BUTYRATE_TWO_CAP_SERVING, B_COMPLEX, DENTALCIDIN_TUBE, FIBERAID_POWDER,
-    GOLD_C_POWDER, LITHIUM_MICRO_TABLETS, OLLY_GUMMIES, R_LIPOIC_TINY_ID, SUPREME_C_TABLETS,
-    TART_CHERRY_LIQUID, TWO_A_DAY, ULTIMATE_OMEGA, ULTIMATE_OMEGA_NOK,
+    GOLD_C_POWDER, LITHIUM_MICRO_TABLETS, LOXIN_ZERO_WIDTH_HEADER, OLLY_GUMMIES,
+    ROOT2_NAMED_HEADER, R_LIPOIC_TINY_ID, SUPREME_C_TABLETS, TART_CHERRY_LIQUID, TWO_A_DAY,
+    ULTIMATE_OMEGA, ULTIMATE_OMEGA_NOK,
 };
 
 // ---------------------------------------------------------------------------
@@ -219,39 +220,53 @@ fn one_product_prices_differently_on_two_storefronts() {
     assert!(nok.price.fract() > 0.0);
 }
 
-/// CHARACTERIZATION, NOT DESIRED: `shipping_weight` on a page captured from the
-/// **current** site carries the info tooltip glued to the value.
+/// `shipping_weight` is the weight, on every page, current markup included
+/// (#51).
 ///
-/// Not a regression in our code and not a storefront difference — a change in
-/// iHerb's markup. The seven upstream captures are siteVersion 1.0.19891 to
-/// 1.0.20071 and give a bare `0.72 lb`; the NOK capture is 1.0.22698 and gives
-/// the weight followed by the whole "The Shipping Weight includes the product,
-/// protective packaging material…" tooltip. `extract_spec` takes the text of the
-/// value cell, and that cell now contains the tooltip too.
+/// This used to be a characterization test asserting the bug, and its own
+/// docstring named the value to assert once it was fixed. It is that value now.
 ///
-/// This is live: `iherb-cli product 12949 --country no` prints the paragraph
-/// today. #5 found it by capturing a page newer than the fixtures and is not
-/// fixing it — this pins it so that whoever does can see it go green, and so
-/// that the desired value is written down.
+/// The seven upstream captures are siteVersion 1.0.19891 to 1.0.20071 and give
+/// a bare `0.72 lb`. The current site wraps an info popover inside the same
+/// `<li>`, and the row's text therefore contains 90 words about dimensional
+/// weight after the number. `parse_product_specs` has skipped that subtree
+/// since #2 — except that it asked for `#cms-popover-tooltip`, an id, and the
+/// page writes `class="cms-popover-tooltip"`. The selector matched nothing and
+/// the tooltip came through on every current page for two months.
 ///
-/// DESIRED: `Some("0.33 kg")`.
+/// Both directions are asserted. A weight that no longer starts with the number
+/// is a parser that has lost the value; a weight that contains the tooltip's
+/// first sentence is this bug returning.
 #[test]
-fn shipping_weight_on_a_current_page_carries_the_tooltip_too() {
+fn shipping_weight_is_the_weight_and_not_the_tooltip() {
     let nok = parse_from_html(
         ULTIMATE_OMEGA_NOK.html(),
         "12949",
         ULTIMATE_OMEGA_NOK.base_url(),
     )
     .unwrap();
-    let weight = nok.shipping_weight.expect("the page publishes a weight");
 
-    assert!(weight.starts_with("0.33 kg"), "{:?}", weight);
-    assert!(
-        weight.contains("The Shipping Weight includes the product"),
-        "if this stopped being true the tooltip is gone and the DESIRED value \
-         above is what to assert instead: {:?}",
-        weight
-    );
+    assert_eq!(nok.shipping_weight.as_deref(), Some("0.33 kg"));
+
+    // And on every page in the corpus that publishes one: no capture may carry
+    // the tooltip, whatever its siteVersion.
+    for f in fixture::products() {
+        let Some(weight) = extract_spec(&f.doc(), "Shipping Weight") else {
+            continue;
+        };
+        assert!(
+            !weight.contains("The Shipping Weight includes the product"),
+            "{}: the tooltip is back in the value: {:?}",
+            f.slug(),
+            weight
+        );
+        assert!(
+            weight.len() < 24,
+            "{}: a shipping weight is a number and a unit, not {:?}",
+            f.slug(),
+            weight
+        );
+    }
 }
 
 /// #31, flipped. This was `dom_fallback_reports_the_gummies_as_in_stock`.
@@ -653,31 +668,67 @@ fn extract_spec_matches_labels_whatever_their_case() {
 
 /// The whole list in one call, which is what `extract_spec` looks up in.
 ///
-/// Six rows on every capture, in page order, values bounded. `Dimensions` is
-/// the row that proves the value is read rather than reassembled: its two
-/// `<span>`s are joined by a comma that belongs to the page, and on three of
-/// the five captures that comma sits on its own source line.
+/// The rows come in page order, values bounded. `Dimensions` is the row that
+/// proves the value is read rather than reassembled: its two `<span>`s are
+/// joined by a comma that belongs to the page, and on three of the five
+/// captures that comma sits on its own source line.
+///
+/// This asserted six rows on every page until #65's captures arrived: iHerb
+/// omits `Package quantity` on some listings, so the claim it could never
+/// break was "every product states a package quantity". What is invariant is
+/// the *order*, and that the four identifying rows are always there.
 #[test]
 fn the_whole_spec_list_parses_in_page_order() {
+    const ORDER: [&str; 6] = [
+        "First available",
+        "Shipping weight",
+        "Product code",
+        "UPC",
+        "Package quantity",
+        "Dimensions",
+    ];
+
     for f in fixture::products() {
         let labels: Vec<String> = parse_product_specs(&f.doc())
             .into_iter()
             .map(|(label, _)| label)
             .collect();
-        assert_eq!(
-            labels,
-            [
-                "First available",
-                "Shipping weight",
-                "Product code",
-                "UPC",
-                "Package quantity",
-                "Dimensions",
-            ],
-            "{}",
-            f.slug()
-        );
+
+        // A subsequence of the canonical order: rows may be absent, never
+        // reordered and never invented.
+        let mut expected = ORDER.iter();
+        for label in &labels {
+            assert!(
+                expected.any(|known| known == label),
+                "{}: {:?} is not a spec row this list knows, or it came out of \
+                 order: {:?}",
+                f.slug(),
+                label,
+                labels
+            );
+        }
+
+        for required in ["First available", "Shipping weight", "Product code", "UPC"] {
+            assert!(
+                labels.iter().any(|l| l == required),
+                "{}: no {:?} row",
+                f.slug(),
+                required
+            );
+        }
     }
+
+    // And the pages that omit one, pinned: a page joining this set is iHerb
+    // publishing less, a page leaving it is a row being read past.
+    let without_quantity: Vec<&str> = fixture::products()
+        .filter(|f| {
+            !parse_product_specs(&f.doc())
+                .iter()
+                .any(|(label, _)| label == "Package quantity")
+        })
+        .map(|f| f.slug())
+        .collect();
+    assert_eq!(without_quantity, vec![ROOT2_NAMED_HEADER.slug()]);
 
     let nordic = parse_product_specs(&ULTIMATE_OMEGA.doc());
     assert_eq!(
@@ -697,20 +748,19 @@ fn the_whole_spec_list_parses_in_page_order() {
 }
 
 /// Every capture has a `#product-specs-list`, the gummies page included — the
-/// three labels below resolve on all five. `Package quantity` and
-/// `First available` are reachable too; nothing on `ProductDetail` has a home
-/// for them yet, which is the separate specs-extraction issue's business.
+/// three labels below resolve on all of them. `First available` is reachable
+/// too; nothing on `ProductDetail` has a home for it yet, which is the separate
+/// specs-extraction issue's business.
+///
+/// `Package quantity` used to be swept here as well. It is not universal —
+/// [`ROOT2_NAMED_HEADER`] has no such row — and the test above is where that is
+/// now pinned, page by page.
 #[test]
 fn every_product_page_has_a_spec_list() {
     for f in fixture::products() {
         let doc = f.doc();
         assert!(extract_spec(&doc, "Product code").is_some(), "{}", f.slug());
         assert!(extract_spec(&doc, "UPC").is_some(), "{}", f.slug());
-        assert!(
-            extract_spec(&doc, "Package quantity").is_some(),
-            "{}",
-            f.slug()
-        );
         assert!(
             extract_spec(&doc, "First available").is_some(),
             "{}",
@@ -920,6 +970,133 @@ fn a_singular_serving_per_container_is_read_and_an_unstated_one_is_still_none() 
             f.slug()
         );
     }
+}
+
+/// The table's own column header is never a nutrient, in any of the three
+/// spellings iHerb writes it in (#65).
+///
+/// A caller summing a panel's amounts trips on a "nutrient" whose amount is the
+/// words `Amount Per Serving`, and both pages below served exactly that during
+/// a 113-product comparison. They are also the only two hand-authored panels in
+/// this corpus, which is why twenty generated ones agreed for months:
+///
+///  1. [`ROOT2_NAMED_HEADER`] labels the first column `Nutrient`. The old rule
+///     looked for `amount per` in the *first* cell, and this page puts a word
+///     there.
+///  2. [`LOXIN_ZERO_WIDTH_HEADER`] puts `U+200B` there instead. It is not
+///     whitespace by Unicode's reckoning, so `trim()` leaves it and the
+///     "the first cell is empty" test answers `false` for a cell that looks
+///     empty to every human who has ever seen the page.
+///
+/// The assertions are on the nutrient list rather than on the predicate,
+/// because the predicate is not the contract: what a caller is promised is that
+/// every row it gets is a nutrient.
+#[test]
+fn the_column_header_is_not_a_nutrient_however_the_page_spells_it() {
+    for (f, name, amount) in [
+        (ROOT2_NAMED_HEADER, "Boswellia", "100 mg"),
+        (
+            LOXIN_ZERO_WIDTH_HEADER,
+            "Boswellia serrata Extract (gum resin) 5-LOXIN® standardized to 30% \
+             3-O-acetyl-11-keto-beta-boswellic acid (AKBA) (45 mg)",
+            "150 mg",
+        ),
+    ] {
+        let facts = parse_supplement_facts_html(&f.doc())
+            .unwrap_or_else(|| panic!("{}: no supplement facts", f.slug()));
+
+        assert_eq!(
+            facts.nutrients.len(),
+            1,
+            "{}: the panel has one nutrient row; the extras are the header: {:?}",
+            f.slug(),
+            facts.nutrients
+        );
+        assert_eq!(facts.nutrients[0].name, name, "{}", f.slug());
+        assert_eq!(facts.nutrients[0].amount, amount, "{}", f.slug());
+
+        // The rows around it are still read: skipping the header must not cost
+        // the serving lines above it.
+        assert!(facts.serving_size.is_some(), "{}", f.slug());
+        assert_eq!(facts.servings_per_container.as_deref(), Some("60"));
+    }
+
+    // And across the whole corpus: no nutrient anywhere is a header cell in
+    // disguise. This is the assertion that catches the next spelling.
+    for f in fixture::products() {
+        let Some(facts) = parse_supplement_facts_html(&f.doc()) else {
+            continue;
+        };
+        for n in &facts.nutrients {
+            let name = n.name.to_lowercase();
+            assert!(
+                !name.is_empty() && name != "nutrient" && !name.contains("amount per"),
+                "{}: {:?} is the column header, not a nutrient",
+                f.slug(),
+                n
+            );
+            assert!(
+                !n.amount.to_lowercase().starts_with("amount per"),
+                "{}: {:?} states a column name where an amount belongs",
+                f.slug(),
+                n
+            );
+        }
+    }
+}
+
+/// A cell's text is what the label says, with iHerb's invisible characters
+/// gone (#65).
+///
+/// Two separate leaks, both from hand-authored panels, and both visible to any
+/// caller that compares nutrient names across products:
+///
+///  - a `<br>` inside a name used to join with nothing, so `Boswellia serrata
+///    Extract<br>(gum resin)` came out as `Extract(gum resin)`;
+///  - a `&nbsp;` inside a value stayed a `U+00A0`, so `About 29` and `About 29`
+///    were two different strings depending on which page they came from.
+#[test]
+fn cell_text_carries_no_invisible_characters() {
+    for f in fixture::products() {
+        let Some(facts) = parse_supplement_facts_html(&f.doc()) else {
+            continue;
+        };
+
+        let mut cells: Vec<String> = facts
+            .nutrients
+            .iter()
+            .flat_map(|n| {
+                [
+                    n.name.clone(),
+                    n.amount.clone(),
+                    n.daily_value.clone().unwrap_or_default(),
+                ]
+            })
+            .collect();
+        cells.extend(facts.serving_size.clone());
+        cells.extend(facts.servings_per_container.clone());
+
+        for cell in cells {
+            assert!(
+                !cell.chars().any(|c| matches!(
+                    c,
+                    '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' | '\u{a0}'
+                )),
+                "{}: {:?} carries a zero-width or non-breaking character",
+                f.slug(),
+                cell
+            );
+            assert_eq!(cell.trim(), cell, "{}: {:?} is not trimmed", f.slug(), cell);
+        }
+    }
+
+    // The `<br>` case, named: one nutrient, one space, no glued words.
+    let facts = parse_supplement_facts_html(&LOXIN_ZERO_WIDTH_HEADER.doc()).unwrap();
+    assert!(
+        facts.nutrients[0].name.contains("Extract (gum resin)"),
+        "{:?}",
+        facts.nutrients[0].name
+    );
 }
 
 /// `Package quantity` is not a count, and #15 has to know that before it
