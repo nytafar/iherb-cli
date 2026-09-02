@@ -445,7 +445,9 @@ field added — bumps `schema_version` and adds a row here.
 ### Exit codes
 
 `--json` or not, a run leaves on a stable code naming what happened. `0` is
-success.
+success. `iherb-cli --help` ends on the same table in one line per code, built
+from the taxonomy itself so the two cannot disagree; this section is where the
+reasoning lives.
 
 **Every code in this table has a producer.** A table that documents a
 distinction the code cannot make is worse than no table: a caller branches on a

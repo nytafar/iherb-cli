@@ -1,10 +1,44 @@
+use std::sync::LazyLock;
+
 use clap::{Parser, Subcommand, ValueEnum};
+
+use crate::error::ErrorKind;
+
+/// The exit-code table `--help` ends on (#66).
+///
+/// The help text has promised this table since the taxonomy landed and never
+/// carried it: a caller who wanted to branch on an exit code had to provoke
+/// each one and write down what came back, which is what the first agent to
+/// use this tool in anger did for 23 and 25.
+///
+/// Built from [`ErrorKind::ALL`] rather than typed out, so it cannot fall
+/// behind the taxonomy. A `LazyLock<String>` because clap wants something with
+/// a `'static` lifetime and the rows are only known at runtime; the borrow of a
+/// `static` is `'static`, so `EXIT_CODES.as_str()` is what the attribute takes.
+static EXIT_CODES: LazyLock<String> = LazyLock::new(|| {
+    let mut out = String::from("Exit codes:\n  0    success\n");
+    for kind in ErrorKind::ALL {
+        out.push_str(&format!(
+            "  {:<4} {:<25} {}\n",
+            kind.exit_code(),
+            kind.error_type(),
+            kind.summary()
+        ));
+    }
+    out.push_str(
+        "\nThe name in the middle column is the `error_type` of the `--json` \
+         document for the same failure.\nA batch of product ids exits 0 if any \
+         id succeeded, and otherwise on the highest code among\nits failures.",
+    );
+    out
+});
 
 #[derive(Parser)]
 #[command(
     name = "iherb-cli",
     version,
     about = "Query iHerb product data from the command line",
+    after_long_help = EXIT_CODES.as_str(),
     // Stated rather than derived. Without it clap takes the long help from the
     // doc comment of the flattened `GlobalArgs`, and `--help` opens with a
     // maintainers' note about a refactor instead of a sentence about the tool
@@ -416,7 +450,13 @@ pub enum SortOrder {
     #[value(name = "price-desc")]
     PriceDesc,
     /// Highest average rating first. Surfaces 5.0/5 products with three
-    /// reviews; [`SortOrder::MostRated`] is what "well established" wants.
+    /// reviews; `most-rated` is what "well established" wants.
+    ///
+    /// Named by its command-line spelling rather than as
+    /// [`SortOrder::MostRated`]: clap prints a value's first paragraph beside
+    /// the value in `--help`, and rustdoc's link syntax renders there as
+    /// literal brackets and backticks (#67). Every doc comment on this enum is
+    /// read by a terminal before it is read by rustdoc.
     Rating,
     #[value(name = "best-selling")]
     BestSelling,

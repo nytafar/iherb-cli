@@ -274,6 +274,34 @@ impl ErrorKind {
         ErrorKind::Internal,
         ErrorKind::Interrupted,
     ];
+
+    /// One line saying what a caller should do about this code (#66).
+    ///
+    /// `--help` claimed to document the exit codes and documented none of
+    /// them: an agent had to hit 23 and 25 to learn what they were. The table
+    /// it prints is built from this, so the help and the taxonomy cannot
+    /// disagree — a new variant grows a help row by existing.
+    ///
+    /// Written for someone reading a terminal, which is why these are shorter
+    /// and blunter than the variant docs above. What to do, not why the code
+    /// is where it is in the numbering.
+    pub fn summary(self) -> &'static str {
+        match self {
+            ErrorKind::InvalidInput => "the arguments cannot produce a request; fix them",
+            ErrorKind::BrowserLaunchFailed => "Chrome would not start; look at the environment",
+            ErrorKind::ChromeDownloadFailed => "Chrome could not be downloaded",
+            ErrorKind::CacheUnreadable => "the cache directory could not be listed",
+            ErrorKind::NavigationTimeout => "the page did not load in time; worth retrying",
+            ErrorKind::NavigationFailed => "the page did not load, and not because of the clock",
+            ErrorKind::CloudflareBlocked => "blocked; retry later, from elsewhere",
+            ErrorKind::ProductNotFound => "iHerb says the product is gone; stop asking for this id",
+            ErrorKind::EmptyPageOrCatalogEnd => "the listing page carried nothing; not a fault",
+            ErrorKind::CurrencyMismatch => "the storefront priced in a currency --currency refused",
+            ErrorKind::ParseFailed => "the page loaded and could not be read; a human should look",
+            ErrorKind::Internal => "a bug in this tool",
+            ErrorKind::Interrupted => "Ctrl+C",
+        }
+    }
 }
 
 impl IherbError {

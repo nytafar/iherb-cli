@@ -1586,6 +1586,90 @@ fn long_help_opens_on_the_tool_not_on_a_doc_comment() {
     );
 }
 
+/// **No help screen renders rustdoc markup, not just the top one (#67).**
+///
+/// #58 asserted this of `iherb-cli --help` alone, and clap builds a screen per
+/// subcommand from a different set of doc comments. `--sort`'s value list kept
+/// printing ``[`SortOrder::MostRated`]`` under `search --help` for as long as
+/// the sweep did not walk there — a fix that held for one screen and was never
+/// a fix for the others.
+///
+/// The screens are enumerated rather than discovered, so a new subcommand that
+/// is not added here is a subcommand nobody checked. `help` is walked too: it
+/// prints the same text through another path.
+#[test]
+fn no_subcommand_help_renders_rustdoc_markup() {
+    let home = Home::new("subcommand-help");
+
+    let screens: &[&[&str]] = &[
+        &["--help"],
+        &["-h"],
+        &["search", "--help"],
+        &["search", "-h"],
+        &["product", "--help"],
+        &["product", "-h"],
+        &["cache", "--help"],
+        &["cache", "path", "--help"],
+        &["cache", "stats", "--help"],
+        &["cache", "clear", "--help"],
+        &["setup", "--help"],
+        &["help", "search"],
+    ];
+
+    for args in screens {
+        let out = home.run(args, None);
+        assert_eq!(out.code, 0, "{:?}", args);
+        for markup in ["[`", "`]"] {
+            assert!(
+                !out.stdout.contains(markup),
+                "rustdoc link syntax reached `{}`:\n{}",
+                args.join(" "),
+                out.stdout
+            );
+        }
+    }
+}
+
+/// **`--help` documents the exit codes it says it documents (#66).**
+///
+/// The `--json` paragraph has always ended "`iherb-cli --help` documents the
+/// exit codes", and the help contained no table and named no code. An agent
+/// ranking 113 products learned 23 and 25 by provoking them.
+///
+/// Swept over `ErrorKind::ALL`, so the assertion is that the table is complete
+/// rather than that some table exists: a code added to the taxonomy without a
+/// row here fails this. `0` is checked separately because success is not an
+/// `ErrorKind`.
+#[test]
+fn the_help_documents_every_exit_code() {
+    let home = Home::new("exit-codes");
+    let long = home.run(&["--help"], None);
+    assert_eq!(long.code, 0);
+
+    assert!(
+        long.stdout.contains("Exit codes:"),
+        "no exit-code table:\n{}",
+        long.stdout
+    );
+    assert!(long.stdout.contains("0    success"));
+
+    for kind in iherb_cli::error::ErrorKind::ALL {
+        let row = format!("{:<4} {}", kind.exit_code(), kind.error_type());
+        assert!(
+            long.stdout.contains(&row),
+            "no row for {:?} ({}):\n{}",
+            kind,
+            kind.exit_code(),
+            long.stdout
+        );
+    }
+
+    // The promise that started this, still made and now true.
+    assert!(long
+        .stdout
+        .contains("`iherb-cli --help` documents the exit codes"));
+}
+
 /// **An interrupted run still emits one JSON document.**
 ///
 /// This is the promise `--json` makes — one document on stdout, always, success
