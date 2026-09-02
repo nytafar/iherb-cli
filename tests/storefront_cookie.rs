@@ -45,6 +45,7 @@ fn config(country: &str, currency: Option<&str>) -> AppConfig {
         cache_ttl: iherb_cli::config::DEFAULT_CACHE_TTL,
         delay_ms: 0,
         debug: false,
+        headful: false,
         browser_path: None,
         cache_dir: std::env::temp_dir().join("iherb-cli-storefront-cookie-cache"),
         data_dir: std::env::temp_dir().join("iherb-cli-storefront-cookie-data"),

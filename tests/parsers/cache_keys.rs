@@ -65,6 +65,7 @@ fn config(country: &str, currency: &str, cache_dir: PathBuf) -> AppConfig {
         cache_ttl: iherb_cli::config::DEFAULT_CACHE_TTL,
         delay_ms: 0,
         debug: false,
+        headful: false,
         browser_path: None,
         cache_dir,
         data_dir: PathBuf::from("/nonexistent"),

@@ -106,7 +106,10 @@ pub struct AppConfig {
     pub cache_mode: CacheMode,
     pub cache_ttl: Duration,
     pub delay_ms: u64,
+    /// Verbose logging and the HTML dump. Says nothing about the window (#62).
     pub debug: bool,
+    /// A browser window you can see. Says nothing about logging (#62).
+    pub headful: bool,
     pub browser_path: Option<PathBuf>,
     pub cache_dir: PathBuf,
     pub data_dir: PathBuf,
@@ -206,6 +209,7 @@ impl AppConfig {
             cache_ttl,
             delay_ms,
             debug: args.debug,
+            headful: args.headful,
             browser_path,
             cache_dir,
             data_dir,

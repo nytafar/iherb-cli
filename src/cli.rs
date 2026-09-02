@@ -122,14 +122,26 @@ pub struct GlobalArgs {
     #[arg(long, global = true, verbatim_doc_comment)]
     pub json: bool,
 
-    /// Show a real browser window and log at debug level.
+    /// Log at debug level and dump every fetched page to disk.
     ///
-    /// Both, and the window is the half that used to be missing (#47): this
-    /// only turned the logging up, so "headed mode" described something that
-    /// did not happen and a wedged page could not be looked at. Debug logging
-    /// also dumps each fetched page to `/tmp/iherb_*.html`.
+    /// Headless, and that is the point (#62). The dump is the cheapest way to
+    /// see what iHerb actually served, and it used to require a visible
+    /// browser window, which made it unavailable in CI, over SSH and in an
+    /// unattended run — exactly where "the scraper broke and I cannot see the
+    /// page" gets asked. Dumps land in the `dumps` subdirectory of the cache
+    /// directory `cache path` prints. For a window to watch, add `--headful`.
     #[arg(long, global = true, verbatim_doc_comment)]
     pub debug: bool,
+
+    /// Show a real browser window. Implies nothing else.
+    ///
+    /// The window is the half of `--debug` that used to be missing (#47) and
+    /// is now a flag of its own (#62): it turns no logging up and writes no
+    /// dump, and `--debug --headful` is the old combined behaviour. This is
+    /// the flag for watching a page load, or for completing a Cloudflare
+    /// challenge by hand.
+    #[arg(long, global = true, verbatim_doc_comment)]
+    pub headful: bool,
 }
 
 impl GlobalArgs {
@@ -152,6 +164,7 @@ impl GlobalArgs {
             delay: None,
             json: false,
             debug: false,
+            headful: false,
         }
     }
 }

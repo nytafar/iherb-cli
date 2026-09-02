@@ -35,7 +35,11 @@ use iherb_cli::fetch::{fetch_on, FetchTarget, Paging, Provenance};
 
 /// A config that touches nothing on disk that matters: caching off, no delay,
 /// cache and data directories under a temp path of the test's own.
-fn test_config(scratch: &Path, debug: bool) -> AppConfig {
+///
+/// `debug` and `headful` are separate arguments because #62 made them separate
+/// flags: a config with one set and not the other is the case the tests below
+/// exist for, and a single `debug` parameter could not express it.
+fn test_config(scratch: &Path, debug: bool, headful: bool) -> AppConfig {
     AppConfig {
         country: "us".to_string(),
         // #5 made this Option<String>; None is the new default and asserts nothing,
@@ -45,6 +49,7 @@ fn test_config(scratch: &Path, debug: bool) -> AppConfig {
         cache_ttl: iherb_cli::config::DEFAULT_CACHE_TTL,
         delay_ms: 0,
         debug,
+        headful,
         browser_path: None,
         cache_dir: scratch.join("cache"),
         data_dir: scratch.join("data"),
@@ -192,13 +197,13 @@ fn argv_recorder(dir: &Path) -> (PathBuf, PathBuf) {
 }
 
 /// Launch against the recorder and return the argv Chrome would have received.
-async fn captured_argv(scratch: &Path, debug: bool) -> Vec<String> {
+async fn captured_argv(scratch: &Path, debug: bool, headful: bool) -> Vec<String> {
     let (exe, argv_file) = argv_recorder(scratch);
     let sweep = SweepProfileDirs::since(&profile_dirs());
 
     // Expected to fail: the recorder is not a browser. The argv it wrote down
     // on its way out is the whole point.
-    let _ = BrowserSession::launch(exe, &test_config(scratch, debug)).await;
+    let _ = BrowserSession::launch(exe, &test_config(scratch, debug, headful)).await;
 
     // #46: a launch that fails still created a profile directory, and nothing
     // else will ever clean it up — `close` and `Drop` both belong to a session
@@ -247,27 +252,70 @@ fn headless_args(argv: &[String]) -> Vec<&String> {
         .collect()
 }
 
-/// #47. `--debug` is documented as "run browser in headed mode", and until #47
-/// it did not: `HeadlessMode::True` is chromiumoxide's builder default, nothing
-/// called `with_head()`, and real Chrome argv for a `--debug` run contained a
-/// bare `--headless`. Observed on 2026-08-31 against system Chrome before the
-/// fix; this is the same observation, made from a test.
+/// #47, now asked of `--headful`. The flag that documents a visible window is
+/// documented as producing one, and until #47 nothing did:
+/// `HeadlessMode::True` is chromiumoxide's builder default, nothing called
+/// `with_head()`, and real Chrome argv for such a run contained a bare
+/// `--headless`. Observed on 2026-08-31 against system Chrome before the fix;
+/// this is the same observation, made from a test. #62 moved the window from
+/// `--debug` to `--headful` and this assertion moved with it.
 #[tokio::test]
-async fn debug_launches_a_headful_browser() {
+async fn headful_launches_a_headful_browser() {
     let _serial = ONE_AT_A_TIME.lock().await;
     let scratch = Scratch::new("headful");
-    let argv = captured_argv(scratch.path(), true).await;
+    let argv = captured_argv(scratch.path(), false, true).await;
 
     assert_argv_is_ours(&argv);
     assert!(
         headless_args(&argv).is_empty(),
-        "--debug must not put Chrome in headless mode, but argv carried {:?}",
+        "--headful must not put Chrome in headless mode, but argv carried {:?}",
         headless_args(&argv)
     );
 }
 
-/// The other half of #47: fixing `--debug` must not quietly un-headless the
-/// default path, which is every non-interactive run this tool exists for.
+/// #62. `--debug` is the HTML dump and the verbose logging, and it must not
+/// drag a window along with them.
+///
+/// This is the whole point of the split: the dump is the cheapest diagnosis
+/// this repo has, and while `--debug` implied a window it could not be taken in
+/// CI, over an SSH session, or in an unattended run — the environments where
+/// "the scraper broke and I cannot see the page" is the question being asked.
+/// So `--debug` on its own has to come out headless, exactly like a default
+/// run.
+#[tokio::test]
+async fn debug_alone_stays_headless() {
+    let _serial = ONE_AT_A_TIME.lock().await;
+    let scratch = Scratch::new("debug-headless");
+    let argv = captured_argv(scratch.path(), true, false).await;
+
+    assert_argv_is_ours(&argv);
+    assert_eq!(
+        headless_args(&argv),
+        vec!["--headless=new"],
+        "--debug without --headful must stay headless-new, so the dump works \
+         where there is no display; argv was {:?}",
+        argv
+    );
+}
+
+/// The two together are still the old combined behaviour: a window *and* the
+/// verbose logging, for when you genuinely want to watch the page load.
+#[tokio::test]
+async fn debug_and_headful_together_are_headful() {
+    let _serial = ONE_AT_A_TIME.lock().await;
+    let scratch = Scratch::new("debug-headful");
+    let argv = captured_argv(scratch.path(), true, true).await;
+
+    assert_argv_is_ours(&argv);
+    assert!(
+        headless_args(&argv).is_empty(),
+        "--debug --headful must open a window, but argv carried {:?}",
+        headless_args(&argv)
+    );
+}
+
+/// The other half of #47: fixing the headful path must not quietly un-headless
+/// the default path, which is every non-interactive run this tool exists for.
 ///
 /// `--headless=new` exactly once, not a bare `--headless` and not the
 /// `----headless=new` that #36 found 0.9 would have produced from a switch
@@ -276,13 +324,13 @@ async fn debug_launches_a_headful_browser() {
 async fn a_default_run_is_still_headless_new() {
     let _serial = ONE_AT_A_TIME.lock().await;
     let scratch = Scratch::new("headless");
-    let argv = captured_argv(scratch.path(), false).await;
+    let argv = captured_argv(scratch.path(), false, false).await;
 
     assert_argv_is_ours(&argv);
     assert_eq!(
         headless_args(&argv),
         vec!["--headless=new"],
-        "a run without --debug must be headless-new exactly once; argv was {:?}",
+        "a run without --headful must be headless-new exactly once; argv was {:?}",
         argv
     );
     assert!(
@@ -335,7 +383,7 @@ async fn an_interrupt_during_launch_leaves_no_profile_directory() {
     };
 
     let scratch = Scratch::new("interrupt-launch");
-    let config = test_config(scratch.path(), false);
+    let config = test_config(scratch.path(), false, false);
     let before = profile_dirs();
     // #53. Constructed before the assertions and read by none of them: its only
     // job is to run on the unwind path, so that a red run of this test — the
@@ -397,7 +445,7 @@ async fn a_panic_unwinding_past_a_session_leaves_no_profile_directory() {
     };
 
     let scratch = Scratch::new("panic-unwind");
-    let config = test_config(scratch.path(), false);
+    let config = test_config(scratch.path(), false, false);
     // #53, as above: the cleanup has to be on the unwind path, because the
     // assertions below are what does the unwinding.
     let sweep = SweepProfileDirs::since(&profile_dirs());
@@ -592,7 +640,7 @@ async fn a_batch_does_not_accumulate_a_tab_per_target() {
     };
 
     let scratch = Scratch::new("tabs");
-    let config = test_config(scratch.path(), false);
+    let config = test_config(scratch.path(), false, false);
     // #53. This test is not one of the two the issue names, and under working
     // production code it does not leak: every assertion below is upstream of
     // `close`, but `session` is a live local, so an unwind drops it and the

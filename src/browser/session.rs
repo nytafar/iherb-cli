@@ -196,15 +196,19 @@ impl BrowserSession {
         // Headless is a *mode* on the builder, not a switch in `args`, and the
         // mode defaults to `HeadlessMode::True` (#47). Setting `("headless",
         // "new")` as an ordinary arg therefore never produced a headful
-        // browser: on the `--debug` path nothing was set, the default mode
+        // browser: on the headful path nothing was set, the default mode
         // still appended `--headless`, and the flag only ever changed logging.
         // It looked right on the headless path purely by accident — the mode
         // appends a *valueless* `headless` key, which merges into the `new`
         // value already under that key and comes out as `--headless=new`.
         //
-        // `--debug` has to be genuinely headful: #12's `setup` command exists so
-        // a human can complete a Cloudflare challenge in a window they can see.
-        builder = if config.debug {
+        // The window belongs to `--headful` alone (#62). It used to belong to
+        // `--debug`, which meant the HTML dump — the cheapest diagnosis this
+        // repo has — could not be taken without a display, so it was
+        // unavailable in CI, over SSH and in an unattended run. What genuinely
+        // wants a window is a human completing a Cloudflare challenge, and
+        // that is what `--headful` is now for.
+        builder = if config.headful {
             builder.with_head()
         } else {
             builder.new_headless_mode()

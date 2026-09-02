@@ -151,7 +151,8 @@ Take 1 capsule daily with or without food.
 | `--config <path>` | Read this config file instead of the one under the user's config dir | — |
 | `--delay <ms>` | Delay between requests in milliseconds | `2000` |
 | `--json` | Emit one JSON document on stdout instead of Markdown — see below | — |
-| `--debug` | Run the browser headed (a visible window), log at debug level, and print the provenance table | — |
+| `--debug` | Log at debug level, dump every fetched page to disk, and print the provenance table. Headless, so it works in CI and over SSH | — |
+| `--headful` | Show a real browser window. Implies nothing else | — |
 
 ```bash
 # Swiss storefront in Swiss francs, whatever your IP says you are
@@ -160,8 +161,11 @@ iherb-cli search "magnesium" --country ch --currency CHF
 # Fast mode (shorter delay between requests)
 iherb-cli search "zinc" --delay 500
 
-# Debug with visible browser
+# Verbose logging and an HTML dump, with no window and no display needed
 iherb-cli product 61864 --debug
+
+# Both, when you want to watch the page load as well
+iherb-cli product 61864 --debug --headful
 
 # Re-read the page and keep the new answer
 iherb-cli product 61864 --refresh
