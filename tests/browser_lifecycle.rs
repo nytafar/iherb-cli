@@ -722,3 +722,87 @@ async fn a_batch_does_not_accumulate_a_tab_per_target() {
         left
     );
 }
+
+// ---------------------------------------------------------------------------
+// #10: no `Arc<Mutex<Browser>>` serialising page creation
+// ---------------------------------------------------------------------------
+
+/// **Concurrent page creation is not serialised.**
+///
+/// `BrowserSession::new_page` used to lock an `Arc<Mutex<Browser>>` for the
+/// whole of the call — the entire CDP round trip, not just the moment the
+/// request is sent. `Browser::new_page` takes `&self`, so chromiumoxide never
+/// needed that exclusion: it multiplexes commands over one websocket
+/// connection by request id and matches each response to whoever is waiting
+/// on it. The lock bought #10 the one thing it exists to remove — a second
+/// concurrent page creation could not even *send* its CDP request until the
+/// first one's response had come back, so `--concurrency` built on top of it
+/// would have serialised page creation exactly as hard as one browser per
+/// product did (#45).
+///
+/// The measurement: create several pages one at a time and time it, then
+/// create the same number concurrently and time that. Serialised, the two
+/// numbers are close — each concurrent call still waits for the one before it
+/// to finish before its own request is even sent. Pipelined, the concurrent
+/// run is bounded by roughly one round trip, not `N` of them. The margin
+/// asked for is generous — under three quarters of the sequential time — so
+/// ordinary CI jitter cannot make this flicker; reintroducing the mutex fails
+/// it every time, because then the two numbers are the same measurement
+/// twice.
+#[tokio::test]
+async fn concurrent_page_creation_is_not_serialised() {
+    let _serial = ONE_AT_A_TIME.lock().await;
+    let Some(chrome) = system_chrome() else {
+        eprintln!("SKIPPED: no system Chrome; this test needs a real browser");
+        return;
+    };
+
+    let scratch = Scratch::new("concurrent-pages");
+    let config = test_config(scratch.path(), false, false);
+    let sweep = SweepProfileDirs::since(&profile_dirs());
+    let session = BrowserSession::launch(chrome, &config)
+        .await
+        .expect("failed to launch the browser");
+
+    const N: usize = 6;
+
+    // Warm up: the first page a fresh browser creates pays a one-off cost
+    // (process and renderer startup) that has nothing to do with locking, and
+    // would otherwise land in whichever measurement runs first and skew it.
+    let warm = session.new_page().await.expect("failed to warm up");
+    let _ = warm.close().await;
+
+    let sequential_start = std::time::Instant::now();
+    for _ in 0..N {
+        let page = session.new_page().await.expect("failed to create page");
+        let _ = page.close().await;
+    }
+    let sequential = sequential_start.elapsed();
+
+    let concurrent_start = std::time::Instant::now();
+    let pages = futures::future::join_all((0..N).map(|_| session.new_page())).await;
+    let concurrent = concurrent_start.elapsed();
+    for page in pages {
+        let page = page.expect("failed to create page concurrently");
+        let _ = page.close().await;
+    }
+
+    let _ = session.close().await;
+    let left = sweep.outstanding();
+    assert!(
+        left.is_empty(),
+        "profile directories left behind: {:?}",
+        left
+    );
+
+    assert!(
+        concurrent < sequential.mul_f64(0.75),
+        "concurrent page creation ({:?}) was not meaningfully faster than \
+         sequential ({:?}) for {} pages; a Mutex around Browser::new_page \
+         would serialise page creation exactly like this, which is the \
+         regression this test exists to catch",
+        concurrent,
+        sequential,
+        N
+    );
+}

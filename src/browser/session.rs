@@ -5,8 +5,6 @@ use chromiumoxide::Page;
 use futures::StreamExt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 const STEALTH_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -392,7 +390,25 @@ pub struct BrowserSession {
     /// into is removed. The other order asks the filesystem to delete a tree a
     /// live browser is still adding files to, which is how a half-removed
     /// directory gets left behind.
-    browser: Arc<Mutex<Browser>>,
+    ///
+    /// # No `Arc<Mutex<..>>` any more (#10)
+    ///
+    /// `Browser::new_page` and `Browser::pages` take `&self`, not `&mut self`
+    /// — chromiumoxide multiplexes CDP commands over one websocket connection
+    /// by request id, matching each response to the caller that is waiting on
+    /// it, so concurrent callers need no exclusion at all. The `Mutex` this
+    /// used to be wrapped in bought nothing for either of them and cost #10's
+    /// whole point: a caller awaits the *entire* round trip of `new_page`
+    /// while holding the lock, so a second concurrent page creation could not
+    /// even send its CDP request until the first one's response had come
+    /// back. `--concurrency` built on top of that would have serialised page
+    /// creation exactly as hard as one browser per product did — #45's
+    /// finding, confirmed here rather than assumed.
+    ///
+    /// `close` is the one method that still needs exclusivity, and it gets it
+    /// for free: it takes `self` by value, so `&mut self.browser` borrows a
+    /// value nothing else can be holding a reference to.
+    browser: Browser,
     _handle: tokio::task::JoinHandle<()>,
     profile: ProfileDir,
 }
@@ -491,15 +507,15 @@ impl BrowserSession {
         });
 
         Ok(BrowserSession {
-            browser: Arc::new(Mutex::new(browser)),
+            browser,
             _handle: handle,
             profile,
         })
     }
 
     pub async fn new_page(&self) -> Result<Page, IherbError> {
-        let browser = self.browser.lock().await;
-        let page = browser
+        let page = self
+            .browser
             .new_page("about:blank")
             .await
             .map_err(|e| IherbError::BrowserLaunch(format!("Failed to create page: {}", e)))?;
@@ -544,8 +560,8 @@ impl BrowserSession {
     /// `Page::close` returns, because closing is a request rather than an
     /// answer. A caller that wants a settled count has to read twice.
     pub async fn open_page_urls(&self) -> Result<Vec<String>, IherbError> {
-        let browser = self.browser.lock().await;
-        let pages = browser
+        let pages = self
+            .browser
             .pages()
             .await
             .map_err(|e| IherbError::BrowserLaunch(format!("Failed to list pages: {}", e)))?;
@@ -567,9 +583,11 @@ impl BrowserSession {
     /// belongs to `self`, which drops on the way out of here whatever the close
     /// said, and drops the same way when a panic unwinds past a session or an
     /// interrupt abandons one.
-    pub async fn close(self) -> Result<(), IherbError> {
+    pub async fn close(mut self) -> Result<(), IherbError> {
         let closed = {
-            let mut browser = self.browser.lock().await;
+            // `&mut`, not a lock: `close` takes `self` by value, so this
+            // borrows a `Browser` nothing else holds a reference to (#10).
+            let browser = &mut self.browser;
             // Bounded, because it used to not be (#12). `Browser::close` waits
             // for Chrome to answer a CDP request, and a Chrome that has stopped
             // answering never does — so a hung browser hung the CLI at exit
