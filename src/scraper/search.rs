@@ -192,10 +192,8 @@ pub fn parse_search_from_html(
     // publishes one marker for the whole results page, so this is read once and
     // every card gets the same answer — including when the answer is "none".
     let read_currency = detect_currency_from_html(&doc);
-    let currency_source = match read_currency {
-        Some(_) => Source::Dom,
-        None => Source::Absent,
-    };
+    let currency_source = read_currency.source();
+    let read_currency = read_currency.value();
 
     let mut cards_parsed = 0usize;
     let mut products = Vec::new();

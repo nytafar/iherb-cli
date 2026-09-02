@@ -1,3 +1,4 @@
+use crate::model::Source;
 use scraper::{Html, Selector};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -319,7 +320,72 @@ fn document_title(html: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
-/// The currency the page itself declares, or `None` when it declares none.
+/// Symbols that name more than one currency iHerb prices in (#52).
+///
+/// `$` and only `$`, and the list is a list so that the reason is stated once
+/// rather than buried in an `if`. iHerb serves at least seven storefronts that
+/// price in a dollar — US, Canada, Australia, New Zealand, Singapore, Hong Kong
+/// and Mexico — and the glyph is the same on all of them.
+///
+/// **`¥` is the obvious second candidate and is deliberately not here.** It is
+/// JPY on the Japanese storefront and CNY on the Chinese one, which is the same
+/// defect; #52 is about `$`, decided the answer for `$`, and extending the
+/// decision to a symbol the issue did not weigh would be this file deciding
+/// rather than reporting. Filed thinking, not a rule.
+const AMBIGUOUS_CURRENCY_SYMBOLS: &[&str] = &["$"];
+
+/// What a page's currency markers came to (#52).
+///
+/// Three answers rather than an `Option<String>`, because the `Option` could
+/// not tell the two empty ones apart. "The page published no currency at all"
+/// and "the page published a `$` and nothing here can say which dollar" are
+/// different facts about the page, and #28's provenance model has a word for
+/// each: [`Source::Absent`] and [`Source::Malformed`].
+///
+/// Both carry no value. That is the point — the alternative is to guess, and
+/// guessing is what #5 spent two commits removing from this field and #49
+/// removed from the search path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurrencyRead {
+    /// The page named its currency, and this is it.
+    Stated(String),
+    /// The page carried a currency symbol that names more than one of the
+    /// currencies iHerb prices in, and no stronger marker resolved it.
+    ///
+    /// The symbol is carried so the log and any future decision can say which
+    /// one it was.
+    Ambiguous(&'static str),
+    /// No currency marker anywhere on the page.
+    Absent,
+}
+
+impl CurrencyRead {
+    /// The code to put in the record, which only [`CurrencyRead::Stated`] has.
+    pub fn value(self) -> Option<String> {
+        match self {
+            CurrencyRead::Stated(code) => Some(code),
+            CurrencyRead::Ambiguous(_) | CurrencyRead::Absent => None,
+        }
+    }
+
+    /// Where the record should say that value came from (#28).
+    ///
+    /// [`Source::Malformed`] for the ambiguous case, and it is not
+    /// interchangeable with the `None` above: the `None` is the value, and this
+    /// says where it came from. Together they mean "a signal was on the page
+    /// and it could not be resolved", which is what `Malformed` is for, and
+    /// what puts the field on the health report's rot list instead of its
+    /// nothing-here list.
+    pub fn source(&self) -> Source {
+        match self {
+            CurrencyRead::Stated(_) => Source::Dom,
+            CurrencyRead::Ambiguous(_) => Source::Malformed,
+            CurrencyRead::Absent => Source::Absent,
+        }
+    }
+}
+
+/// The currency the page itself declares, and how well it declares it.
 ///
 /// Three readings, strongest first.
 ///
@@ -330,15 +396,14 @@ fn document_title(html: &str) -> Option<&str> {
 ///     (`?country=…&currency=`+`CURRENCY_CODE`). It goes first because it is the
 ///     only one of the three that is unambiguous.
 ///  2. `<meta itemprop="priceCurrency">`, the microdata on a product page.
-///  3. The symbol the price text starts with — a guess, and known to be a weak
-///     one: a bare `$` is USD on the US storefront and CAD, AUD, SGD, HKD, NZD
-///     or MXN on six others iHerb serves. It is kept as a last resort because
-///     it is still a reading of the page, but the rung above it exists so that
-///     it is almost never reached.
-pub fn detect_currency_from_html(doc: &Html) -> Option<String> {
+///  3. The symbol the price text starts with. A last resort, and since #52 an
+///     honest one: a symbol that names one currency is read as that currency,
+///     and a symbol that names several is [`CurrencyRead::Ambiguous`] rather
+///     than a guess at the most likely storefront.
+pub fn detect_currency_from_html(doc: &Html) -> CurrencyRead {
     if let Some(code) = detect_currency_from_globals(doc) {
         tracing::debug!("Detected currency from window.CURRENCY_CODE: {}", code);
-        return Some(code);
+        return CurrencyRead::Stated(code);
     }
 
     if let Ok(sel) = Selector::parse("meta[itemprop='priceCurrency']") {
@@ -347,7 +412,7 @@ pub fn detect_currency_from_html(doc: &Html) -> Option<String> {
                 let code = code.trim().to_uppercase();
                 if !code.is_empty() {
                     tracing::debug!("Detected currency from meta tag: {}", code);
-                    return Some(code);
+                    return CurrencyRead::Stated(code);
                 }
             }
         }
@@ -356,14 +421,26 @@ pub fn detect_currency_from_html(doc: &Html) -> Option<String> {
     if let Ok(sel) = Selector::parse("span.price bdi, div.price bdi, .product-price bdi") {
         if let Some(el) = doc.select(&sel).next() {
             let text: String = el.text().collect::<Vec<_>>().join("").trim().to_string();
-            if let Some(currency) = detect_currency_from_text(&text) {
-                tracing::debug!("Detected currency from price text: {}", currency);
-                return Some(currency);
+            match detect_currency_from_text(&text) {
+                CurrencyRead::Stated(currency) => {
+                    tracing::debug!("Detected currency from price text: {}", currency);
+                    return CurrencyRead::Stated(currency);
+                }
+                CurrencyRead::Ambiguous(symbol) => {
+                    tracing::debug!(
+                        "The price text starts with {}, which names more than one \
+                         currency iHerb serves; reporting no currency rather than \
+                         guessing (#52)",
+                        symbol
+                    );
+                    return CurrencyRead::Ambiguous(symbol);
+                }
+                CurrencyRead::Absent => {}
             }
         }
     }
 
-    None
+    CurrencyRead::Absent
 }
 
 /// Read `window.CURRENCY_CODE = "XXX"` out of the page's inline scripts.
@@ -408,25 +485,39 @@ fn currency_assignment(script: &str) -> Option<String> {
     None
 }
 
-fn detect_currency_from_text(text: &str) -> Option<String> {
+/// The currency a price's leading symbol names, when it names one (#52).
+///
+/// A bare `$` used to be read as USD. It is USD on the US storefront and CAD,
+/// AUD, NZD, SGD, HKD or MXN on six others iHerb serves, so on any of those a
+/// price of `$24.99` was silently labelled USD — a guess wearing a fact's
+/// clothes, and the same class of thing #5 removed from this field and #49
+/// removed from the search path.
+///
+/// The prefixed dollars above it are checked first and still resolve: `CA$`,
+/// `C$`, `A$` and `AU$` name one currency each, and a page that writes one has
+/// said which dollar it means.
+fn detect_currency_from_text(text: &str) -> CurrencyRead {
     let text = text.trim();
-    if text.starts_with('$') {
-        Some("USD".to_string())
-    } else if text.starts_with('€') {
-        Some("EUR".to_string())
-    } else if text.starts_with('£') {
-        Some("GBP".to_string())
-    } else if text.starts_with("CHF") {
-        Some("CHF".to_string())
+    if text.starts_with("CHF") {
+        CurrencyRead::Stated("CHF".to_string())
     } else if text.starts_with("CA$") || text.starts_with("C$") {
-        Some("CAD".to_string())
+        CurrencyRead::Stated("CAD".to_string())
     } else if text.starts_with("A$") || text.starts_with("AU$") {
-        Some("AUD".to_string())
-    } else if text.starts_with("¥") {
-        Some("JPY".to_string())
-    } else if text.starts_with("₩") {
-        Some("KRW".to_string())
+        CurrencyRead::Stated("AUD".to_string())
+    } else if text.starts_with('€') {
+        CurrencyRead::Stated("EUR".to_string())
+    } else if text.starts_with('£') {
+        CurrencyRead::Stated("GBP".to_string())
+    } else if text.starts_with('¥') {
+        CurrencyRead::Stated("JPY".to_string())
+    } else if text.starts_with('₩') {
+        CurrencyRead::Stated("KRW".to_string())
+    } else if let Some(symbol) = AMBIGUOUS_CURRENCY_SYMBOLS
+        .iter()
+        .find(|symbol| text.starts_with(*symbol))
+    {
+        CurrencyRead::Ambiguous(symbol)
     } else {
-        None
+        CurrencyRead::Absent
     }
 }

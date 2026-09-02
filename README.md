@@ -292,6 +292,14 @@ currency you asked for. A number captioned with the wrong currency is worse than
 a number with none: an agent comparing `CHF 9.60` against `CHF 12.00` from a
 real Swiss storefront produces a confidently wrong recommendation.
 
+The same holds for a currency the page published *ambiguously*. iHerb prices in
+a dollar on at least seven storefronts — US, Canada, Australia, New Zealand,
+Singapore, Hong Kong, Mexico — and the glyph is identical on all of them, so a
+price of `$24.99` with nothing else on the page to say which dollar it is comes
+back with no currency and provenance of `malformed`: a signal was there and
+could not be resolved. `CA$`, `C$`, `A$` and `AU$` each name one currency and
+still resolve, as does any page that states its currency outright (#52).
+
 ## JSON output
 
 `--json` replaces the Markdown with exactly one JSON document on stdout. Success

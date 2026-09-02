@@ -36,6 +36,81 @@ fn dom_fallback_reads_every_product_page() {
     }
 }
 
+/// A record from a page that prices in a bare `$` carries no currency, and its
+/// provenance says the signal was unreadable rather than absent (#52).
+///
+/// # Why the fixture is mutated
+///
+/// #52 is a **latent** bug: `window.CURRENCY_CODE` is the first rung of the
+/// ladder since #5, and every capture in this repository carries it, so no
+/// captured page reaches the symbol-sniffing fallback at all. The issue is
+/// about what happens on a storefront that drops the global — so the page here
+/// is a real capture with that one assignment removed, which is exactly that
+/// storefront and nothing else changed.
+///
+/// The removal is asserted before the page is parsed. A mutation that silently
+/// matched nothing would leave the test parsing an ordinary page and passing
+/// for the wrong reason.
+///
+/// # The two assertions are not one assertion twice
+///
+/// `currency` is `None`, and `source_of("currency")` is [`Source::Malformed`].
+/// The first says there is no currency; the second says the page carried a
+/// currency signal we could not resolve. Assert only the first and an
+/// implementation that dropped the value while leaving provenance claiming a
+/// clean DOM read passes — a record that reports absence where the truth is
+/// rot, which is the conflation #28 exists to end.
+#[test]
+fn a_price_in_a_bare_dollar_yields_no_currency_and_says_it_was_unreadable() {
+    let global = r#"CURRENCY_CODE = "USD""#;
+    let html = ULTIMATE_OMEGA.html();
+    assert_eq!(
+        html.matches(global).count(),
+        1,
+        "the fixture no longer states its currency the way this test removes it"
+    );
+    let without_global = html.replace(global, r#"NOT_THE_CURRENCY = "USD""#);
+    assert!(!without_global.contains(global));
+
+    let product = parse_from_html(&without_global, ULTIMATE_OMEGA.product_id(), BASE_URL)
+        .expect("the page still parses; only its currency marker is gone");
+
+    // The page still prices in a bare `$`, which is what makes it the case.
+    assert!(product.price > 0.0);
+    assert_eq!(
+        product.currency, None,
+        "a bare $ was read as a currency; it is USD on the US storefront and \
+         CAD, AUD, NZD, SGD, HKD or MXN on six others iHerb serves"
+    );
+    assert_eq!(
+        product.source_of("currency"),
+        Source::Malformed,
+        "the page carried a currency signal and it could not be resolved, which \
+         is Malformed; Absent would claim the page published none"
+    );
+    assert!(
+        product
+            .health()
+            .fields_malformed
+            .contains(&"currency".to_string()),
+        "an unresolvable currency belongs on the rot list, not the nothing-here list"
+    );
+    assert!(
+        product.health().degraded,
+        "a malformed field is the 'our reading of this page is broken' signal"
+    );
+
+    // And the same page unmutated is unchanged: a stated currency is read, and
+    // provenance vouches for it.
+    let stated = parse_from_html(html, ULTIMATE_OMEGA.product_id(), BASE_URL).unwrap();
+    assert_eq!(stated.currency.as_deref(), Some(ULTIMATE_OMEGA.currency()));
+    assert_eq!(stated.source_of("currency"), Source::Dom);
+    assert!(!stated
+        .health()
+        .fields_malformed
+        .contains(&"currency".to_string()));
+}
+
 /// The DOM fallback reaches the same headline numbers as JSON-LD, which is what
 /// makes it a usable fallback rather than a different answer.
 #[test]

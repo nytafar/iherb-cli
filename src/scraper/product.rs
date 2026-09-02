@@ -829,6 +829,7 @@ pub fn parse_from_html(
     // markers we could not read had the caller's guess printed against iHerb's
     // numbers (#5).
     let read_currency = detect_currency_from_html(&doc);
+    let currency_source = read_currency.source();
 
     let product_url = format!("{}/pr/p/{}", base_url, product_id);
 
@@ -837,7 +838,7 @@ pub fn parse_from_html(
         brand,
         price,
         original_price,
-        currency: read_currency,
+        currency: read_currency.value(),
         rating,
         review_count,
         product_url,
@@ -865,6 +866,14 @@ pub fn parse_from_html(
     // Always synthesised from the id: the DOM strategy never reads a canonical
     // product URL off the page.
     product.extraction.reclaim("product_url", Source::Defaulted);
+
+    // Reclaimed even when the page named its currency, because `read_currency`
+    // is the only thing that knows *how well* it named it. A page whose price
+    // starts with a bare `$` carries no currency and is `Source::Malformed`,
+    // not `Source::Absent`: a signal was on the page and could not be resolved,
+    // and `claim_unattributed` would file the resulting `None` as ordinary
+    // absence (#52).
+    product.extraction.reclaim("currency", currency_source);
 
     // The DOM strategy enriches from the DOM like every other path does. It
     // reads most of the same elements twice as a result, which is the price of

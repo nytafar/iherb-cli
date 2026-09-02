@@ -1,7 +1,9 @@
 //! `parse_price_str`, `parse_review_count`, `detect_currency_from_html`.
 
+use iherb_cli::model::Source;
 use iherb_cli::scraper::helpers::{
     detect_currency_from_globals, detect_currency_from_html, parse_price_str, parse_review_count,
+    CurrencyRead,
 };
 use scraper::Html;
 
@@ -88,14 +90,16 @@ fn only_a_lone_whole_number_is_a_review_count() {
 fn currency_is_detected_from_the_captured_pages() {
     for f in fixture::products() {
         assert_eq!(
-            detect_currency_from_html(&f.doc()).as_deref(),
+            detect_currency_from_html(&f.doc()).value().as_deref(),
             Some(f.currency()),
             "{}",
             f.slug()
         );
     }
     assert_eq!(
-        detect_currency_from_html(&SEARCH_VITAMIN_C.doc()).as_deref(),
+        detect_currency_from_html(&SEARCH_VITAMIN_C.doc())
+            .value()
+            .as_deref(),
         Some("USD")
     );
 }
@@ -119,7 +123,10 @@ fn currency_comes_from_the_storefront_global_first() {
            <body><meta itemprop="priceCurrency" content="USD">
            <span class="price"><bdi>$9.60</bdi></span></body></html>"#,
     );
-    assert_eq!(detect_currency_from_html(&page).as_deref(), Some("CHF"));
+    assert_eq!(
+        detect_currency_from_html(&page).value().as_deref(),
+        Some("CHF")
+    );
 
     // And it is the rung the captures take, search page included — that one
     // carries no `priceCurrency` microdata at all, so before this its currency
@@ -159,10 +166,14 @@ fn a_currency_global_that_is_not_a_code_is_not_read() {
 #[test]
 fn currency_falls_back_to_the_meta_tag_then_to_the_price_text() {
     let meta = Html::parse_document(r#"<meta itemprop="priceCurrency" content="chf">"#);
-    assert_eq!(detect_currency_from_html(&meta).as_deref(), Some("CHF"));
+    assert_eq!(
+        detect_currency_from_html(&meta).value().as_deref(),
+        Some("CHF")
+    );
 
+    // `$` is not in this list any more; it is the whole of #52 and has its own
+    // test below. Every symbol here names exactly one currency iHerb prices in.
     for (text, expected) in [
-        ("$9.60", "USD"),
         ("€9,60", "EUR"),
         ("£9.60", "GBP"),
         ("CHF 9.60", "CHF"),
@@ -176,7 +187,7 @@ fn currency_falls_back_to_the_meta_tag_then_to_the_price_text() {
             text
         ));
         assert_eq!(
-            detect_currency_from_html(&doc).as_deref(),
+            detect_currency_from_html(&doc).value().as_deref(),
             Some(expected),
             "{}",
             text
@@ -184,16 +195,135 @@ fn currency_falls_back_to_the_meta_tag_then_to_the_price_text() {
     }
 }
 
+/// A bare `$` is not a currency, and the record says so twice (#52).
+///
+/// # Both halves are pinned, and neither is the other
+///
+/// The value is `None` and the provenance is [`Source::Malformed`]. They are
+/// not two ways of saying one thing: the `None` says there is no currency, and
+/// the `Malformed` says where the nothing came from — a signal that was on the
+/// page and could not be resolved. A test asserting only the `None` would pass
+/// against an implementation that dropped the value and left provenance
+/// claiming a clean DOM read, which is a page reporting *absence* where the
+/// truth is *unreadable*, and #28 exists to keep those apart.
+///
+/// # Why `$` and not the others
+///
+/// iHerb prices in a dollar on at least seven storefronts — US, Canada,
+/// Australia, New Zealand, Singapore, Hong Kong, Mexico — and the glyph is the
+/// same on all of them, so `$24.99` read as USD is a guess wearing a fact's
+/// clothes. `CA$`, `C$`, `A$` and `AU$` each name one currency and are
+/// unchanged; so is every non-dollar symbol, and so is a page that states its
+/// currency outright, which is the rung above this one and the rung every
+/// capture in this repository takes.
+#[test]
+fn a_bare_dollar_is_ambiguous_rather_than_usd() {
+    let doc = Html::parse_document(r#"<span class="price"><bdi>$24.99</bdi></span>"#);
+    let read = detect_currency_from_html(&doc);
+
+    assert_eq!(
+        read,
+        CurrencyRead::Ambiguous("$"),
+        "a bare $ was resolved to a currency; it names seven storefronts iHerb serves"
+    );
+    assert_eq!(
+        read.clone().value(),
+        None,
+        "the value must be nothing at all, not a most-likely guess"
+    );
+    assert_eq!(
+        read.source(),
+        Source::Malformed,
+        "a signal that was on the page and could not be read is Malformed; \
+         Absent would claim the page published no currency, and Dom would have \
+         provenance vouch for a value that does not exist"
+    );
+    assert!(
+        !read.source().is_attested(),
+        "nothing was read off the page, so nothing may be attested"
+    );
+
+    // The two ways the storefront does disambiguate, unchanged. A prefixed
+    // dollar names one currency...
+    for (text, expected) in [("CA$24.99", "CAD"), ("C$24.99", "CAD"), ("A$24.99", "AUD")] {
+        let doc = Html::parse_document(&format!(
+            r#"<span class="price"><bdi>{}</bdi></span>"#,
+            text
+        ));
+        assert_eq!(
+            detect_currency_from_html(&doc),
+            CurrencyRead::Stated(expected.to_string()),
+            "{} names one currency and must still resolve",
+            text
+        );
+    }
+
+    // ...and a page that states its currency outright is answered from the
+    // statement, whatever its prices are printed with. This is the rung all
+    // twelve captures take, which is why #52 is a latent bug rather than a live
+    // one — and why a test that only swept the captures would prove nothing.
+    let stated = Html::parse_document(
+        r#"<html><head><script>window.CURRENCY_CODE = "SGD";</script></head>
+           <body><span class="price"><bdi>$24.99</bdi></span></body></html>"#,
+    );
+    assert_eq!(
+        detect_currency_from_html(&stated),
+        CurrencyRead::Stated("SGD".to_string())
+    );
+    assert_eq!(detect_currency_from_html(&stated).source(), Source::Dom);
+
+    let meta = Html::parse_document(
+        r#"<html><head><meta itemprop="priceCurrency" content="HKD"></head>
+           <body><span class="price"><bdi>$24.99</bdi></span></body></html>"#,
+    );
+    assert_eq!(
+        detect_currency_from_html(&meta),
+        CurrencyRead::Stated("HKD".to_string())
+    );
+}
+
+/// The three answers carry three different provenances (#52, #28).
+///
+/// The mapping in one place, so that a fourth answer added later has to decide
+/// what it claims rather than inheriting whatever the last arm returned.
+#[test]
+fn each_currency_reading_claims_its_own_provenance() {
+    assert_eq!(
+        CurrencyRead::Stated("NOK".to_string()).source(),
+        Source::Dom
+    );
+    assert_eq!(CurrencyRead::Ambiguous("$").source(), Source::Malformed);
+    assert_eq!(CurrencyRead::Absent.source(), Source::Absent);
+
+    assert!(CurrencyRead::Stated("NOK".to_string())
+        .source()
+        .is_attested());
+    assert!(!CurrencyRead::Ambiguous("$").source().is_attested());
+    assert!(!CurrencyRead::Absent.source().is_attested());
+
+    assert_eq!(
+        CurrencyRead::Stated("NOK".to_string()).value(),
+        Some("NOK".to_string())
+    );
+    assert_eq!(CurrencyRead::Ambiguous("$").value(), None);
+    assert_eq!(CurrencyRead::Absent.value(), None);
+}
+
 /// The case #5 is actually about: when the page carries no currency marker the
 /// caller substitutes its own `--currency` label, and a US price is then
 /// printed as CHF. This is where detection has to fail for that to happen.
 #[test]
 fn currency_detection_falls_through_on_a_page_with_no_markers() {
-    assert_eq!(detect_currency_from_html(&fixture::empty_doc()), None);
+    assert_eq!(
+        detect_currency_from_html(&fixture::empty_doc()),
+        CurrencyRead::Absent
+    );
 
-    // An unrecognised symbol is a fall-through too, not a guess.
+    // An unrecognised symbol is a fall-through too, not a guess. `R$` is the
+    // Brazilian real and is `Absent` rather than ambiguous: the page named a
+    // currency this tool does not know, which is not the same as naming several.
     let doc = Html::parse_document(r#"<span class="price"><bdi>R$ 9,60</bdi></span>"#);
-    assert_eq!(detect_currency_from_html(&doc), None);
+    assert_eq!(detect_currency_from_html(&doc), CurrencyRead::Absent);
 
     // The captured pages never take that branch — B_COMPLEX has the meta tag.
     assert!(B_COMPLEX.html().contains("priceCurrency"));
